@@ -142,8 +142,8 @@ class LocalLogPrivacyTest {
                 new ToolRegistry(List.of(read)), new ChatStatusEmitter(), new Usage())
                 .execute(plan("summarise the statement"), fileTask(), (provider, reply) -> billed.add(reply));
 
-        assertTrue(outcome.text().contains("Local LLM call failed: [ollama] the conversation is longer "
-                + "than the model's 262,144-token context window"), outcome.text());
+        assertTrue(outcome.text().contains("Local LLM call failed: [ollama] a request of 250,000 tokens and a reply "
+                + "of 12,144 tokens filled the model's 262,144-token context window"), outcome.text());
         assertFalse(outcome.ok(), "a failed delegation: the cloud takes the work back");
         assertEquals(List.of(2, 262_144), billed.stream().map(LlmResponse::totalTokens).toList(),
                 "the cut-off reply was generated, and the task's account is handed it");

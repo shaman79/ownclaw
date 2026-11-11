@@ -36,7 +36,7 @@ class LiveCallTaskTest {
 
     /** The chat's progress rows, oldest first. */
     static List<String> rows(LoopRig rig) {
-        return rig.jdbc.queryForList("SELECT content FROM conversations WHERE role = 'progress' ORDER BY id",
+        return rig.jdbc.queryForList("SELECT content FROM conversations WHERE role = 'progress' ORDER BY rowid",
                 String.class);
     }
 
@@ -248,18 +248,18 @@ class LiveCallTaskTest {
             AgentResult r = rig.loop.executeFull("u1", "check the routers", false, row, List.of(), channel);
 
             assertEquals(AgentResult.TerminationReason.COMPLETED, r.terminationReason(), r.response());
-            var told = rows(rig).stream().filter(t -> t.contains("model has been at it for")).toList();
+            var told = rows(rig).stream().filter(t -> t.contains("model's call has run")).toList();
             if (channel == TaskChat.Channel.WEB) {
                 assertEquals(List.of(), told, "the web chat shows the call as it runs: nothing more is said");
                 continue;
             }
             assertEquals(1, told.size(), "once, however long it runs: " + rows(rig));
-            assertTrue(told.get(0).startsWith("☁️ Step 1: the cloud model has been at it for "), told.get(0));
-            assertTrue(told.get(0).contains(", reasoning, "), "what it is doing: " + told.get(0));
+            assertTrue(told.get(0).startsWith("☁️ Step 1: the cloud model's call has run "), told.get(0));
+            assertTrue(told.get(0).contains(": reasoning, "), "what it is doing: " + told.get(0));
             assertTrue(told.get(0).endsWith(" characters so far. /cancel stops it, and all other running work with it."),
                     told.get(0));
             assertTrue(statuses.stream().anyMatch(m -> m.type() == StatusMessage.Type.PROGRESS_MESSAGE
-                    && m.text().contains("model has been at it for") && Boolean.TRUE.equals(m.data().get("telegram"))),
+                    && m.text().contains("model's call has run") && Boolean.TRUE.equals(m.data().get("telegram"))),
                     "and sent to Telegram");
         }
         // Mutation: drop the channel check in TaskChat#longCall -> the web chat is told too.

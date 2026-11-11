@@ -127,9 +127,9 @@ class LiveCallTest {
     void whatACallIsDoing() {
         var ctx = task(1);
         LiveCall call = ctx.call(OLLAMA, true, ctx.atStep(null));
-        assertEquals("0s, loading the model and reading the prompt, nothing written yet", call.doing());
+        assertEquals("0s with nothing written yet", call.doing());
         call.received(Part.REASONING, "Checking the router.\n");
-        assertEquals("0s, reasoning, 21 characters so far", call.doing());
+        assertEquals("0s: reasoning, 21 characters so far", call.doing());
     }
 
     @Test

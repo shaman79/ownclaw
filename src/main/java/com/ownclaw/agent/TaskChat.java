@@ -269,7 +269,7 @@ public final class TaskChat {
 
     /**
      * A model call of the task ended because its reply ran on until it filled the model's context
-     * window ({@link com.ownclaw.llm.OutputTruncated#replyFilledTheWindow}): which call, how long
+     * window ({@link com.ownclaw.llm.OutputTruncated#replyRanOn}): which call, how long
      * it ran and how much it wrote -- figures only, nothing of the text -- and what follows. Said,
      * because the owner watched the reply grow and would otherwise see it simply stop.
      *
@@ -285,8 +285,8 @@ public final class TaskChat {
 
     /**
      * A model call of a task asked from Telegram has run long: said there once, with what it is doing
-     * -- reading its prompt or waiting its turn, which writes nothing, or writing, and how much --
-     * and how to stop it. The web chat shows every call as it runs (LiveCall); Telegram is told none
+     * -- nothing written yet, waiting its turn or reading its prompt, or writing, and how much -- and
+     * how to stop it. The web chat shows every call as it runs (LiveCall); Telegram is told none
      * of that, and nothing ends a call for its length. /cancel there has no chat to keep to: it
      * stops everything running, which the note says.
      */
@@ -294,7 +294,7 @@ public final class TaskChat {
         if (sessionId == null || channel != Channel.TELEGRAM) return;
         String purpose = call.purpose();
         note((call.local() ? Actor.LOCAL : Actor.CLOUD).emoji + " " + Character.toUpperCase(purpose.charAt(0))
-                + purpose.substring(1) + ": the " + (call.local() ? "local" : "cloud") + " model has been at it for "
+                + purpose.substring(1) + ": the " + (call.local() ? "local" : "cloud") + " model's call has run "
                 + call.doing() + ". /cancel stops it, and all other running work with it.");
     }
 

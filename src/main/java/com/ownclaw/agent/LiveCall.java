@@ -29,7 +29,7 @@ import java.util.Map;
  * It ends nothing. No reply is ended for its length or for what it holds -- its reasoning, its
  * answer, a tool call's arguments: a runaway is seen as it grows, its characters so far in the
  * owner's chat ({@link #shown}), and Stop ends it; otherwise the model's own limits do -- its
- * maximum output, its context window ({@code OutputTruncated#replyFilledTheWindow}). It used to
+ * maximum output, its context window ({@code OutputTruncated#replyRanOn}). It used to
  * end a reply whose text repeated: four copies of any 300 characters, and for a tool call ten
  * checks in a row that found some -- about 18,000 characters of records. Each ended data: a table,
  * a grid of zeros, a dashboard's cards, a script the model drafts in its reasoning before calling.
@@ -115,13 +115,16 @@ public final class LiveCall implements LlmProgress, AutoCloseable {
     public String purpose() { return purpose; }
 
     /**
-     * What the call is doing, and for how long: "10m 3s, reasoning, 42,000 characters so far", or
-     * "10m 3s, loading the model and reading the prompt, nothing written yet".
+     * What the call is doing, and for how long: "10m 3s: reasoning, 42,000 characters so far", or,
+     * before its first words, "10m 3s with nothing written yet". A call can be made before it waits
+     * for the local model to be free (codegen, a skill's analysis), so nothing written is said
+     * without saying why.
      */
     public synchronized String doing() {
+        String time = elapsed(System.currentTimeMillis() - startedAt);
         int chars = reasoning.length() + answer.length();
-        return elapsed(System.currentTimeMillis() - startedAt) + ", " + phase() + ", "
-                + (chars == 0 ? "nothing written yet" : String.format(Locale.ROOT, "%,d characters so far", chars));
+        return last == null || chars == 0 ? time + " with nothing written yet"
+                : time + ": " + phase() + ", " + String.format(Locale.ROOT, "%,d characters so far", chars);
     }
 
     /** "23m 5s and 41,200 characters": how long the call has run and how much it has written. */

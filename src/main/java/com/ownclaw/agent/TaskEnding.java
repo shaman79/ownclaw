@@ -218,7 +218,7 @@ final class TaskEnding {
             // and sent the owner back into a chat whose every later task read the whole of it,
             // this ending too, and failed the same way.
             case CONTEXT_WINDOW -> "A message sent" + (unattended ? in : " in this chat") + " is read with "
-                    + "the whole chat, this ending included, so it is likely to be too long as well: start "
+                    + "the whole chat, this ending included, so it is likely to fill the window too: start "
                     + "a new chat (/new) to carry on, and say there what it needs from this one.";
             default -> "Your next message" + in + " starts a new task, which reads this message.";
         };

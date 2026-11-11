@@ -621,7 +621,7 @@ class TaskEndToEndTest {
         assertTrue(first.contains("[Step 1's result is ") && first.contains(log), "the older of two equals first: " + first.length());
         assertTrue(sentTo(rig, 4).contains("[Step 2's result is "), "then the other, the next round");
         assertTrue(r.response().contains("**Next:** A message sent in this chat is read with the whole chat, "
-                + "this ending included, so it is likely to be too long as well: start a new chat (/new) to "
+                + "this ending included, so it is likely to fill the window too: start a new chat (/new) to "
                 + "carry on, and say there what it needs from this one."), r.response());
         assertFalse(r.response().contains("Your next message starts a new task, which reads this message"),
                 "the owner was sent back into the chat that could no longer be read: " + r.response());
