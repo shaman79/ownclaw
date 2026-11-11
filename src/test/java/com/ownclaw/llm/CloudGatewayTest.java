@@ -375,6 +375,37 @@ class CloudGatewayTest {
     }
 
     @Test
+    @DisplayName("a key pasted in three parts, none with its END line -- a chat message, the task, a message told while the task worked -- is removed whole, past the lines the engine writes before each part's text")
+    void aKeyInThreeParts() {
+        // On a later step: the first message holds what the owner sent while the task worked,
+        // told after the boundary.
+        String marked = "## Prior Context\n### The conversation so far\nUSER: my key, part one:\n" + KEY_HEAD
+                + LlmMessage.HISTORY_END + "\n## Task\npart two:\nAAAAC3NzaC1lZDI1NTE5AAAAIGfakeMIDDLEfakeMIDDLE\n"
+                + "AAAAfakeMIDDLEtwo+/=\n" + LlmMessage.CACHE_BOUNDARY
+                + "\n\nMessage from the user while you were working:\nAAAAC3NzaC1lZDI1NTE5fakeTHIRDfakeTHIRDfake\nAbCd==";
+        String out = sent(LlmMessage.marked(marked), new Redactor(null));
+        assertFalse(out.contains("fakeHEAD") || out.contains("fakeMIDDLE") || out.contains("fakeTHIRD")
+                || out.contains("AbCd=="), out);
+        assertEquals(markers(marked), markers(out), "the chat's end and the boundary stay");
+        // Mutation: pass over a speaker's "USER: " only -> "## Task" ends the key, and the task's
+        // part and the third are sent.
+    }
+
+    @Test
+    @DisplayName("a key header with no END line of its own ends at the next marker: a certificate pasted later, with its END line, is no end of the key")
+    void aCertificateEndsNoKey() {
+        String cert = "USER: and my certificate:\n-----BEGIN CERTIFICATE-----\nMIIBfakeCERTfakeCERTfake\n"
+                + "-----END CERTIFICATE-----\n";
+        String out = sent(List.of("USER: what is this?\n-----BEGIN OPENSSH PRIVATE KEY-----\n", cert),
+                "check both, the certificate too");
+        assertTrue(out.startsWith("## Prior Context\n### The conversation so far\nUSER: what is this?\n"
+                + Redactor.SECRET_REMOVED + LlmMessage.HISTORY_BLOCK + cert + LlmMessage.HISTORY_END
+                + "\n## Task\ncheck both, the certificate too" + LlmMessage.CACHE_BOUNDARY), out);
+        // Mutation: take any END line for the key's -> the certificate and everything before it
+        // go, the task too when the certificate is in it, on every later turn.
+    }
+
+    @Test
     @DisplayName("a UCI host section opened in one chat message names the host in the next, as in one text")
     void aSectionHoldsAcrossMessages() {
         String out = sent(List.of("ASSISTANT: the leases:\nconfig host\n", "USER: and its name:\n\toption name 'fake-laptop'\n"),

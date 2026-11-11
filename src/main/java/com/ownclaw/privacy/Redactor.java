@@ -1036,7 +1036,11 @@ public final class Redactor {
                 from = label;
                 continue;
             }
-            int end = s.indexOf("-----END ", close + 5);
+            // Its own END line: "-----END " and the same label. Any END line would do, and a
+            // certificate pasted later -- its "-----END CERTIFICATE-----" -- became the key's end:
+            // everything between went, the task too when the certificate was in it, every turn.
+            String endLine = "-----END " + s.substring(label, close) + "-----";
+            int end = s.indexOf(endLine, close + 5);
             int stop;
             if (end < 0) {
                 int[] next = null;
@@ -1048,8 +1052,7 @@ public final class Redactor {
                 }
                 stop = next == null ? s.length() : keyBodyAfter(s, next, stops);
             } else {
-                int tail = s.indexOf("-----", end + "-----END ".length());
-                stop = tail < 0 ? s.length() : tail + 5;
+                stop = end + endLine.length();
             }
             int cut = at;
             for (int[] st : stops) {
@@ -1071,15 +1074,19 @@ public final class Redactor {
     /**
      * Where a private key that has no END line ends, its text having reached the stop
      * {@code stop}: at the stop -- what follows is the next part, not the key -- unless what follows
-     * is the rest of the key: lines of nothing but base64 -- the first after a speaker's
-     * "USER: ", and a short one only after a full one in the same part, as a key's last line is --
-     * through its END line if one comes, across the stops between. A key pasted in two messages, the second
-     * without its END line, is thus removed whole, as it was when the removal ran on to the end.
+     * is the rest of the key: lines of nothing but base64, a short one only after a full one in the
+     * same part, as a key's last line is -- across the stops between. A part may open with lines
+     * that lead into its text, and they are passed over to find it: a speaker's "USER: ", blank
+     * lines, a header ("## Task"), a rule ("---"), a line ending with a colon ("Message from the
+     * user while you were working:"). A key pasted in parts -- the second without its END line,
+     * in the next message, in the task, told while the task worked -- is thus removed whole, as it
+     * was when the removal ran on to the end of the text.
      */
     private static int keyBodyAfter(String s, int[] stop, List<int[]> stops) {
         int end = stop[0];
         int i = stop[1];
-        boolean firstLine = true;
+        boolean opening = true;     // no line of the part's own text read yet
+        boolean firstLine = true;   // the part's first line, which a speaker's name can open
         boolean afterBody = false;
         while (i < s.length()) {
             // A part ends its last line, and the next stop starts a line of its own: crossed only
@@ -1087,6 +1094,7 @@ public final class Redactor {
             int[] here = stopAt(stops, i);
             if (here != null) {
                 i = here[1];
+                opening = true;
                 firstLine = true;
                 afterBody = false;   // a short line opening the next part is no key's last line
                 continue;
@@ -1095,24 +1103,22 @@ public final class Redactor {
             int le = nl < 0 ? s.length() : nl;
             String line = s.substring(i, le);
             if (firstLine) line = SPEAKER.matcher(line).replaceFirst("");
-            String t = line.strip();
-            if (firstLine && t.isEmpty() && nl >= 0) {
-                // "USER: " and the key on the lines below it.
-                i = nl + 1;
-                firstLine = false;
-                continue;
-            }
-            boolean endLine = t.startsWith("-----END ") && t.endsWith("-----");
-            boolean body = KEY_BODY.matcher(t).matches() && (t.length() >= 16 || afterBody);
-            if (!endLine && !body) break;
-            end = le;
-            if (endLine || nl < 0) break;
-            afterBody = true;
             firstLine = false;
+            String t = line.strip();
+            boolean body = KEY_BODY.matcher(t).matches() && (t.length() >= 16 || afterBody);
+            if (!body) {
+                if (!opening || !leadIn(t) || nl < 0) break;
+            } else {
+                end = le;
+                opening = false;
+                afterBody = true;
+                if (nl < 0) break;
+            }
             // A stop whose line break ends this line: on past it, as above.
             int[] next = stopAt(stops, le);
             if (next != null) {
                 i = next[1];
+                opening = true;
                 firstLine = true;
                 afterBody = false;
             } else {
@@ -1120,6 +1126,11 @@ public final class Redactor {
             }
         }
         return end;
+    }
+
+    /** A line that leads into a part's text rather than being it: blank, a header, a rule, "...:". */
+    private static boolean leadIn(String t) {
+        return t.isEmpty() || t.startsWith("#") || t.equals("---") || t.endsWith(":");
     }
 
     /** The stop that starts at {@code at}, or null. */
