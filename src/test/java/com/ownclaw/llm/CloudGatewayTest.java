@@ -305,65 +305,123 @@ class CloudGatewayTest {
                 + "\n\n---\n## Environment\n- DateTime: now";
     }
 
+    /** What the provider is handed for the engine's marked message holding this chat and task. */
+    private static String sent(List<String> chat, String task) {
+        return sent(LlmMessage.marked(chatThenTask(chat, task)), new Redactor(null));
+    }
+
+    private static String sent(LlmMessage first, Redactor redactor) {
+        var provider = new Recording();
+        var gw = new CloudGateway(provider, new Recording(), config("anthropic", CloudGateway.Mode.ENFORCE), new Rows(),
+                null, redactor);
+        gw.chat(List.of(LlmMessage.authoredSystem("SYSTEM"), first), new LlmRequestConfig(null, null, false)
+                .withEgress(egress(new PrivateIndex(), Map.of(), (h, w) -> false)));
+        LlmMessage got = provider.calls.get(0).get(1);
+        assertEquals(first.marked(), got.marked(), "the engine's mark goes on to the provider");
+        return got.content();
+    }
+
+    /** The markers of a text, in order: what the provider splits the engine's message at. */
+    private static List<String> markers(String text) {
+        var out = new ArrayList<String>();
+        for (int i = text.indexOf('\u0001'); i >= 0; i = text.indexOf('\u0001', i + 1)) {
+            out.add(text.substring(i - 1, i + 3));
+        }
+        return out;
+    }
+
+    static final String KEY_HEAD = "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAABG5vbmUfakeHEAD\n";
+    static final String KEY_TAIL = "AAAAC3NzaC1lZDI1NTE5AAAAIGfakeTAILfakeTAILfake\nAbCd==\n-----END OPENSSH PRIVATE KEY-----\n";
+
     @Test
     @DisplayName("a private key a chat message holds without its END line is removed to the end of that message, not of the chat, the task and the step's context")
     void aKeyStaysInItsMessage() {
-        var provider = new Recording(); var rows = new Rows();
-        var gw = new CloudGateway(provider, new Recording(), config("anthropic", CloudGateway.Mode.ENFORCE), rows, null);
-        var cfg = new LlmRequestConfig(null, null, false)
-                .withEgress(egress(new PrivateIndex(), Map.of(), (h, w) -> false));
-        String asked = "USER: what does this key do?\n-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAAfake\n";
         String rest = "ASSISTANT: Never paste a key here.\n";
-
-        gw.chat(List.of(LlmMessage.authoredSystem("SYSTEM"),
-                LlmMessage.user(chatThenTask(List.of(asked, rest), "which router is down?"))), cfg);
-
-        String sent = provider.calls.get(0).get(1).content();
-        assertFalse(sent.contains("b3BlbnNz"), sent);
-        assertTrue(sent.startsWith("## Prior Context\n### The conversation so far\nUSER: what does this key do?\n"
+        String out = sent(List.of("USER: what does this key do?\n" + KEY_HEAD, rest), "which router is down?");
+        assertFalse(out.contains("fakeHEAD"), out);
+        assertEquals(markers(chatThenTask(List.of("x", "y"), "z")), markers(out), "every marker, as the engine wrote it");
+        assertTrue(out.startsWith("## Prior Context\n### The conversation so far\nUSER: what does this key do?\n"
                 + Redactor.SECRET_REMOVED + LlmMessage.HISTORY_BLOCK + rest + LlmMessage.HISTORY_END
-                + "\n## Task\nwhich router is down?" + LlmMessage.CACHE_BOUNDARY + "\n\n---\n## Environment"), sent);
-        assertEquals(1, rows.last().secretsRemoved());
-        // Mutation: filter the message whole -> it ends "what does this key do?\n«secret removed»",
-        // and every later turn has lost its task.
+                + "\n## Task\nwhich router is down?" + LlmMessage.CACHE_BOUNDARY + "\n\n---\n## Environment"), out);
+        // Mutation: no stops for the engine's message -> it ends "what does this key do?\n«secret
+        // removed»", and every later turn has lost its task.
+    }
+
+    @Test
+    @DisplayName("a key split over two chat messages is removed whole -- through its END line, or through its body lines when the second part has none -- the marker kept")
+    void aKeyAcrossMessagesIsRemovedWhole() {
+        // Its END line in the next message: removed to it, as in one text.
+        String out = sent(List.of("USER: my key, part one:\n" + KEY_HEAD, "USER: and part two:\n" + KEY_TAIL + "thanks\n"),
+                "what now?");
+        assertFalse(out.contains("fakeHEAD") || out.contains("fakeTAIL") || out.contains("AbCd=="), out);
+        assertTrue(out.contains(Redactor.SECRET_REMOVED + LlmMessage.HISTORY_BLOCK + Redactor.SECRET_REMOVED + "\nthanks\n"), out);
+        assertTrue(out.contains(LlmMessage.HISTORY_END + "\n## Task\nwhat now?" + LlmMessage.CACHE_BOUNDARY), out);
+        // Its second part without the END line: the body lines that follow the marker go too.
+        String noEnd = sent(List.of("USER: part one:\n" + KEY_HEAD,
+                "USER: AAAAC3NzaC1lZDI1NTE5AAAAIGfakeTAILfakeTAILfake\nAbCd==\n", "ASSISTANT: Do not paste keys.\n"), "ok");
+        assertFalse(noEnd.contains("fakeTAIL") || noEnd.contains("AbCd=="), noEnd);
+        assertTrue(noEnd.contains(LlmMessage.HISTORY_BLOCK + "ASSISTANT: Do not paste keys.\n" + LlmMessage.HISTORY_END), noEnd);
+        assertEquals(3, markers(noEnd).size() - 1, "both chat markers and the end, then the boundary: " + noEnd);
+        // Mutation: end a key with no END line at the stop, nothing after it -> its second half is sent.
+    }
+
+    @Test
+    @DisplayName("a key's first half in the chat and its rest in the task is removed whole; the chat's end, the boundary and the step's context stay")
+    void aKeyFromTheChatIntoTheTask() {
+        String out = sent(List.of("USER: here it starts:\n" + KEY_HEAD), KEY_TAIL + "what is it for?");
+        assertFalse(out.contains("fakeHEAD") || out.contains("fakeTAIL"), out);
+        assertTrue(out.contains(LlmMessage.HISTORY_END + Redactor.SECRET_REMOVED + "\nwhat is it for?" + LlmMessage.CACHE_BOUNDARY
+                + "\n\n---\n## Environment"), out);
+    }
+
+    @Test
+    @DisplayName("a UCI host section opened in one chat message names the host in the next, as in one text")
+    void aSectionHoldsAcrossMessages() {
+        String out = sent(List.of("ASSISTANT: the leases:\nconfig host\n", "USER: and its name:\n\toption name 'fake-laptop'\n"),
+                "is fake-laptop online?");
+        assertFalse(out.contains("fake-laptop"), out);
+        assertTrue(out.contains("\toption name '<host_1>'") && out.contains("is <host_1> online?"), out);
+    }
+
+    @Test
+    @DisplayName("a key header in the task ends at the cache boundary: the step's context and every marker stay")
+    void aKeyInTheTaskEndsAtTheBoundary() {
+        String out = sent(List.of("USER: hi\n"), "what does -----BEGIN OPENSSH PRIVATE KEY----- mean?");
+        assertTrue(out.endsWith("\n## Task\nwhat does " + Redactor.SECRET_REMOVED + LlmMessage.CACHE_BOUNDARY
+                + "\n\n---\n## Environment\n- DateTime: now"), out);
+        assertEquals(markers(chatThenTask(List.of("x"), "z")), markers(out));
     }
 
     @Test
     @DisplayName("a name the task finds under its name is replaced in the chat before it too, as in one text")
     void aNameFoundLaterIsReplacedEarlier() {
-        var redactor = new Redactor(null);
-        var provider = new Recording(); var rows = new Rows();
-        var gw = new CloudGateway(provider, new Recording(), config("anthropic", CloudGateway.Mode.ENFORCE), rows,
-                null, redactor);
-        var cfg = new LlmRequestConfig(null, null, false)
-                .withEgress(egress(new PrivateIndex(), Map.of(), (h, w) -> false));
-
-        gw.chat(List.of(LlmMessage.authoredSystem("SYSTEM"), LlmMessage.user(chatThenTask(
-                List.of("USER: is FakeKitchenNet up?\n", "ASSISTANT: It is.\n"),
-                "it shows\nssid=FakeKitchenNet\nhostname=fake-tv"))), cfg);
-
-        String sent = provider.calls.get(0).get(1).content();
-        assertFalse(sent.contains("FakeKitchenNet"), sent);
-        assertTrue(sent.contains("USER: is <ssid_1> up?\n") && sent.contains("ssid=<ssid_1>\nhostname=<host_1>"), sent);
-        // Mutation: filter the pieces in one pass -> the chat, filtered before the task named the
-        // network, sends it raw.
+        String out = sent(List.of("USER: is FakeKitchenNet up?\n", "ASSISTANT: It is.\n"),
+                "it shows\nssid=FakeKitchenNet\nhostname=fake-tv");
+        assertFalse(out.contains("FakeKitchenNet"), out);
+        assertTrue(out.contains("USER: is <ssid_1> up?\n") && out.contains("ssid=<ssid_1>\nhostname=<host_1>"), out);
     }
 
     @Test
-    @DisplayName("only the engine's chat is split: markers in any other message are its text, and a key there is removed to its end")
-    void markersElsewhereSplitNothing() {
-        var provider = new Recording(); var rows = new Rows();
-        var gw = new CloudGateway(provider, new Recording(), config("anthropic", CloudGateway.Mode.ENFORCE), rows, null);
-        var cfg = new LlmRequestConfig(null, null, false)
-                .withEgress(egress(new PrivateIndex(), Map.of(), (h, w) -> false));
+    @DisplayName("markers act only in the engine's marked message: in any other, marker bytes inside a key are its text, and the key is removed to its end")
+    void markersElsewhereStopNothing() {
+        // The same bytes the engine's message holds, in a message it did not mark -- an OpenAI
+        // think call's, a fetched page: a key with no END line runs on to the end of the text.
+        String unmarked = chatThenTask(List.of("USER: the key:\n" + KEY_HEAD,
+                "USER: AAAAC3NzaC1lZDI1NTE5AAAAIGfakeTAILfakeTAILfake\n"), "go");
+        String out = sent(LlmMessage.user(unmarked), new Redactor(null));
+        assertFalse(out.contains("fakeHEAD") || out.contains("fakeTAIL") || out.contains("## Task"), out);
+        assertTrue(out.endsWith("USER: the key:\n" + Redactor.SECRET_REMOVED), out);
+
+        var provider = new Recording();
+        var gw = new CloudGateway(provider, new Recording(), config("anthropic", CloudGateway.Mode.ENFORCE), new Rows(), null);
         String page = "the page\n-----BEGIN PRIVATE KEY-----\nMIIfake" + LlmMessage.HISTORY_BLOCK + "secondhalf"
-                + LlmMessage.HISTORY_END + "thirdpart";
-
-        gw.chat(List.of(LlmMessage.authoredSystem("SYSTEM"), LlmMessage.user("## Task\nfetch it" + LlmMessage.CACHE_BOUNDARY),
-                LlmMessage.assistant("{\"tool\":\"web_fetch\"}"), LlmMessage.user(page)), cfg);
-
-        String sent = provider.calls.get(0).get(3).content();
-        assertEquals("the page\n" + Redactor.SECRET_REMOVED, sent, "nothing of the key after a marker it holds");
+                + LlmMessage.HISTORY_END + "thirdpart" + LlmMessage.CACHE_BOUNDARY + "fourth";
+        gw.chat(List.of(LlmMessage.authoredSystem("SYSTEM"), LlmMessage.marked("## Task\nfetch it" + LlmMessage.CACHE_BOUNDARY),
+                LlmMessage.assistant("{\"tool\":\"web_fetch\"}"), LlmMessage.user(page)), new LlmRequestConfig(null, null, false)
+                .withEgress(egress(new PrivateIndex(), Map.of(), (h, w) -> false)));
+        assertEquals("the page\n" + Redactor.SECRET_REMOVED, provider.calls.get(0).get(3).content(),
+                "nothing of the key after a marker it holds");
+        // Mutation: act on marker bytes in any message -> "secondhalf", "thirdpart" and "fourth" are sent.
     }
 
     @Test

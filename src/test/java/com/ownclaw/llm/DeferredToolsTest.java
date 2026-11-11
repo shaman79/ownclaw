@@ -29,7 +29,7 @@ class DeferredToolsTest {
 
     static List<LlmMessage> conversation() {
         return List.of(LlmMessage.system("SYSTEM"),
-                LlmMessage.user("## Task\ncheck the routers" + LlmMessage.CACHE_BOUNDARY + "step block"),
+                LlmMessage.marked("## Task\ncheck the routers" + LlmMessage.CACHE_BOUNDARY + "step block"),
                 LlmMessage.toolsAdded(List.of("openwrt_run")),
                 LlmMessage.assistant("{\"tool\":\"find_tools\"}"),
                 LlmMessage.user("2 skills match"),

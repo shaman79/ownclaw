@@ -393,23 +393,28 @@ public class ThinkingEngine {
         int next = 0;
         int steps = 0;
         var user = new StringBuilder(anthropicTask(context)).append(CACHE_BOUNDARY_MARKER);
+        // The first message is the engine's marked one (LlmMessage#marked): every marker in it is
+        // the engine's, so every text put after the boundary goes in unmarked too.
+        boolean first = true;
         var turns = context.trajectory().turns();
         for (int i = 0; i < turns.size(); i++) {
             var turn = turns.get(i);
             if (turn.byTheLoop()) {
                 String told = turn.observation().output();
-                if (told != null && !told.isBlank()) user.append("\n\n").append(told);
+                if (told != null && !told.isBlank()) user.append("\n\n").append(first ? LlmMessage.unmarked(told) : told);
                 steps++;
                 continue;
             }
-            messages.add(LlmMessage.user(user.toString()));
+            messages.add(first ? LlmMessage.marked(user.toString()) : LlmMessage.user(user.toString()));
+            first = false;
             next = withToolsAdded(messages, added, next, steps);
             messages.add(LlmMessage.assistant(turn.actionText(!context.earlierWordsWithheld())));
             user = new StringBuilder(context.observationShown(i, turn));
             steps++;
         }
-        user.append("\n\n---\n").append(buildDynamicContext(context, mode));
-        messages.add(LlmMessage.user(user.toString()));
+        String step = buildDynamicContext(context, mode);
+        user.append("\n\n---\n").append(first ? LlmMessage.unmarked(step) : step);
+        messages.add(first ? LlmMessage.marked(user.toString()) : LlmMessage.user(user.toString()));
         withToolsAdded(messages, added, next, Integer.MAX_VALUE);
     }
 
@@ -1075,7 +1080,7 @@ public class ThinkingEngine {
         sb.append("## Task\n");
         sb.append(LlmMessage.unmarked(context.originalMessage()));
         String files = filesSection(context);
-        if (!files.isEmpty()) sb.append("\n\n").append(files);
+        if (!files.isEmpty()) sb.append("\n\n").append(LlmMessage.unmarked(files));
         return sb.toString();
     }
 

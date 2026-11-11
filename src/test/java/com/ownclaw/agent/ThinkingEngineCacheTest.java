@@ -36,7 +36,7 @@ class ThinkingEngineCacheTest {
         List<LlmMessage> step1 = engine.buildMessages(ctx, "anthropic", mode);
         assertEquals(first0.substring(0, cut) + ThinkingEngine.CACHE_BOUNDARY_MARKER, step1.get(1).content(),
                 "the cached prefix of step 0 is exactly step 1's first message, marked again as the stable prefix");
-        assertFalse(step1.get(step1.size() - 1).content().contains("<!-- CACHE_BOUNDARY -->"),
+        assertFalse(step1.get(step1.size() - 1).content().contains(ThinkingEngine.CACHE_BOUNDARY_MARKER),
                 "the newest message is no prefix of anything");
     }
 

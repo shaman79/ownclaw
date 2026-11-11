@@ -10,21 +10,36 @@ package com.ownclaw.llm;
  *                 learned as one -- "unavailable", taken for an SSID from a sensor's state -- was
  *                 rewritten in every request from then on, the system prompt too, so every
  *                 cached prompt had to be written again.
+ * @param marked   a think call's first message as the engine wrote it for Anthropic: every marker
+ *                 in it ({@link #MARKERS}) is the engine's, and the engine took the markers'
+ *                 control character out of every text it put there ({@link #unmarked}). Only in such
+ *                 a message are the markers acted on -- by the provider, which splits the message
+ *                 at them into the blocks it caches, and by the gateway, whose filter ends a
+ *                 private key with no END line at the next one. Anywhere else marker-like bytes are
+ *                 text a user, a tool or a page wrote, and acting on them would let that text decide
+ *                 where a key's removal ends.
  */
-public record LlmMessage(Role role, String content, boolean authored) {
+public record LlmMessage(Role role, String content, boolean authored, boolean marked) {
 
     /** A message of data, filtered whole on its way to a cloud model. */
     public LlmMessage(Role role, String content) {
-        this(role, content, false);
+        this(role, content, false, false);
+    }
+
+    /** A message of data, or the code's own text ({@link #authored}). */
+    public LlmMessage(Role role, String content, boolean authored) {
+        this(role, content, authored, false);
     }
 
     /**
      * Where a prompt's stable prefix ends: in the first message of a think call, after the task,
      * on every step. Anthropic's provider splits there and caches everything before it -- the
      * tools, the system prompt and the task -- for an hour, so the task's later steps read it from
-     * the cache while it is unchanged. The marker itself is never sent.
+     * the cache while it is unchanged. A line of its own and control characters, like the chat's
+     * markers, so no text in the message can be taken for it: a private key's header in the task
+     * ends there, and the step's context after it survives. Never sent.
      */
-    public static final String CACHE_BOUNDARY = "\n<!-- CACHE_BOUNDARY -->\n";
+    public static final String CACHE_BOUNDARY = "\n\u0001\u001c\n";
 
     /**
      * Between two messages of the chat a task comes from, in the first message of a think call
@@ -33,8 +48,7 @@ public record LlmMessage(Role role, String content, boolean authored) {
      * finds what this one cached; the chat as one block never is -- it is longer by a turn each
      * time, so every turn wrote the whole chat to the cache again. A line of its own, so that no
      * value the privacy filter reads up to the end of a line runs on into it; control characters,
-     * so that no text a user or a tool wrote is taken for one ({@link #unmarked}) and no name the
-     * filter learns can match one (it learns none holding a control character). Never sent.
+     * which no text the engine puts in the message keeps ({@link #unmarked}). Never sent.
      */
     public static final String HISTORY_BLOCK = "\n\u0001\u001e\n";
 
@@ -44,6 +58,9 @@ public record LlmMessage(Role role, String content, boolean authored) {
      * next turn reads it back and pays only for what was said since. Never sent.
      */
     public static final String HISTORY_END = "\n\u0001\u001d\n";
+
+    /** Every marker a {@link #marked} message can hold. */
+    public static final java.util.List<String> MARKERS = java.util.List.of(HISTORY_BLOCK, HISTORY_END, CACHE_BOUNDARY);
 
     /**
      * TOOLS: from here on the model is offered these tools too -- deferred ones
@@ -65,11 +82,16 @@ public record LlmMessage(Role role, String content, boolean authored) {
 
     /** A system prompt that is the code's own text: see {@link #authored}. */
     public static LlmMessage authoredSystem(String content) {
-        return new LlmMessage(Role.SYSTEM, content, true);
+        return new LlmMessage(Role.SYSTEM, content, true, false);
     }
 
     public static LlmMessage user(String content) {
         return new LlmMessage(Role.USER, content);
+    }
+
+    /** A think call's first message as the engine wrote it, its markers its own: see {@link #marked}. */
+    public static LlmMessage marked(String content) {
+        return new LlmMessage(Role.USER, content, false, true);
     }
 
     public static LlmMessage assistant(String content) {
@@ -87,9 +109,9 @@ public record LlmMessage(Role role, String content, boolean authored) {
     }
 
     /**
-     * {@code text} that can hold no history marker: the control character every one of them holds
-     * is taken out wherever it stands. What a user, a tool or a page wrote goes between the markers
-     * only through here.
+     * {@code text} that can hold no marker: the control character every one of them holds is taken
+     * out wherever it stands. What a user, a tool or a page wrote goes into a {@link #marked}
+     * message only through here.
      */
     public static String unmarked(String text) {
         return text == null || text.indexOf('\u0001') < 0 ? text : text.replace("\u0001", "");
@@ -98,6 +120,8 @@ public record LlmMessage(Role role, String content, boolean authored) {
     /** {@code content} as a model reads it once the provider has split it: no marker in it. */
     public static String asRead(String content) {
         if (content == null) return null;
-        return content.replace(CACHE_BOUNDARY, "").replace(HISTORY_BLOCK, "").replace(HISTORY_END, "");
+        String out = content;
+        for (String marker : MARKERS) out = out.replace(marker, "");
+        return out;
     }
 }

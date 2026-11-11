@@ -129,7 +129,6 @@ public final class CloudGateway implements LlmProvider {
         Map<String, String> vault = egress.secretValues();
         var tally = new Redactor.Tally();
         var filteredMessages = new ArrayList<LlmMessage>(messages.size());
-        boolean first = true;
         for (LlmMessage m : messages) {
             // A TOOLS message is the registry's own tool names, not data: filtered, a name that
             // looked like an identifier would no longer name its tool.
@@ -137,12 +136,16 @@ public final class CloudGateway implements LlmProvider {
                 filteredMessages.add(m);
                 continue;
             }
+            // The engine's marked message is filtered as one text like any other, but a private
+            // key with no END line in it ends at the next of the engine's markers (Redactor#filter
+            // with stops): one in a chat message removed the rest of the chat, the task, the cache
+            // boundary and the step's context on every later turn. Only there, where the engine
+            // vouches for every marker (LlmMessage#marked): elsewhere marker-like bytes are text,
+            // and a stop they made would end a key's removal where that text chose.
             String content = m.authored() ? Redactor.filterAuthored(m.content(), vault, tally)
-                    : first && m.role() == LlmMessage.Role.USER && "think".equals(egress.purpose())
-                            ? filterChat(user, m.content(), vault, tally)
-                            : redactor.filter(user, m.content(), vault, tally);
-            if (m.role() == LlmMessage.Role.USER) first = false;
-            filteredMessages.add(new LlmMessage(m.role(), content, m.authored()));
+                    : m.marked() ? redactor.filter(user, m.content(), vault, tally, LlmMessage.MARKERS)
+                    : redactor.filter(user, m.content(), vault, tally);
+            filteredMessages.add(new LlmMessage(m.role(), content, m.authored(), m.marked()));
         }
         List<ToolSpec> tools = cfg.tools();
         List<ToolSpec> filteredTools = null;
@@ -293,32 +296,6 @@ public final class CloudGateway implements LlmProvider {
         // refused or cut-off reply is on the ledger with its tokens and why it ended before its
         // caller is told it is no answer -- and what it carries is restored like any reply.
         return restored(user, response).requireComplete(providerName);
-    }
-
-    /**
-     * A think call's first message, which holds the chat the task came from, filtered a message of
-     * the chat at a time and the task after them as one more ({@link Redactor#filterPieces}): what
-     * a detector reads on to the end of its text -- a private key's BEGIN line with no END line in
-     * one chat message -- stays in that message. Filtered as one text, one such message removed
-     * the rest of the chat, the task, the cache boundary and the step's context on every later
-     * turn. The chat's markers ({@link LlmMessage#HISTORY_BLOCK}, {@link LlmMessage#HISTORY_END})
-     * are split at and put back as they were. Only here, before the first end marker: the engine
-     * writes them, and takes every marker out of the chat's text, so no text a user, a tool or a
-     * page wrote can split a key there and send its rest. Anything else is filtered whole.
-     */
-    private String filterChat(String user, String content, Map<String, String> vault, Redactor.Tally tally) {
-        int end = content == null ? -1 : content.indexOf(LlmMessage.HISTORY_END);
-        if (end < 0) return redactor.filter(user, content, vault, tally);
-        var pieces = new ArrayList<>(List.of(content.substring(0, end).split(
-                java.util.regex.Pattern.quote(LlmMessage.HISTORY_BLOCK), -1)));
-        pieces.add(content.substring(end + LlmMessage.HISTORY_END.length()));
-        List<String> filtered = redactor.filterPieces(user, pieces, vault, tally);
-        var sb = new StringBuilder(content.length());
-        for (int i = 0; i < filtered.size(); i++) {
-            if (i > 0) sb.append(i == filtered.size() - 1 ? LlmMessage.HISTORY_END : LlmMessage.HISTORY_BLOCK);
-            sb.append(filtered.get(i));
-        }
-        return sb.toString();
     }
 
     /** The reply with the user's placeholders put back to their values; the same reply when it names none. */

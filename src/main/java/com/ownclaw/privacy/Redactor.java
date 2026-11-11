@@ -163,48 +163,30 @@ public final class Redactor {
      * Counted into {@code tally}.
      */
     public String filter(String userId, String text, Map<String, String> vault, Tally tally) {
-        return filter(userId, text, vault, tally, Map.of());
+        return filter(userId, text, vault, tally, List.of());
     }
 
     /**
-     * The pieces of one text -- a chat's messages and the task after them -- as {@link #filter}
-     * filters a text, but each on its own: what a detector reads on to the end of its text -- a
-     * private key's BEGIN line with no END line -- ends where its piece does. Filtered as one
-     * text, the key a chat message held took the rest of the chat with it, and the task and the
-     * step's context, on every later turn.
+     * {@link #filter}, for a text whose writer marked where its parts end ({@code stops}): a think
+     * call's first message, the chat a task came from a message at a time, then the task, then
+     * the step's context (LlmMessage#MARKERS). Filtered as one text, as every text is -- a key whose
+     * END line is in a later part is removed to it, a UCI section's name holds in the next part,
+     * a name found in one part is looked for in all of them -- but a private key whose BEGIN line
+     * has no END line after it anywhere ends at the next stop, and goes on past it only through
+     * the lines of the key's body that follow ({@link #pemBlocks}); and nothing removed takes a
+     * stop with it. Run on to the end of the text, one such key in a chat message removed the rest
+     * of the chat, the task, the cache boundary and the step's context on every later turn.
      * <p>
-     * Every SSID or host's name found under its name in any piece is looked for in every piece,
-     * as it is in one text, as it is written there too: first the pieces are read for the names,
-     * then each is filtered with all of them. A piece filtered before another named the value
-     * would otherwise send it raw.
+     * The caller vouches that every stop in the text is the writer's own: text a user, a tool or a
+     * page wrote that held one could end a key's removal where it chose.
      */
-    public List<String> filterPieces(String userId, List<String> pieces, Map<String, String> vault, Tally tally) {
-        if (pieces.size() == 1) return List.of(filter(userId, pieces.getFirst(), vault, tally));
-        Table table = table(userId);
-        var named = new HashMap<String, Finding>();
-        for (String piece : pieces) {
-            if (piece == null || piece.isEmpty()) continue;
-            String s = scrubVault(piece, vault).text();
-            for (Finding f : find(s, table.named())) {
-                if ((f.kind() == Kind.SSID || f.kind() == Kind.HOST) && f.end() - f.start() >= MIN_KNOWN_LENGTH) {
-                    named.putIfAbsent(s.substring(f.start(), f.end()), new Finding(0, 0, f.kind(), f.valueIn(s)));
-                }
-            }
-        }
-        var out = new ArrayList<String>(pieces.size());
-        for (String piece : pieces) out.add(filter(userId, piece, vault, tally, named));
-        return out;
-    }
-
-    /** {@link #filter}, with names found elsewhere also looked for wherever they stand, as written. */
-    private String filter(String userId, String text, Map<String, String> vault, Tally tally,
-                          Map<String, Finding> foundElsewhere) {
+    public String filter(String userId, String text, Map<String, String> vault, Tally tally, List<String> stops) {
         if (text == null || text.isEmpty()) return text;
         Scrubbed scrubbed = scrubVault(text, vault);
         tally.secrets += scrubbed.count();
         String s = scrubbed.text();
         Table table = table(userId);
-        List<Finding> found = find(s, table.named(), foundElsewhere);
+        List<Finding> found = find(s, table.named(), stopsIn(s, stops));
         if (found.isEmpty()) return s;
         var sb = new StringBuilder(s.length());
         int from = 0;
@@ -931,18 +913,14 @@ public final class Redactor {
      * this text names.
      */
     static List<Finding> find(String s, Map<Kind, java.util.Set<String>> known) {
-        return find(s, known, Map.of());
+        return find(s, known, List.of());
     }
 
-    /**
-     * {@link #find}, with the names another piece of the same text found under their names
-     * ({@link #filterPieces}) looked for here too, each as it was written there.
-     */
-    private static List<Finding> find(String s, Map<Kind, java.util.Set<String>> known,
-                                      Map<String, Finding> foundElsewhere) {
+    /** {@link #find}, in a text with the writer's {@code stops} ({@link #filter(String, String, Map, Tally, List)}). */
+    private static List<Finding> find(String s, Map<Kind, java.util.Set<String>> known, List<int[]> stops) {
         var secrets = new ArrayList<Finding>();
         var ids = new ArrayList<Finding>();
-        pemBlocks(s, secrets);
+        pemBlocks(s, secrets, stops);
         sshKeys(s, ids);
         passwordHashes(s, secrets);
         tokens(s, secrets);
@@ -973,7 +951,6 @@ public final class Redactor {
                 needles.putIfAbsent(s.substring(f.start(), f.end()), f);
             }
         }
-        foundElsewhere.forEach(needles::putIfAbsent);
         var again = standingAsWords(s, needles);
         if (secrets.isEmpty() && ids.isEmpty() && again.isEmpty()) return List.of();
         var covered = new BitSet(s.length());
@@ -1045,8 +1022,10 @@ public final class Redactor {
     }
 
     // PEM private keys: from -----BEGIN ...PRIVATE KEY----- to its -----END ...-----, or to the
-    // end of the text when it was cut off -- half a key is still a key.
-    private static void pemBlocks(String s, List<Finding> out) {
+    // end of the text when it was cut off -- half a key is still a key. In a text with stops
+    // (filter with stops), one cut off ends at the next stop instead, but for the lines of its body
+    // after it (keyBodyAfter); and a key is removed around every stop it crosses, the stop kept.
+    private static void pemBlocks(String s, List<Finding> out, List<int[]> stops) {
         int from = 0, at;
         while ((at = s.indexOf("-----BEGIN ", from)) >= 0) {
             int label = at + "-----BEGIN ".length();
@@ -1060,14 +1039,114 @@ public final class Redactor {
             int end = s.indexOf("-----END ", close + 5);
             int stop;
             if (end < 0) {
-                stop = s.length();
+                int[] next = null;
+                for (int[] st : stops) {
+                    if (st[0] >= close) {
+                        next = st;
+                        break;
+                    }
+                }
+                stop = next == null ? s.length() : keyBodyAfter(s, next, stops);
             } else {
                 int tail = s.indexOf("-----", end + "-----END ".length());
                 stop = tail < 0 ? s.length() : tail + 5;
             }
-            out.add(new Finding(at, stop, null));
-            from = stop;
+            int cut = at;
+            for (int[] st : stops) {
+                if (st[1] <= cut || st[0] >= stop) continue;
+                if (st[0] > cut) out.add(new Finding(cut, st[0], null));
+                cut = st[1];
+            }
+            if (cut < stop) out.add(new Finding(cut, stop, null));
+            from = Math.max(stop, at + 1);
         }
+    }
+
+    /** A line of a key's body: base64, nothing else. */
+    private static final java.util.regex.Pattern KEY_BODY = java.util.regex.Pattern.compile("[A-Za-z0-9+/]+=*");
+
+    /** What a speaker's line starts with in a chat the engine marked: "USER: ", "ASSISTANT: ". */
+    private static final java.util.regex.Pattern SPEAKER = java.util.regex.Pattern.compile("^[A-Z][A-Za-z]*: ");
+
+    /**
+     * Where a private key that has no END line ends, its text having reached the stop
+     * {@code stop}: at the stop -- what follows is the next part, not the key -- unless what follows
+     * is the rest of the key: lines of nothing but base64 -- the first after a speaker's
+     * "USER: ", and a short one only after a full one in the same part, as a key's last line is --
+     * through its END line if one comes, across the stops between. A key pasted in two messages, the second
+     * without its END line, is thus removed whole, as it was when the removal ran on to the end.
+     */
+    private static int keyBodyAfter(String s, int[] stop, List<int[]> stops) {
+        int end = stop[0];
+        int i = stop[1];
+        boolean firstLine = true;
+        boolean afterBody = false;
+        while (i < s.length()) {
+            // A part ends its last line, and the next stop starts a line of its own: crossed only
+            // when the key's lines go on after it.
+            int[] here = stopAt(stops, i);
+            if (here != null) {
+                i = here[1];
+                firstLine = true;
+                afterBody = false;   // a short line opening the next part is no key's last line
+                continue;
+            }
+            int nl = s.indexOf('\n', i);
+            int le = nl < 0 ? s.length() : nl;
+            String line = s.substring(i, le);
+            if (firstLine) line = SPEAKER.matcher(line).replaceFirst("");
+            String t = line.strip();
+            if (firstLine && t.isEmpty() && nl >= 0) {
+                // "USER: " and the key on the lines below it.
+                i = nl + 1;
+                firstLine = false;
+                continue;
+            }
+            boolean endLine = t.startsWith("-----END ") && t.endsWith("-----");
+            boolean body = KEY_BODY.matcher(t).matches() && (t.length() >= 16 || afterBody);
+            if (!endLine && !body) break;
+            end = le;
+            if (endLine || nl < 0) break;
+            afterBody = true;
+            firstLine = false;
+            // A stop whose line break ends this line: on past it, as above.
+            int[] next = stopAt(stops, le);
+            if (next != null) {
+                i = next[1];
+                firstLine = true;
+                afterBody = false;
+            } else {
+                i = nl + 1;
+            }
+        }
+        return end;
+    }
+
+    /** The stop that starts at {@code at}, or null. */
+    private static int[] stopAt(List<int[]> stops, int at) {
+        for (int[] st : stops) {
+            if (st[0] == at) return st;
+            if (st[0] > at) break;
+        }
+        return null;
+    }
+
+    /** Where each of {@code stops} stands in {@code s}, in order, as {start, end}; none overlapping. */
+    private static List<int[]> stopsIn(String s, List<String> stops) {
+        if (stops == null || stops.isEmpty()) return List.of();
+        var out = new ArrayList<int[]>();
+        for (String stop : stops) {
+            if (stop == null || stop.isEmpty()) continue;
+            for (int at = s.indexOf(stop); at >= 0; at = s.indexOf(stop, at + stop.length())) {
+                out.add(new int[] {at, at + stop.length()});
+            }
+        }
+        out.sort(Comparator.comparingInt((int[] a) -> a[0]));
+        var kept = new ArrayList<int[]>();
+        for (int[] st : out) {
+            if (kept.isEmpty() || st[0] >= kept.getLast()[1]) kept.add(st);
+        }
+        return kept;
     }
 
     /** The key types whose SSH key blob {@link #sshKeys} removes; each blob begins with "AAAA". */

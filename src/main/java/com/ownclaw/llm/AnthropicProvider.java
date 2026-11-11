@@ -540,10 +540,11 @@ class AnthropicProvider implements LlmProvider {
                 ObjectNode m = msgs.addObject();
                 m.put("role", msg.role().apiValue());
                 String content = msg.content();
-                // Only in the first message -- the one the engine marks -- and at the last marker:
-                // the same text inside a fetched page or the chat would otherwise earn a fifth
-                // cache mark, and the API refuses a request with more than four.
-                int cut = msgs.size() == 1 && content != null ? content.lastIndexOf(LlmMessage.CACHE_BOUNDARY) : -1;
+                // Only in the message the engine marked (LlmMessage#marked), whose markers are all
+                // its own: marker-like bytes anywhere else are text, sent as they are -- split at,
+                // they would earn a fifth cache mark, and the API refuses a request with more than
+                // four. At the last boundary, which is the engine's.
+                int cut = msg.marked() && content != null ? content.lastIndexOf(LlmMessage.CACHE_BOUNDARY) : -1;
                 if (cut > 0) {
                     // The task, then -- on the first step -- what changes on every step, as two
                     // blocks with the cache mark on the first. On every later step the task is
@@ -573,7 +574,9 @@ class AnthropicProvider implements LlmProvider {
                     String rest = content.substring(cut + LlmMessage.CACHE_BOUNDARY.length());
                     if (!rest.isBlank()) textBlock(blocks, rest);
                 } else {
-                    m.put("content", content);
+                    // A marked message with its boundary gone -- the filter never takes one, but
+                    // nothing of a marker is ever sent -- goes as the text the model reads.
+                    m.put("content", msg.marked() ? LlmMessage.asRead(content) : content);
                 }
             }
         }

@@ -39,7 +39,7 @@ class AnthropicCacheTest {
     void theTaskIsCachedAndReadBack() {
         String task = "## Prior Context\n" + "a long chat ".repeat(500) + "\n\n## Task\nsummarise it";
         var step0 = body(List.of(LlmMessage.system("SYSTEM"),
-                LlmMessage.user(task + MARK + "---\n## Environment\n- DateTime: now")), true);
+                LlmMessage.marked(task + MARK + "---\n## Environment\n- DateTime: now")), true);
         JsonNode first = step0.path("messages").get(0).path("content");
         assertTrue(first.isArray(), "two blocks: " + first);
         assertEquals(task, first.get(0).path("text").asText());
@@ -47,9 +47,9 @@ class AnthropicCacheTest {
         assertTrue(first.get(1).path("text").asText().startsWith("---\n## Environment")
                 || first.get(1).path("text").asText().startsWith("\n\n---\n## Environment"));
         assertTrue(first.get(1).path("cache_control").isMissingNode(), "what changes each step is not cached");
-        assertFalse(step0.toString().contains("CACHE_BOUNDARY"), "the marker is never sent");
+        assertFalse(step0.toString().contains("\\u0001"), "the marker is never sent: " + step0);
 
-        var step1 = body(List.of(LlmMessage.system("SYSTEM"), LlmMessage.user(task + MARK),
+        var step1 = body(List.of(LlmMessage.system("SYSTEM"), LlmMessage.marked(task + MARK),
                 LlmMessage.assistant("{\"tool\":\"delegate\"}"), LlmMessage.user("result\n\n---\n## Environment")), true);
         assertEquals(task, text(step1.path("messages").get(0).path("content")),
                 "byte for byte the cached block, so the cache is read instead of written again");
@@ -73,7 +73,7 @@ class AnthropicCacheTest {
     @Test
     @DisplayName("a think call's stable prefix -- tools, system prompt, task -- is cached for an hour; the steps slide on five minutes, after it")
     void theStablePrefixIsCachedForAnHour() {
-        var step3 = body(List.of(LlmMessage.system("SYSTEM"), LlmMessage.user("the task" + MARK),
+        var step3 = body(List.of(LlmMessage.system("SYSTEM"), LlmMessage.marked("the task" + MARK),
                 LlmMessage.assistant("action 1"), LlmMessage.user("result 1"),
                 LlmMessage.assistant("action 2"), LlmMessage.user("result 2\n\n---\n## Environment")), true);
         assertEquals(List.of(HOUR, HOUR, FIVE_MINUTES), marks(step3).stream().map(JsonNode::toString).toList(),
@@ -86,7 +86,7 @@ class AnthropicCacheTest {
                 "on the message before the newest");
         assertTrue(messages.get(4).path("content").isTextual(), "the newest, which changes every step, is not cached");
 
-        var step0 = body(List.of(LlmMessage.system("SYSTEM"), LlmMessage.user("the task" + MARK + "\n\n---\n## Environment")),
+        var step0 = body(List.of(LlmMessage.system("SYSTEM"), LlmMessage.marked("the task" + MARK + "\n\n---\n## Environment")),
                 true);
         assertEquals(List.of(HOUR, HOUR), marks(step0).stream().map(JsonNode::toString).toList(), step0.toString());
         // Mutation: send the hour on the sliding mark too -> a two-minute step pays 2x on what
@@ -103,7 +103,7 @@ class AnthropicCacheTest {
     @DisplayName("the chat a task came from is a block per message, the last cached for an hour, before the task's own")
     void theChatIsABlockPerMessage() {
         List<String> chat = List.of("USER: is the battery charging?\n", "ASSISTANT: Yes, from the grid.\n");
-        var step1 = body(List.of(LlmMessage.system("SYSTEM"), LlmMessage.user(chatThenTask(chat, "stop it") + MARK),
+        var step1 = body(List.of(LlmMessage.system("SYSTEM"), LlmMessage.marked(chatThenTask(chat, "stop it") + MARK),
                 LlmMessage.assistant("action 1"), LlmMessage.user("result 1\n\n---\n## Environment")), true);
         JsonNode first = step1.path("messages").get(0).path("content");
         assertEquals(3, first.size(), "two messages and the task: " + first);
@@ -126,9 +126,9 @@ class AnthropicCacheTest {
     @Test
     @DisplayName("the chat's next turn sends the last turn's blocks again, a block apart, so it reads what that one cached")
     void theNextTurnReadsTheChatBack() {
-        var turn1 = body(List.of(LlmMessage.system("SYSTEM"), LlmMessage.user(chatThenTask(
+        var turn1 = body(List.of(LlmMessage.system("SYSTEM"), LlmMessage.marked(chatThenTask(
                 List.of("USER: a\n", "ASSISTANT: b\n"), "c") + MARK + "\n\n---\n## Environment")), true);
-        var turn2 = body(List.of(LlmMessage.system("SYSTEM"), LlmMessage.user(chatThenTask(
+        var turn2 = body(List.of(LlmMessage.system("SYSTEM"), LlmMessage.marked(chatThenTask(
                 List.of("USER: a\n", "ASSISTANT: b\n", "USER: c\n", "ASSISTANT: d\n"), "e") + MARK
                 + "\n\n---\n## Environment")), true);
         assertEquals(turn1.path("system"), turn2.path("system"));
@@ -185,7 +185,7 @@ class AnthropicCacheTest {
         for (int turns = 1; turns < 6; turns++) {
             var messages = new ArrayList<LlmMessage>();
             messages.add(LlmMessage.system("SYSTEM"));
-            messages.add(LlmMessage.user("chat" + MARK + "history"));
+            messages.add(LlmMessage.marked("chat" + MARK + "history"));
             for (int i = 0; i < turns; i++) {
                 messages.add(LlmMessage.assistant("action " + i));
                 messages.add(LlmMessage.user("page" + MARK + "text " + i));
@@ -193,13 +193,26 @@ class AnthropicCacheTest {
             String json = body(messages, true).toString();
             assertTrue(json.split("cache_control", -1).length - 1 <= 4, turns + " turns: " + json);
         }
-        var chatHasMark = body(List.of(LlmMessage.user("chat" + MARK + "history" + MARK + "dyn")), true);
+        var chatHasMark = body(List.of(LlmMessage.marked("chat" + MARK + "history" + MARK + "dyn")), true);
         assertEquals("chat" + MARK + "history", chatHasMark.path("messages").get(0).path("content").get(0).path("text").asText(),
                 "split at the engine's marker, the last one, so the cached block is the whole task");
-        var endsWithMark = body(List.of(LlmMessage.user("task" + MARK)), true);
+        var endsWithMark = body(List.of(LlmMessage.marked("task" + MARK)), true);
         var content = endsWithMark.path("messages").get(0).path("content");
         assertEquals(1, content.size(), "no empty second block: " + content);
         assertEquals("task", content.get(0).path("text").asText(), "and the marker is not sent");
+        var notTheEngines = body(List.of(LlmMessage.user(chatThenTask(List.of("USER: a\n"), "b") + MARK + "dyn")), true);
+        assertTrue(notTheEngines.path("messages").get(0).path("content").isTextual(),
+                "a message the engine did not mark is not split, whatever bytes it holds: " + notTheEngines);
+    }
+
+    @Test
+    @DisplayName("the engine's message with its boundary gone is sent as the text the model reads: no marker of it")
+    void noBoundaryNoMarkers() {
+        var sent = body(List.of(LlmMessage.marked(chatThenTask(List.of("USER: a\n", "ASSISTANT: b\n"), "c"))), true);
+        JsonNode content = sent.path("messages").get(0).path("content");
+        assertEquals("## Prior Context\n### The conversation so far\nUSER: a\nASSISTANT: b\n\n## Task\nc", content.asText());
+        assertFalse(sent.toString().contains("\\u0001"), sent.toString());
+        // Mutation: send it as it is -> the chat's markers reach Anthropic.
     }
 
     @Test
@@ -214,7 +227,7 @@ class AnthropicCacheTest {
                     var messages = new ArrayList<LlmMessage>();
                     messages.add(LlmMessage.system("SYSTEM" + MARK + "dynamic"));
                     String task = chat < 0 ? "task" : chatThenTask(history, "task");
-                    messages.add(LlmMessage.user(split ? task + MARK + (turns == 0 ? "dyn" : "") : task));
+                    messages.add(LlmMessage.marked(split ? task + MARK + (turns == 0 ? "dyn" : "") : task));
                     for (int i = 0; i < turns; i++) {
                         messages.add(LlmMessage.assistant("action " + i));
                         messages.add(i % 3 == 1 ? LlmMessage.toolsAdded(List.of("respond"))
