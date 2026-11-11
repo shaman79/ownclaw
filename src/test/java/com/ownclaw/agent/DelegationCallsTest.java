@@ -55,7 +55,7 @@ class DelegationCallsTest {
     void callsAreRead() throws Exception {
         var second = new LinkedHashMap<String, Object>();
         second.put("to", "petr@example.com");
-        second.put("body", "{{1.body_text}}");
+        second.put("body", "{{call1.body_text}}");
         var list = List.of(Map.of("tool", "daily_news_digest"),
                 Map.of("tool", "smtp_send_email", "params", second));
         var plan = LocalExecutor.parsePlan(Map.of("calls", list));
@@ -118,12 +118,13 @@ class DelegationCallsTest {
 
         var outcome = executor(llm, new Usage(), digest, smtp).execute(calls("",
                 c("daily_news_digest", Map.of()),
-                c("smtp_send_email", Map.of("to", "petr@example.com", "body", "{{1.body_text}}"))),
+                c("smtp_send_email", Map.of("to", "petr@example.com", "body", "{{call1.body_text}}"))),
                 task(), UNCOUNTED, lane);
 
         assertTrue(outcome.ok(), outcome.text());
+        assertTrue(outcome.byCode(), "ended by the calls");
         assertEquals("Polévka: česneková. Hlavní: guláš.", smtp.calls.get(0).get("body"),
-                "the field is filled in by code, as in a call the local model writes");
+                "the field of call 1's result, filled in by code");
         assertTrue(llm.calls.isEmpty(), "no model call");
         assertEquals(0, lane.taken, "and the local model was not taken: nothing here needs it");
         assertEquals(List.of("daily_news_digest", "smtp_send_email"), outcome.toolsRun());
@@ -140,9 +141,10 @@ class DelegationCallsTest {
 
         var outcome = executor(new Scripted(), new Usage(), fetch, smtp).execute(calls("Tell Petr what is for lunch.",
                 c("daily_menu_fetcher", Map.of()),
-                c("smtp_send_email", Map.of("to", "petr@example.com", "body", "{{1}}"))), task(), UNCOUNTED, lane);
+                c("smtp_send_email", Map.of("to", "petr@example.com", "body", "{{call1}}"))), task(), UNCOUNTED, lane);
 
         assertFalse(outcome.ok());
+        assertTrue(outcome.byCode(), "a stop of the calls is the cloud's to fix, not the local tier failing");
         assertTrue(smtp.calls.isEmpty(), "nothing after the failure runs");
         assertEquals(0, lane.taken, "and the local model is not given the goal");
         String text = outcome.text();
@@ -183,13 +185,13 @@ class DelegationCallsTest {
 
         var outcome = executor(new Scripted(), new Usage(), fetch, smtp).execute(calls("",
                 c("daily_menu_fetcher", Map.of()),
-                c("smtp_send_email", Map.of("to", "petr@example.com", "body_text", "{{1.body_text}}"))),
+                c("smtp_send_email", Map.of("to", "petr@example.com", "body_text", "{{call1.body_text}}"))),
                 task(), UNCOUNTED);
 
         assertFalse(outcome.ok());
         assertTrue(smtp.calls.isEmpty());
-        assertTrue(outcome.text().contains("call 2 (smtp_send_email) was not run. Not run: the value of 'body_text'"),
-                outcome.text());
+        assertTrue(outcome.text().contains("call 2 (smtp_send_email) was not run. Not run: 'body_text' could not be "
+                + "filled in. {{1.body_text}} names a field that result does not have."), outcome.text());
     }
 
     @Test
@@ -197,6 +199,7 @@ class DelegationCallsTest {
     void theModelGoesOnFromTheCalls() {
         var fetch = new FakeTool("daily_menu_fetcher", false, List.of(), p -> ToolResult.success(MENU));
         var smtp = new FakeTool("smtp_send_email", true, List.of(), p -> ToolResult.success("Sent"));
+        // The local model's own numbering: the calls' results are its first.
         var llm = new Scripted(call("smtp_send_email", Map.of("to", "petr@example.com", "body", "{{1.body_text}}")),
                 done("sent the menu"));
         var lane = new Lane();
@@ -206,6 +209,7 @@ class DelegationCallsTest {
                 task(), UNCOUNTED, lane);
 
         assertTrue(outcome.ok(), outcome.text());
+        assertFalse(outcome.byCode(), "the local model had its part");
         assertEquals(1, lane.taken, "the local model is taken for the goal");
         assertEquals(1, fetch.calls.size(), "the call ran once, by code");
         assertEquals("Polévka: česneková. Hlavní: guláš.", smtp.calls.get(0).get("body"), "{{1}} is the call's result");
@@ -272,15 +276,148 @@ class DelegationCallsTest {
         assertTrue(withGoal.text().contains("Polévka"), "the call's result is not lost: " + withGoal.text());
     }
 
-    @Test
-    @DisplayName("the owner's chat shows each call as a call of the machine's, not a turn of the model")
-    void theChatSaysCall() {
-        var digest = new FakeTool("daily_news_digest", false, List.of(), p -> ToolResult.success(MENU));
+    // ── the numbering the cloud writes everywhere ──
+
+    /** A task whose first result is the owner's mail, private and not indexed, as a mail reader's is. */
+    static AgentContext withMail() {
         var ctx = task();
-        executor(new Scripted(), new Usage(), digest).execute(calls("", c("daily_news_digest", Map.of())), ctx, UNCOUNTED);
-        // The header a call's row carries: "call", not "turn".
-        var header = new TaskChat.Header(TaskChat.Actor.LOCAL, "call", 1, "daily_news_digest", null, 0, 0);
-        assertTrue(header.line().startsWith("🏠 Call 1 · daily_news_digest"), header.line());
-        assertEquals(1, header.data().get("call"));
+        ctx.addArtifact("imap_fetch", Map.of(), Map.of(),
+                "{\"ok\":true,\"body_text\":\"Jana: the boiler is fixed.\"}", true,
+                new Artifact.Decision(com.ownclaw.privacy.Label.PRIVATE, List.of("personal source"), false));
+        return ctx;
+    }
+
+    @Test
+    @DisplayName("{{N}} in a call is the task's result N, as everywhere the cloud writes one; {{callN}} is call N's")
+    void theTasksNumbering() {
+        var weather = new FakeTool("weather", false, List.of(), p -> ToolResult.success("{\"ok\":true,\"text\":\"Rain, 7 C\"}"));
+        var smtp = new FakeTool("smtp_send_email", true, List.of(), p -> ToolResult.success("Sent"));
+
+        var outcome = executor(new Scripted(), new Usage(), weather, smtp).execute(calls("",
+                c("weather", Map.of()),
+                c("smtp_send_email", Map.of("to", "petr@example.com",
+                        "body", "{{1.body_text}}\n\nWeather: {{call1.text}}"))), withMail(), UNCOUNTED);
+
+        assertTrue(outcome.ok(), outcome.text());
+        assertEquals("Jana: the boiler is fixed.\n\nWeather: Rain, 7 C", smtp.calls.get(0).get("body"),
+                "the task's mail, and the weather the first call returned -- not the weather twice");
+        // Mutation: resolve calls against the delegation's results, as before -> "Rain, 7 C" is
+        // emailed as the mail.
+    }
+
+    @Test
+    @DisplayName("a reference that cannot be filled in stops the calls: nothing goes out as literal braces")
+    void nothingGoesOutLiterally() {
+        var smtp = new FakeTool("smtp_send_email", true, List.of(), p -> ToolResult.success("Sent"));
+
+        var outcome = executor(new Scripted(), new Usage(), smtp).execute(calls("",
+                c("smtp_send_email", Map.of("to", "petr@example.com", "body", "Here is what Jana wrote:\n\n{{4.body_text}}"))),
+                withMail(), UNCOUNTED);
+
+        assertTrue(smtp.calls.isEmpty(), "the literal {{4.body_text}} was emailed before");
+        assertTrue(outcome.text().contains("{{4.body_text}} refers to a result the task does not have"), outcome.text());
+        for (String malformed : List.of("Total: {{1.}}", "From {{1:body_text}}", "{{\uFF11}}")) {
+            var again = executor(new Scripted(), new Usage(), smtp).execute(calls("",
+                    c("smtp_send_email", Map.of("body", malformed))), withMail(), UNCOUNTED);
+            assertFalse(again.ok(), malformed);
+        }
+        assertTrue(smtp.calls.isEmpty());
+        var template = executor(new Scripted(), new Usage(), smtp).execute(calls("",
+                c("smtp_send_email", Map.of("body", "{{ states('sensor.battery') }} and {{ name }}"))), withMail(), UNCOUNTED);
+        assertTrue(template.ok(), "a template's own braces are text: " + template.text());
+    }
+
+    @Test
+    @DisplayName("references are filled in at any depth of real JSON arguments, and a whole nested value too")
+    void nestedReferencesAreFilledIn() {
+        var level = new FakeTool("battery_level", false, List.of(), p -> ToolResult.success("{\"ok\":true,\"level\":41}"));
+        var ha = new FakeTool("ha_api", true, List.of(), p -> ToolResult.success("{\"ok\":true}"));
+
+        var outcome = executor(new Scripted(), new Usage(), level, ha).execute(calls("",
+                c("battery_level", Map.of()),
+                c("ha_api", Map.of("mode", "ws", "ws_commands", List.of(Map.of("type", "notify",
+                        "message", "Battery at {{call1.level}}%", "level", "{{call1.level}}"))))), task(), UNCOUNTED);
+
+        assertTrue(outcome.ok(), outcome.text());
+        assertEquals(List.of(Map.of("type", "notify", "message", "Battery at 41%", "level", "41")),
+                ha.calls.get(0).get("ws_commands"));
+    }
+
+    @Test
+    @DisplayName("a call cannot name its own result or a later call's")
+    void onlyAnEarlierCallCanBeNamed() {
+        var ping = new FakeTool("ping", false, List.of(), p -> ToolResult.success("pong"));
+
+        var outcome = executor(new Scripted(), new Usage(), ping).execute(calls("",
+                c("ping", Map.of("host", "{{call1}}"))), task(), UNCOUNTED);
+
+        assertFalse(outcome.ok());
+        assertTrue(ping.calls.isEmpty());
+        assertTrue(outcome.text().contains("'{{call1}}' names a call that has not run before it"), outcome.text());
+    }
+
+    @Test
+    @DisplayName("a refused call tells the cloud the reason, never the fields of a private result")
+    void privateFieldNamesStayOut() {
+        // A contacts lookup keyed by people's names: its descriptor withholds them, and a refusal
+        // listing every field of every result used to name them.
+        var ctx = task();
+        ctx.addArtifact("contacts_lookup", Map.of(), Map.of(),
+                "{\"Jana Novakova\":\"+420 601 000 001\",\"Petr Svoboda\":\"+420 601 000 002\"}", true,
+                new Artifact.Decision(com.ownclaw.privacy.Label.PRIVATE, List.of("personal source"), false));
+        var smtp = new FakeTool("smtp_send_email", true, List.of(), p -> ToolResult.success("Sent"));
+
+        var outcome = executor(new Scripted(), new Usage(), smtp).execute(calls("",
+                c("smtp_send_email", Map.of("to", "petr@example.com", "body", "{{1.phone}}"))), ctx, UNCOUNTED);
+
+        assertFalse(outcome.ok());
+        assertTrue(outcome.text().contains("{{1.phone}} names a field that result does not have"), outcome.text());
+        assertFalse(outcome.text().contains("Novakova"), outcome.text());
+        assertFalse(outcome.text().contains("Svoboda"), outcome.text());
+    }
+
+    @Test
+    @DisplayName("in the goal {{callN}} is the local model's own result N; a call's name is no text's")
+    void callHandlesInTheGoal() {
+        var plan = calls("Email {{call1.body_text}} to Petr, and mention {{call3}}.", c("daily_menu_fetcher", Map.of()));
+        var given = LocalExecutor.given(plan, List.of());
+        assertEquals("Email {{1.body_text}} to Petr, and mention (a result that does not exist).", given.plan().goal());
+        assertEquals(1, given.missing());
+        var e = assertThrows(IllegalArgumentException.class,
+                () -> LocalExecutor.parsePlan(Map.of("goal", "g", "texts", Map.of("call1", "x"))));
+        assertTrue(e.getMessage().contains("{{call1}} is how a call's result is named"), e.getMessage());
+    }
+
+    @Test
+    @DisplayName("a Stop while the local model is awaited, after the calls ran, is a partial result with what ran")
+    void aStopAfterTheCallsKeepsWhatRan() {
+        var smtp = new FakeTool("smtp_send_email", true, List.of(), p -> ToolResult.success("Sent"));
+        java.util.function.Function<java.util.function.Supplier<LocalExecutor.Outcome>, LocalExecutor.Outcome> stopped =
+                work -> { throw new com.ownclaw.core.TaskCancellationService.TaskCancelledException("stopped"); };
+
+        var outcome = executor(new Scripted(), new Usage(), smtp).execute(
+                calls("Then tell Petr.", c("smtp_send_email", Map.of("to", "petr@example.com", "body", "Menu"))),
+                task(), UNCOUNTED, stopped);
+
+        assertFalse(outcome.ok());
+        assertEquals(List.of("smtp_send_email"), outcome.toolsRun(), "the send is on record: " + outcome.text());
+        assertTrue(outcome.text().contains("Task cancelled during delegation."), outcome.text());
+        assertThrows(com.ownclaw.core.TaskCancellationService.TaskCancelledException.class,
+                () -> executor(new Scripted(), new Usage(), smtp).execute(plan("tell Petr"), task(), UNCOUNTED, stopped),
+                "with nothing run, the Stop goes on as before");
+    }
+
+    @Test
+    @DisplayName("a delegation the calls ended is no failed delegation: the cloud keeps orchestrating")
+    void theValveStaysShut() {
+        var ctx = task();
+        var stopped = new LinkedHashMap<String, Object>();
+        stopped.put(AgentLoop.BY_CODE, true);
+        ctx.trajectory().record(new AgentAction(AgentAction.DELEGATE, Map.of(), null),
+                AgentObservation.failure(AgentAction.DELEGATE, "Delegation stopped at call 1 of 1", stopped, 5));
+        assertFalse(ThinkingEngine.delegationFailed(ctx));
+        ctx.trajectory().record(new AgentAction(AgentAction.DELEGATE, Map.of(), null),
+                AgentObservation.failure(AgentAction.DELEGATE, "Delegation incomplete", Map.of(), 5));
+        assertTrue(ThinkingEngine.delegationFailed(ctx), "the local model's failure still opens it");
     }
 }

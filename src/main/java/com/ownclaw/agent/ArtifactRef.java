@@ -110,6 +110,17 @@ public record ArtifactRef(int handle, String field) {
         return handle < 1 ? null : new ArtifactRef(handle, field);
     }
 
+    /**
+     * The first thing in {@code text} written as a reference, well-formed or not -- braces around
+     * digits, a field after them -- or null. For a call the cloud wrote, where what is meant as a
+     * reference is filled in or refused, never sent as literal text (References#resolveExactly).
+     */
+    static String nearReferenceIn(String text) {
+        if (text == null) return null;
+        var m = NEAR.matcher(text);
+        return m.find() ? m.group().strip() : null;
+    }
+
     /** Whether a model plausibly meant this whole value as a reference. */
     public static boolean looksLikeReference(String value) {
         if (value == null) return false;

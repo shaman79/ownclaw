@@ -171,6 +171,121 @@ final class References {
     }
 
     /**
+     * A call the cloud wrote whole, resolved for code to run as written (LocalExecutor#runCalls):
+     * against the task's results, where {@code {{N}}} is the task's result N -- the numbering the
+     * cloud reads in every observation and descriptor -- at any depth of the arguments, and
+     * strictly: every reference in it is filled in, or the call is refused.
+     * <p>
+     * The local model's calls leave a handle past its last result as text (a template's own
+     * placeholder) and a reference inside a nested value as text. A call the cloud wrote is meant
+     * exactly, and its arguments are real JSON -- an object, a list -- where the cloud's own tool
+     * calls are flat: on 2026-11-11 a review sent "Here is what Jana wrote: {{4.body_text}}" out
+     * literally, and "Battery at {{1.level}}%" inside an object likewise. A text's
+     * {@code {{name}}} is put in at any depth, as everywhere; a name that is no text stays text.
+     * The reasons name only what the cloud wrote -- never a result's fields, which can be private
+     * data (a contacts lookup keyed by people's names).
+     */
+    static Resolved resolveExactly(Map<String, Object> written, List<Artifact> namespace, Map<String, String> texts) {
+        if (written == null || written.isEmpty()) return new Resolved(Map.of(), List.of(), null, null);
+        var out = new LinkedHashMap<String, Object>();
+        var used = new ArrayList<Artifact>();
+        for (var e : written.entrySet()) {
+            String[] why = {null};
+            Object value = exactly(e.getValue(), namespace, texts, used, why);
+            if (why[0] != null) return refuse(written, e.getKey(), why[0]);
+            out.put(e.getKey(), value);
+        }
+        return new Resolved(out, List.copyOf(used), null, null);
+    }
+
+    /** One value of {@link #resolveExactly}, at any depth; {@code why[0]} set when it is refused. */
+    private static Object exactly(Object v, List<Artifact> namespace, Map<String, String> texts,
+                                  List<Artifact> used, String[] why) {
+        if (v instanceof Map<?, ?> map) {
+            var out = new LinkedHashMap<Object, Object>();
+            for (var e : map.entrySet()) {
+                out.put(e.getKey(), exactly(e.getValue(), namespace, texts, used, why));
+                if (why[0] != null) return v;
+            }
+            return out;
+        }
+        if (v instanceof Collection<?> list) {
+            var out = new ArrayList<Object>();
+            for (Object x : list) {
+                out.add(exactly(x, namespace, texts, used, why));
+                if (why[0] != null) return v;
+            }
+            return out;
+        }
+        if (!(v instanceof String s)) return v;
+        ArtifactRef whole = ArtifactRef.parse(s);
+        if (whole != null) {
+            String value = filled(whole, namespace, used, why);
+            return value == null ? v : value;
+        }
+        if (ArtifactRef.LEGACY.matcher(ArtifactRef.trim(s)).matches() && legacyReference(s, namespace) != null) {
+            why[0] = "'" + s.strip() + "' is the old way of writing a reference. Write "
+                    + legacyReference(s, namespace) + " instead.";
+            return v;
+        }
+        var m = ArtifactRef.TOKEN_OR_NAME.matcher(s);
+        var sb = new StringBuilder();
+        var rest = new StringBuilder();
+        int last = 0;
+        while (m.find()) {
+            rest.append(s, last, m.start());
+            last = m.end();
+            String replacement;
+            if (m.group(1) != null) {
+                String text = texts.get(m.group(1));
+                replacement = text == null ? m.group() : text;   // no such text: a template's own
+            } else {
+                ArtifactRef inner = ArtifactRef.parse(m.group());
+                if (inner == null) {
+                    why[0] = "'" + m.group().strip() + "' looks like a reference but is not a valid one. "
+                            + "Write {{N}} or {{N.field}}, with N one of the task's results.";
+                    return v;
+                }
+                replacement = filled(inner, namespace, used, why);
+                if (replacement == null) return v;
+            }
+            m.appendReplacement(sb, java.util.regex.Matcher.quoteReplacement(replacement));
+        }
+        rest.append(s, last, s.length());
+        // What is left once every well-formed one is taken out: a reference written wrong
+        // ({{1.}}, {{ 1 }}x}) would otherwise go out as literal text.
+        if (ArtifactRef.nearReferenceIn(rest.toString()) != null) {
+            why[0] = "'" + ArtifactRef.nearReferenceIn(rest.toString()) + "' looks like a reference but is not "
+                    + "a valid one. Write {{N}} or {{N.field}}, with N one of the task's results.";
+            return v;
+        }
+        m.appendTail(sb);
+        return sb.toString();
+    }
+
+    /** What a reference in a call the cloud wrote stands for, or null with {@code why[0]} set. */
+    private static String filled(ArtifactRef ref, List<Artifact> namespace, List<Artifact> used, String[] why) {
+        if (ref.handle() > namespace.size()) {
+            why[0] = ref + " refers to a result the task does not have: the task's results are {{1}} to "
+                    + ArtifactRef.handle(namespace.size()) + ", and a call's own result is {{callN}}.";
+            if (namespace.isEmpty()) why[0] = ref + " refers to a result the task does not have: it has none yet.";
+            return null;
+        }
+        Artifact a = namespace.get(ref.handle() - 1);
+        if (!a.succeeded()) {
+            why[0] = ref + " is a FAILED result — its output is an error message, not something to pass on.";
+            return null;
+        }
+        String value = ref.field() == null ? a.output() : field(a.output(), ref);
+        if (value == null) {
+            why[0] = ref + " names a field that result does not have.";
+            return null;
+        }
+        if (!used.contains(a)) used.add(a);
+        return value;
+    }
+
+    /**
      * A list's or an object's values with every {@code {{name}}} of a text replaced with it, in
      * one pass over each string, at any depth. A reference to a result there is left as written:
      * one that is the whole of a value is refused before this ({@link #nestedReference}), and one

@@ -180,7 +180,20 @@ public class LocalExecutor {
         List<Artifact> ran = new ArrayList<>();
         Outcome outcome = runCalls(given.plan(), given.results(), parentContext, ran);
         if (outcome == null) {
-            outcome = lane.apply(() -> run(given.plan(), given.results(), parentContext, billed, ran));
+            // Stopped after the calls ran -- before the local model was taken, or while waiting
+            // for it behind another task: what ran is the cloud's to know, as a partial result.
+            // Thrown on out of here instead, the step was never recorded and the calls' changes
+            // were nowhere in what the cloud read.
+            if (!ran.isEmpty() && parentContext.isCancelled()) {
+                outcome = partial("Task cancelled during delegation.", ran);
+            } else {
+                try {
+                    outcome = lane.apply(() -> run(given.plan(), given.results(), parentContext, billed, ran));
+                } catch (com.ownclaw.core.TaskCancellationService.TaskCancelledException stopped) {
+                    if (ran.isEmpty()) throw stopped;
+                    outcome = partial("Task cancelled during delegation.", ran);
+                }
+            }
         }
         String notes = "";
         if (given.missing() > 0) {
@@ -199,7 +212,7 @@ public class LocalExecutor {
         }
         if (notes.isEmpty()) return outcome;
         return new Outcome(notes + outcome.text(), outcome.toolsRun(),
-                outcome.stepCount(), outcome.ok(), outcome.produced());
+                outcome.stepCount(), outcome.ok(), outcome.produced(), outcome.byCode());
     }
 
     private static final String MISSING_REFERENCE_NOTE = "NOTE: the delegation's goal named "
@@ -222,7 +235,10 @@ public class LocalExecutor {
      * the morning email. A reference to no result is taken out and counted. Step PARAMETERS are
      * left alone: in a plan, {{1}} there means the plan's own step 1, which is exactly how the
      * delegation numbers. So are the texts, and a text's {{name}} wherever it is written: it is
-     * no result's handle, and the local model writes it in a call to insert the text.
+     * no result's handle, and the local model writes it in a call to insert the text. A call's
+     * result named in the prose, {{call2}}, is the local model's own result 2: the calls run first,
+     * and their results are its first ({@link #runCalls}). One naming no call is taken out and
+     * counted. The calls themselves are left alone; code resolves them in the task's numbering.
      */
     static Given given(DelegationPlan plan, List<Artifact> results) {
         var named = new java.util.LinkedHashMap<Integer, Artifact>();
@@ -244,7 +260,22 @@ public class LocalExecutor {
                 m.appendReplacement(sb, java.util.regex.Matcher.quoteReplacement(words));
             }
             m.appendTail(sb);
-            return sb.toString();
+            // After the task's handles are in words, so a call's is not read as one of them.
+            var c = CALL_REF.matcher(sb.toString());
+            var out = new StringBuilder();
+            while (c.find()) {
+                int k = Integer.parseInt(c.group(1));
+                String own;
+                if (k >= 1 && k <= plan.calls().size()) {
+                    own = "{{" + k + c.group(2) + "}}";
+                } else {
+                    missing[0]++;
+                    own = "(a result that does not exist)";
+                }
+                c.appendReplacement(out, java.util.regex.Matcher.quoteReplacement(own));
+            }
+            c.appendTail(out);
+            return out.toString();
         };
         String goal = inWords.apply(plan.goal());
         var steps = new ArrayList<DelegationPlan.Step>();
@@ -253,8 +284,6 @@ public class LocalExecutor {
         }
         var checkpoints = plan.checkpoints() == null ? List.<String>of()
                 : plan.checkpoints().stream().map(inWords).toList();
-        // The calls' arguments are left alone, as the steps' are: {{1}} there is the first call's
-        // result, which is exactly how the delegation numbers.
         return new Given(new DelegationPlan(goal, steps, checkpoints, plan.tools(), plan.texts(), plan.calls()),
                 List.copyOf(named.values()), missing[0]);
     }
@@ -262,8 +291,11 @@ public class LocalExecutor {
     /**
      * The plan's exact calls, run by code in their order before the local model is given anything,
      * each through the same guards as a call the local model makes ({@link #act}) but the one
-     * against retyping: the cloud wrote it whole, so nothing of it was copied by hand. The results
-     * are the delegation's first, {@code {{1}}} on.
+     * against retyping: the cloud wrote it whole, so nothing of it was copied by hand. Its
+     * arguments are resolved as the cloud writes everything ({@link References#resolveExactly}):
+     * {@code {{N}}} is the task's result N, and {@code {{call2}}} the result of call 2 of the
+     * list ({@link #withCallHandles}). The results are also the local model's first, {@code {{1}}}
+     * on, should it go on with a goal.
      * <p>
      * The local model used to type every call itself, at a few tokens a second, even one the cloud
      * had written out exactly -- most delegations' goals were such a list in prose. The daily news
@@ -283,10 +315,20 @@ public class LocalExecutor {
         List<DelegationPlan.Call> calls = plan.calls();
         if (calls.isEmpty()) return null;
         for (int i = 0; i < calls.size(); i++) {
-            if (parentContext.isCancelled()) return partial("Task cancelled during delegation.", mine);
+            if (parentContext.isCancelled()) return byCode(partial("Task cancelled during delegation.", mine));
             DelegationPlan.Call call = calls.get(i);
+            // {{call2}} as the task's handle of call 2's result, before anything else reads the call.
+            String[] early = {null};
+            Object params = withCallHandles(call.params(), mine, i, early);
+            if (early[0] != null) {
+                return callsStopped(plan, i, "call " + (i + 1) + " (" + call.tool() + ") was not run: '" + early[0]
+                        + "' names a call that has not run before it. A call's result is named in a later call: "
+                        + "{{call1}} in call 2 or after.", mine);
+            }
             int had = mine.size();
-            String reply = act(new ExecutorAction(false, null, call.tool(), call.params()), parentContext,
+            @SuppressWarnings("unchecked")
+            Map<String, Object> args = (Map<String, Object>) params;
+            String reply = act(new ExecutorAction(false, null, call.tool(), args), parentContext,
                     mine, given, true, plan, i + 1, null, true);
             if (mine.size() == had) {
                 return callsStopped(plan, i, "call " + (i + 1) + " (" + call.tool() + ") was not run. " + reply, mine);
@@ -298,7 +340,65 @@ public class LocalExecutor {
         }
         if (!plan.goal().isBlank()) return null;
         log.info("Delegation completed: {} call(s) run by code, no goal for the local model.", calls.size());
-        return completed("", callsRun(calls.size()), List.of(), mine, null);
+        return byCode(completed("", callsRun(calls.size()), List.of(), mine, null));
+    }
+
+    /**
+     * {@code {{call2}}} and {@code {{call2.field}}} in a call the cloud wrote: the result of call 2
+     * of the same list. Everywhere else the cloud reads {@code {{N}}} as the task's result N --
+     * every observation and descriptor says so -- and a call's results do not exist yet when it
+     * writes them, so they have a name of their own, which code turns into the task's handle.
+     * "call" followed by digits is no text's name ({@link #texts}).
+     */
+    static final java.util.regex.Pattern CALL_REF = java.util.regex.Pattern.compile(
+            "\\{\\{[\\s\\u00A0\\u200B\\u200C\\u200D\\u2060\\uFEFF]*call(\\d{1,9})((?:\\.[^{}]*)?)\\}\\}");
+
+    /**
+     * {@code v} with each {@code {{callK}}} in it, at any depth, written as the task's handle of
+     * call K's result -- K one of the {@code before} calls that ran, whose results begin
+     * {@code ran}. One naming a call that has not run sets {@code early[0]} to it.
+     */
+    static Object withCallHandles(Object v, List<Artifact> ran, int before, String[] early) {
+        if (v instanceof String s) {
+            var m = CALL_REF.matcher(s);
+            var sb = new StringBuilder();
+            boolean any = false;
+            while (m.find()) {
+                int k = Integer.parseInt(m.group(1));
+                if (k < 1 || k > before || k > ran.size()) {
+                    early[0] = m.group().strip();
+                    return v;
+                }
+                m.appendReplacement(sb, java.util.regex.Matcher.quoteReplacement(
+                        "{{" + ran.get(k - 1).n() + m.group(2) + "}}"));
+                any = true;
+            }
+            if (!any) return s;
+            m.appendTail(sb);
+            return sb.toString();
+        }
+        if (v instanceof Map<?, ?> map) {
+            var out = new LinkedHashMap<String, Object>();
+            for (var e : map.entrySet()) {
+                out.put(String.valueOf(e.getKey()), withCallHandles(e.getValue(), ran, before, early));
+                if (early[0] != null) return v;
+            }
+            return out;
+        }
+        if (v instanceof Collection<?> list) {
+            var out = new ArrayList<Object>();
+            for (Object x : list) {
+                out.add(withCallHandles(x, ran, before, early));
+                if (early[0] != null) return v;
+            }
+            return out;
+        }
+        return v;
+    }
+
+    /** The outcome as one the cloud's calls ended, the local model given nothing ({@link Outcome#byCode}). */
+    private static Outcome byCode(Outcome o) {
+        return new Outcome(o.text(), o.toolsRun(), o.stepCount(), o.ok(), o.produced(), true);
     }
 
     /**
@@ -328,9 +428,9 @@ public class LocalExecutor {
         String text = alreadyDone(ran) + "Delegation stopped at call " + (at + 1) + " of " + plan.calls().size()
                 + ": " + why + rest + "\n\n"
                 + (ran.isEmpty() ? "" : "Results of the calls that ran:\n\n" + resultsForCloud(ran))
-                + ledger(ran) + verbatimFailures(ran);
+                + ledger(ran) + verbatimFailures(ran, true);
         log.warn("Delegation stopped at call {} of {}.", at + 1, plan.calls().size());
-        return new Outcome(text, toolNames(ran), ran.size(), false, List.copyOf(ran));
+        return new Outcome(text, toolNames(ran), ran.size(), false, List.copyOf(ran), true);
     }
 
     /**
@@ -909,7 +1009,11 @@ public class LocalExecutor {
         // It was once computed twice, which is how a guard and the thing it guards drift
         // apart. The texts the cloud handed the delegation are put in here too, by name: retyped,
         // a 33-line script install came back with a line broken in five calls of seven (2026-10-08).
-        References.Resolved refs = References.resolveInText(action.params, mine, plan.texts());
+        // A call the cloud wrote is resolved as it writes everything: {{N}} is the task's result N,
+        // at any depth, and a reference that cannot be filled in refuses the call (resolveExactly).
+        References.Resolved refs = byCode
+                ? References.resolveExactly(action.params, parentContext.artifacts(), plan.texts())
+                : References.resolveInText(action.params, mine, plan.texts());
         Map<String, Object> params = refs.params();
 
         // A reference that could not be resolved: out of range, a missing field, a failed
@@ -919,6 +1023,10 @@ public class LocalExecutor {
         if (!refs.ok()) {
             log.warn("Delegation step {}: '{}' — reference refused.", mine.size() + 1,
                     refs.refused());
+            // To the cloud, the reason alone: the list of what can be referenced names every field
+            // of every result, a private one's included, which its descriptor withholds (a
+            // contacts lookup keyed by people's names). The cloud has the descriptors.
+            if (byCode) return "Not run: '" + refs.refused() + "' could not be filled in. " + refs.reason();
             return "Not run: the value of '" + refs.refused()
                     + "' would have been sent as literal text. " + refs.reason() + " "
                     + References.available(mine);
@@ -1024,7 +1132,8 @@ public class LocalExecutor {
         // for vault values, as on the cloud's path (AgentLoop.executeTool).
         curatorService.recordUsage(action.tool, parentContext.userId(), parentContext.taskId(),
                 worked, toolMs,
-                worked || wroteAfterPrivate ? null : References.argsForTask(action.params, mine),
+                worked || wroteAfterPrivate ? null
+                        : byCode ? action.params : References.argsForTask(action.params, mine),
                 worked ? null : Redactor.scrubVault(toolResult, parentContext.secretValues()).text(),
                 artifact.label());
 
@@ -1179,6 +1288,10 @@ public class LocalExecutor {
                 throw new IllegalArgumentException("'" + name + "' cannot name a text: a name is a "
                         + "lowercase letter, then lowercase letters, digits and underscores, as in "
                         + "watchdog_script -- never a number, which is a result's handle.");
+            }
+            if (name.matches("call\\d+")) {
+                throw new IllegalArgumentException("'" + name + "' cannot name a text: {{" + name
+                        + "}} is how a call's result is named.");
             }
             if (!(e.getValue() instanceof String text)) {
                 throw new IllegalArgumentException("texts." + name + " must be a string: the exact "
@@ -1833,6 +1946,15 @@ public class LocalExecutor {
      * than any summary.
      */
     static String verbatimFailures(List<Artifact> results) {
+        return verbatimFailures(results, false);
+    }
+
+    /**
+     * @param taskNumbered the results are of calls the cloud wrote, whose arguments are in the
+     *                     task's numbering already ({@link #runCalls}); rewritten as the local
+     *                     model's, {{4}} would be printed as whatever the fourth of them was
+     */
+    static String verbatimFailures(List<Artifact> results, boolean taskNumbered) {
         if (results.stream().allMatch(Artifact::succeeded)) return "";
         var sb = new StringBuilder("\n\n--- Failed steps (verbatim) ---");
         for (Artifact r : results) {
@@ -1844,7 +1966,7 @@ public class LocalExecutor {
             // shows neither its arguments nor its output.
             sb.append("\n[").append(r.handle()).append(' ').append(r.tool()).append("] ")
               .append(r.isPrivate() ? "(arguments withheld)"
-                      : String.valueOf(References.argsForTask(r.written(), results)))
+                      : String.valueOf(taskNumbered ? r.written() : References.argsForTask(r.written(), results)))
               .append("\n")
               .append(r.isPrivate() ? r.describe() : r.output());
         }
@@ -1909,9 +2031,18 @@ public class LocalExecutor {
      * @param toolsRun  which registry tools actually executed, in order, with repeats collapsed
      * @param stepCount how many tool calls ran
      * @param ok        whether this counts as a successful delegation
+     * @param byCode    it ended with the cloud's exact calls ({@link #runCalls}), the local model
+     *                  given nothing: when one of them stopped it, that is the cloud's call to
+     *                  fix -- a name or a field it got wrong -- and not the local tier failing, so
+     *                  it does not hand the cloud the skills for the rest of the task
+     *                  (ThinkingEngine#delegationFailed)
      */
     public record Outcome(String text, List<String> toolsRun, int stepCount, boolean ok,
-                          List<Artifact> produced) {
+                          List<Artifact> produced, boolean byCode) {
+        public Outcome(String text, List<String> toolsRun, int stepCount, boolean ok, List<Artifact> produced) {
+            this(text, toolsRun, stepCount, ok, produced, false);
+        }
+
         static Outcome failed(String text) { return new Outcome(text, List.of(), 0, false, List.of()); }
     }
 

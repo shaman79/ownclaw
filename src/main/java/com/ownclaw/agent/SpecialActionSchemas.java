@@ -165,13 +165,15 @@ public final class SpecialActionSchemas {
                             + "one line is refused. When you know calls exactly -- the tool and every "
                             + "argument -- put them in 'calls': code runs them on this machine in your "
                             + "order, exactly as written, in seconds; the local model types every call "
-                            + "it makes, at a few tokens a second. In a call's params {{1}} is the "
-                            + "first call's result and {{1.field}} a field of it, as the local model "
-                            + "numbers its own; {{name}} is one of the texts. The calls stop at the "
-                            + "first that fails. With no goal, their results come back to you -- a "
-                            + "private one as its description. With a goal, the local model goes on "
-                            + "from them: give one only for what needs judgement on what they return, "
-                            + "or a long result read here rather than by you.",
+                            + "it makes, at a few tokens a second. In a call's params {{N}} is the "
+                            + "task's result N, as in every argument you write, and {{call1}} or "
+                            + "{{call1.field}} the result of call 1 of the list -- as the whole value or "
+                            + "inside text, at any depth; {{name}} is one of the texts. A reference that "
+                            + "cannot be filled in stops the calls; nothing goes out as literal braces. "
+                            + "The calls stop at the first that fails. With no goal, their results come "
+                            + "back to you -- a private one as its description. With a goal, the local "
+                            + "model goes on from them: give one only for what needs judgement on what "
+                            + "they return, or a long result read here rather than by you.",
                     params(
                             "goal", ToolParam.optional("string", "What the local model is to achieve, "
                                     + "stated fully, with the handle of each earlier result it should "
@@ -180,10 +182,8 @@ public final class SpecialActionSchemas {
                             "calls", ToolParam.optional("array", "Exact tool calls, run by code in this "
                                     + "order before anything else: [{\"tool\": \"exact_name\", \"params\": "
                                     + "{...}}]. Params hold real JSON values -- an object or a list where "
-                                    + "the tool takes one -- with {{1}} for the first call's result. In "
-                                    + "the goal a handle is an earlier result of the task, as always: "
-                                    + "name a call's result there in words (\"what the first call "
-                                    + "returned\")."),
+                                    + "the tool takes one. {{N}} is the task's result N and {{call1}} the "
+                                    + "first call's result, in the params as in the goal."),
                             // A string, not an array: OpenAI rejects an array schema with no
                             // items, and one bad schema fails every request that carries it.
                             "tools", ToolParam.optional("string", "Comma-separated exact names of "

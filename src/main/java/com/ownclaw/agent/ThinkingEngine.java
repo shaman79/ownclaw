@@ -683,12 +683,13 @@ public class ThinkingEngine {
      * is not one: the cloud is told what to change and delegates again, and the local tier has its
      * turn then.
      */
-    private static boolean delegationFailed(AgentContext context) {
+    static boolean delegationFailed(AgentContext context) {
         return context.trajectory().turns().stream().anyMatch(t ->
                 t.action() != null && AgentAction.DELEGATE.equals(t.action().tool())
                         && t.observation() != null && !t.observation().success()
                         && (t.observation().structured() == null
-                                || !Boolean.TRUE.equals(t.observation().structured().get(AgentLoop.NOT_STARTED))));
+                                || !Boolean.TRUE.equals(t.observation().structured().get(AgentLoop.NOT_STARTED))
+                                        && !Boolean.TRUE.equals(t.observation().structured().get(AgentLoop.BY_CODE))));
     }
 
     /** What the debug panel shows for a native call, where there is no raw JSON to display. */
@@ -941,9 +942,9 @@ public class ThinkingEngine {
         sb.append("    when the calls are all there is to do.\n");
         sb.append("  calls: [{tool, params}] exact calls, run by code in your order before anything\n");
         sb.append("    else, exactly as written -- seconds, where the local model types each call it\n");
-        sb.append("    makes at a few tokens a second. In params {{1}} is the first call's result,\n");
-        sb.append("    {{1.field}} a field of it. They stop at the first that fails; with no goal\n");
-        sb.append("    their results come back to you.\n");
+        sb.append("    makes at a few tokens a second. In params {{N}} is the task's result N and\n");
+        sb.append("    {{call1}} (or {{call1.field}}) the first call's result. They stop at the first\n");
+        sb.append("    that fails; with no goal their results come back to you.\n");
         sb.append("  steps (optional): [{description, tool, params}] only when the order matters\n");
         sb.append("    and you already know it. Omit it rather than guess at params.\n");
         sb.append("  tools: comma-separated exact names of the tools it will need. Only these,\n");

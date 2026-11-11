@@ -1227,13 +1227,16 @@ public class AgentLoop {
                 // here also trips the valve in ThinkingEngine, so the registry comes back and
                 // the cloud can finish the job itself rather than delegating into a wall.
                 boolean ok = outcome.ok();
-                if (!ok && outcome.stepCount() == 0 && !result.startsWith("ERROR")) {
+                if (!ok && outcome.stepCount() == 0 && !result.startsWith("ERROR") && plan.calls().isEmpty()) {
                     log.warn("Task {} step {}: delegation claimed completion with no tool call.",
                             context.taskId(), step + 1);
                 }
                 // Which skills really ran, so curation and scheduled_task_runs.skills_used see
                 // the work instead of a single 'delegate' entry.
                 Map<String, Object> structured = new LinkedHashMap<>(asked);
+                // Ended by the cloud's own calls, the local model given nothing: a stop there is no
+                // failure of the local tier (ThinkingEngine#delegationFailed).
+                if (outcome.byCode()) structured.put(BY_CODE, true);
                 if (!outcome.toolsRun().isEmpty()) structured.put("delegatedTools", outcome.toolsRun());
                 if (!outcome.produced().isEmpty()) {
                     structured.put("artifacts", outcome.produced().stream().map(a -> Map.of(
@@ -1339,6 +1342,14 @@ public class AgentLoop {
      * (ThinkingEngine#delegationFailed).
      */
     static final String NOT_STARTED = "notStarted";
+
+    /**
+     * Marks a delegate step that ended with the cloud's exact calls, run by code before the local
+     * model was given anything (LocalExecutor#runCalls): whether they all ran or one stopped them,
+     * the local tier had no part in it, so it is no failed delegation either
+     * (ThinkingEngine#delegationFailed).
+     */
+    static final String BY_CODE = "byCode";
 
     /**
      * A delegation refused before the local model was given anything: texts that are not an
@@ -3218,8 +3229,28 @@ public class AgentLoop {
         // works). Only ones the cloud wrote, which the loop puts beside the delegation's result --
         // or beside why it was not started.
         if (action.isDelegate() && obs.structured() != null
-                && obs.structured().get("goal") instanceof String goal) {
+                && obs.structured().get("goal") instanceof String goal && !goal.isBlank()) {
             details.put("goal", com.ownclaw.privacy.Redactor.scrubVault(goal, context.secretValues()).text());
+        }
+        // The exact calls it was handed, each its tool and its arguments as the cloud wrote them,
+        // without the vault's values: the task page shows them where it shows a goal.
+        if (action.isDelegate() && obs.structured() != null
+                && obs.structured().get("calls") instanceof List<?> calls) {
+            var shown = new ArrayList<Map<String, String>>();
+            for (Object c : calls) {
+                if (!(c instanceof Map<?, ?> call)) continue;
+                String args;
+                try {
+                    args = TextCalls.MAPPER.writerWithDefaultPrettyPrinter().writeValueAsString(call.get("params"));
+                } catch (Exception e) {
+                    args = String.valueOf(call.get("params"));
+                }
+                var one = new LinkedHashMap<String, String>();
+                one.put("tool", String.valueOf(call.get("tool")));
+                one.put("params", com.ownclaw.privacy.Redactor.scrubVault(args, context.secretValues()).text());
+                shown.add(one);
+            }
+            details.put("calls", shown);
         }
         if (action.isDelegate() && obs.structured() != null
                 && obs.structured().get("texts") instanceof Map<?, ?> texts) {

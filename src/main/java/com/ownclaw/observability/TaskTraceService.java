@@ -166,6 +166,9 @@ public class TaskTraceService {
                     // delegate: the texts the cloud handed it by name, whole, in their order. Absent
                     // where it handed none, and on the same rows as the goal.
                     s.put("texts", d.path("texts").isObject() ? texts(d.path("texts")) : null);
+                    // delegate: the exact calls the cloud handed it, run by code, each its tool and
+                    // its arguments. Absent where it handed none.
+                    s.put("calls", d.path("calls").isArray() ? calls(d.path("calls")) : null);
                     // delegate: refused before the local model was given anything.
                     s.put("notStarted", d.path("notStarted").asBoolean(false));
                     s.put("tier", "delegate".equals(tool) ? (localDelta > 0 ? "local" : null) : decidedBy);
@@ -343,6 +346,17 @@ public class TaskTraceService {
     }
 
     /** A delegation's texts, name to text, in the order the row holds them. */
+    private static List<Map<String, String>> calls(JsonNode calls) {
+        var out = new ArrayList<Map<String, String>>();
+        for (JsonNode c : calls) {
+            var one = new LinkedHashMap<String, String>();
+            one.put("tool", c.path("tool").asText());
+            one.put("params", c.path("params").asText());
+            out.add(one);
+        }
+        return out;
+    }
+
     private static Map<String, String> texts(JsonNode texts) {
         var out = new LinkedHashMap<String, String>();
         texts.fields().forEachRemaining(e -> out.put(e.getKey(), e.getValue().asText()));
