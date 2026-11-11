@@ -27,7 +27,9 @@ import java.util.Map;
  * event of the reply carried ({@link LlmProgress#received}). Made by {@link AgentContext#call},
  * and closed when the call has returned or failed.
  * <p>
- * And it ends a reply that has become a verbatim loop ({@link #looping}).
+ * And it ends a reply whose reasoning has become a verbatim loop ({@link #repeating}) -- never one
+ * for what it writes out: an answer and a tool call's arguments are output, which neither their
+ * length nor their repeating ends ({@link #LOOP_REPEATS}).
  * <p>
  * What the counts and the texts describe is the reply under way: a request sent again -- after
  * an overload, or to the model a refusal names -- is answered by a reply of its own, and the
@@ -36,11 +38,10 @@ import java.util.Map;
 public final class LiveCall implements LlmProgress, AutoCloseable {
 
     /**
-     * How often a reply is checked for a loop: each time its reasoning, or its answer, has grown
-     * by another 2,000 characters since that text was last checked. A check reads the whole text
-     * so far, so it is not made at every event; 2,000 characters are about a minute of the local
-     * model's writing and a few seconds of a cloud model's, which is how much longer a loop runs
-     * than it would have to.
+     * How often a reply's reasoning is checked for a loop: each time it has grown by another 2,000
+     * characters since it was last checked. A check reads the whole text so far, so it is not made
+     * at every event; 2,000 characters are about a minute of the local model's writing and a few
+     * seconds of a cloud model's, which is how much longer a loop runs than it would have to.
      */
     static final int LOOP_CHECK_EVERY = 2_000;
 
@@ -52,11 +53,18 @@ public final class LiveCall implements LlmProgress, AutoCloseable {
     static final int LOOP_WINDOW = 300;
 
     /**
-     * How many times those last characters must appear in the reply's text so far, none
-     * overlapping another, for the reply to be ended as a loop: 4. A reply that quotes a file whose
-     * blocks repeat once or twice holds such a block two or three times, and goes on; a model that
-     * has written the same stretch four times is in a loop, and would write it until its context
-     * window was full -- hours, on the local model.
+     * How many times those last characters must appear in the reasoning so far, none overlapping
+     * another, for the reply to be ended as a loop: 4. A model that has thought the same stretch
+     * four times word for word is in a loop, and would go on until its context window was full --
+     * hours, on the local model.
+     * <p>
+     * Only the reasoning is checked. What a reply writes out -- its answer, a tool call's arguments
+     * -- is output, and output repeats: a table's rows, a grid of zeros, a dashboard's cards, a
+     * config file's blocks. No length and no count of repeats tells such data from a loop, so every
+     * such check was a cap on output: four copies of any 300 characters ended an answer quoting a
+     * config, and a call was ended after some 18,000 characters of repeating records -- a limit the
+     * owner had ruled out (2026-11-11). Output streams, so a runaway is seen as it grows -- the
+     * owner's chat shows its characters so far ({@link #shown}) -- and Stop ends it.
      * <p>
      * Nothing else bounds a reply: this application sets no limit of its own on its length, and
      * neither its length nor the time it takes ends a call that is not looping. Only the model's
@@ -64,42 +72,6 @@ public final class LiveCall implements LlmProgress, AutoCloseable {
      * between two events, and Stop do.
      */
     static final int LOOP_REPEATS = 4;
-
-    /**
-     * How many checks in a row must find a tool call's text repeating ({@link #repeatingSince})
-     * before the reply is ended: 10, where reasoning and an answer take one. A call's text is data,
-     * and data repeats -- a grid of zeros in a script, a table's rows, a dashboard's cards that differ
-     * in one line -- where prose does not. But data ends, and a check whose new text is past it finds
-     * nothing, while a loop goes on and is found at every check. A check also finds data that ended
-     * within its new text, so a stretch of repeated data is found by the checks it spans and one
-     * more -- the first some 1,500 characters into it: ten in a row let some 18,000 characters of
-     * records repeat -- records whose differences lie 330 or more identical characters apart, such as
-     * 44 records of 400 characters or 260 identical 68-character rows -- before the call is ended,
-     * and a loop is ended some 20,000 characters after it began: minutes of the local model's
-     * writing, where a loop in a call ran for the hour the read timeout allowed, and, streamed, would
-     * run until the context window was full. Ended wrongly, a call's work goes back to the model that
-     * delegated it; that is the cost of data longer than this. The dashboard configuration retyped on
-     * 2026-11-10 -- 98 cards, 37,600 characters, more written out -- runs whole: its cards differ
-     * every few lines.
-     */
-    static final int LOOP_CALL_CHECKS = 10;
-
-    /**
-     * How far apart the stretches a check of a call's text looks for end, through the text written
-     * since the check before: every 25 characters. A loop that varies a little each round -- a card
-     * whose entity line changes -- repeats only the stretches that lie wholly in what stays the same,
-     * and only looking at every place in the new text, not at its last characters alone, finds one
-     * wherever in the round the check falls. 25 apart, it finds a loop whose part that stays the same
-     * is 25 characters longer than {@link #LOOP_WINDOW}.
-     */
-    static final int LOOP_STRIDE = 25;
-
-    /**
-     * How far back from a stretch its earlier copies are looked for, at a check of a call's text:
-     * 32,000 characters, four rounds of a loop up to some 8,000 characters long. A longer round is
-     * found by the check every text gets, of its last characters through all of it.
-     */
-    static final int LOOP_REACH = 32_000;
 
     /**
      * How much of the end of each text the ops API shows of a call under way ({@link #forOps}):
@@ -142,10 +114,8 @@ public final class LiveCall implements LlmProgress, AutoCloseable {
     // The reply under way, guarded by this.
     private final StringBuilder reasoning = new StringBuilder();
     private final StringBuilder answer = new StringBuilder();
-    /** How long each text was when it was last checked for a loop. */
-    private int reasoningChecked, answerChecked;
-    /** The checks in a row that found a tool call's text repeating ({@link #LOOP_CALL_CHECKS}). */
-    private int callRepeats;
+    /** How long the reasoning was when it was last checked for a loop. */
+    private int reasoningChecked;
     /** Where the reasoning's line that has not ended yet begins. */
     private int lineStart;
     /** The latest complete line of the reasoning, or null before one has ended. */
@@ -194,7 +164,7 @@ public final class LiveCall implements LlmProgress, AutoCloseable {
             synchronized (this) {
                 reasoning.setLength(0);
                 answer.setLength(0);
-                reasoningChecked = answerChecked = lineStart = callRepeats = 0;
+                reasoningChecked = lineStart = 0;
                 line = null;
                 calls.clear();
                 last = null;
@@ -209,10 +179,9 @@ public final class LiveCall implements LlmProgress, AutoCloseable {
     }
 
     /**
-     * Kept, then checked for a loop: a reply whose reasoning or answer has become one is ended
-     * here, with {@link RepeatedOutput}. A tool call's arguments are the model's answer too, and
-     * are checked with it -- ended only when the checks find them repeating {@link #LOOP_CALL_CHECKS}
-     * times in a row, as data that repeats is not.
+     * Kept, and the reasoning checked for a loop: a reply whose reasoning has become one is ended
+     * here, with {@link RepeatedOutput}. Its answer and its tool calls' arguments are kept and
+     * shown, never ended for what they hold ({@link #LOOP_REPEATS}).
      */
     @Override
     public synchronized void received(Part part, String text) {
@@ -229,21 +198,6 @@ public final class LiveCall implements LlmProgress, AutoCloseable {
         if (reasoning.length() - reasoningChecked >= LOOP_CHECK_EVERY) {
             reasoningChecked = reasoning.length();
             if (repeating(reasoning)) throw looped(reasoning, "of reasoning");
-        }
-        if (answer.length() - answerChecked >= LOOP_CHECK_EVERY) {
-            int since = answerChecked;
-            answerChecked = answer.length();
-            boolean inACall = part == Part.ARGUMENTS || part == Part.CALL;
-            if (!inACall) {
-                callRepeats = 0;
-                if (repeating(answer)) throw looped(answer, "of its answer");
-            } else if (repeating(answer) || repeatingSince(answer, since)) {
-                if (++callRepeats >= LOOP_CALL_CHECKS) {
-                    throw looped(answer, "of its answer, in a tool call it went on repeating");
-                }
-            } else {
-                callRepeats = 0;
-            }
         }
     }
 
@@ -284,87 +238,6 @@ public final class LiveCall implements LlmProgress, AutoCloseable {
             h = rolled(h, text, at);
             at++;
         }
-    }
-
-    /**
-     * Whether a stretch of {@link #LOOP_WINDOW} characters ending anywhere in the text written since
-     * {@code since} -- every {@link #LOOP_STRIDE} characters of it -- appears {@link #LOOP_REPEATS}
-     * times or more, none overlapping another, within the {@link #LOOP_REACH} characters before it.
-     * Whether a check finds a loop does not depend on where in the loop's round it falls: looking at
-     * the text's last characters alone, a loop whose rounds differ in one line was found only by the
-     * checks that fell in what stays the same, and enough such checks in a row came, measured, after
-     * 300,000 characters or never. Only the last {@code 2 * LOOP_CHECK_EVERY} characters are looked
-     * through when more came at once -- a native call's arguments arrive whole.
-     * <p>
-     * A check costs the same whatever the text's length and whatever it holds: every window of the
-     * text it looks through is hashed once ({@link #hash}), the windows whose hash is a stretch's are
-     * kept by where they begin, and each stretch's earlier copies are found among those, each
-     * confirmed character by character.
-     */
-    static boolean repeatingSince(StringBuilder text, int since) {
-        int n = text.length();
-        int from = Math.max(Math.max(since, n - 2 * LOOP_CHECK_EVERY), LOOP_WINDOW);
-        if (from > n) return false;
-        int count = (n - from) / LOOP_STRIDE + 1;
-        int[] stretch = new int[count];        // where each stretch begins
-        long[] stretchHash = new long[count];
-        for (int k = 0; k < count; k++) {
-            stretch[k] = n - k * LOOP_STRIDE - LOOP_WINDOW;
-            stretchHash[k] = hash(text, stretch[k]);
-        }
-        long[] wanted = java.util.Arrays.stream(stretchHash).sorted().distinct().toArray();
-        int[][] where = new int[wanted.length][];
-        int[] found = new int[wanted.length];
-        int start = Math.max(0, from - LOOP_WINDOW - LOOP_REACH);
-        long h = hash(text, start);
-        for (int at = start; ; at++) {
-            int w = java.util.Arrays.binarySearch(wanted, h);
-            if (w >= 0) {
-                if (where[w] == null) where[w] = new int[16];
-                else if (found[w] == where[w].length) where[w] = java.util.Arrays.copyOf(where[w], found[w] * 2);
-                where[w][found[w]++] = at;
-            }
-            if (at >= n - LOOP_WINDOW) break;
-            h = rolled(h, text, at);
-        }
-        for (int k = 0; k < count; k++) {
-            int w = java.util.Arrays.binarySearch(wanted, stretchHash[k]);
-            int[] positions = where[w];
-            int reach = stretch[k] - LOOP_REACH;
-            int times = 1;
-            int misses = 0;
-            int i = latest(positions, found[w], stretch[k] - LOOP_WINDOW);
-            while (times < LOOP_REPEATS && i >= 0 && positions[i] >= reach) {
-                if (same(text, positions[i], stretch[k])) {
-                    times++;
-                    i = latest(positions, i, positions[i] - LOOP_WINDOW);
-                } else if (++misses > HASH_MISSES) {
-                    break;
-                } else {
-                    i--;
-                }
-            }
-            if (times >= LOOP_REPEATS) return true;
-        }
-        return false;
-    }
-
-    /** How many windows whose hash only matches a stretch's are passed over before it is let go. */
-    private static final int HASH_MISSES = 8;
-
-    /** The last index below {@code size} whose position is {@code atMost} or less, or -1. */
-    private static int latest(int[] positions, int size, int atMost) {
-        int lo = 0, hi = size - 1, best = -1;
-        while (lo <= hi) {
-            int mid = (lo + hi) >>> 1;
-            if (positions[mid] <= atMost) {
-                best = mid;
-                lo = mid + 1;
-            } else {
-                hi = mid - 1;
-            }
-        }
-        return best;
     }
 
     /** The rolling hash's base: odd, so multiplying by it loses nothing modulo 2^64. */

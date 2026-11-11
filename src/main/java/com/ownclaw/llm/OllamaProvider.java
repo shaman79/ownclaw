@@ -262,8 +262,8 @@ public class OllamaProvider implements LlmProvider {
 
         List<ToolSpec> offered = reqConfig.hasTools() ? ToolSpec.offered(reqConfig.tools(), messages) : List.of();
         // Offered through the tools field, a call reaches this application only once the model has
-        // written the whole of it: Ollama sends nothing meanwhile, so the owner saw no progress, the
-        // loop guard had nothing to read, and a call that had become a loop ran until the read
+        // written the whole of it: Ollama sends nothing meanwhile, so the owner saw no progress, and
+        // a call -- a loop, or one retyping a whole configuration -- ran unseen until the read
         // timeout's hour was up (TextToolCalls). A model whose template writes its calls as text is
         // told its tools in the system message instead, as that template would tell it, and its
         // calls stream in as the text they are.

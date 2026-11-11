@@ -157,14 +157,17 @@ class LiveCallTaskTest {
     }
 
     @Test
-    @DisplayName("a cloud reply that loops is ended the same way: the step runs nothing, the owner is told, the step is asked again")
+    @DisplayName("a cloud reply whose reasoning loops is ended the same way: the step runs nothing, the owner is told, the step is asked again")
     void aLoopingCloudReply(@TempDir Path tmp) throws Exception {
         var rig = new LoopRig(tmp, List.of(NOOP));
-        String looping = "| eth0 | up | 192.0.2.1 | 1500 | ok |\n".repeat(500);
+        String looping = ("Wait, I need to check the configuration again. The interface eth0 has the address 192.0.2.1 "
+                + "and the gateway is 192.0.2.254, so the route should be fine. But the user asked about the second "
+                + "router, so let me look at its configuration once more before I decide which command to run next. "
+                + "Actually, let me reconsider the whole thing.\n").repeat(40);
         rig.cloud.think.add(c -> {
             for (int at = 0; at < looping.length(); at += 29) {
                 c.progress().onProgress();
-                c.progress().received(Part.ANSWER, looping.substring(at, Math.min(looping.length(), at + 29)));
+                c.progress().received(Part.REASONING, looping.substring(at, Math.min(looping.length(), at + 29)));
             }
             return respond("never reached").answer(c);
         });
@@ -181,8 +184,30 @@ class LiveCallTaskTest {
         assertEquals(1, note.size(), rows(rig).toString());
         assertTrue(note.get(0).startsWith("🔁 Step 1: the cloud model repeated the same 300 characters 4 times"),
                 note.get(0));
-        assertTrue(note.get(0).endsWith("characters of its answer. It was repeating itself, so its reply was ended, "
+        assertTrue(note.get(0).endsWith("characters of reasoning. It was repeating itself, so its reply was ended, "
                 + "and the step ran nothing."), note.get(0));
+    }
+
+    @Test
+    @DisplayName("a cloud answer of 500 identical rows is output: the owner is given all of it, and nothing calls it a loop")
+    void aRepeatingCloudAnswerIsGivenWhole(@TempDir Path tmp) throws Exception {
+        var rig = new LoopRig(tmp, List.of(NOOP));
+        String table = "| eth0 | up | 192.0.2.1 | 1500 | ok |\n".repeat(500);
+        rig.cloud.think.add(c -> {
+            for (int at = 0; at < table.length(); at += 29) {
+                c.progress().onProgress();
+                c.progress().received(Part.ANSWER, table.substring(at, Math.min(table.length(), at + 29)));
+            }
+            return respond(table).answer(c);
+        });
+
+        AgentResult r = rig.turn(session(rig), "list the interfaces");
+
+        assertEquals(AgentResult.TerminationReason.COMPLETED, r.terminationReason(), r.response());
+        assertEquals(500, r.response().split("\\| eth0 \\|", -1).length - 1, "every row reached the owner");
+        assertEquals(1, rig.cloud.calls("think").size(), "asked once: nothing was ended");
+        assertTrue(rows(rig).stream().noneMatch(row -> row.startsWith("🔁")), rows(rig).toString());
+        // Mutation: check the answer for a loop as the reasoning is -> the table is ended, the step asked again.
     }
 
     /**

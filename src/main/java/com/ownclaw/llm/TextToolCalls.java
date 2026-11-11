@@ -23,9 +23,9 @@ import java.util.regex.Pattern;
  * request's {@code tools} field, a reply streams its words one by one and then nothing at all while
  * the model writes a call, which arrives whole with the last line: measured on the production host
  * on 2026-11-11, 13.6 seconds of nothing for a call of about 280 tokens. While nothing arrives the
- * owner is shown no progress, the loop guard ({@code LiveCall}) has nothing to read, and only the
- * hour-long read timeout ends a call that has become a loop -- or that retypes a whole dashboard
- * configuration into one argument, as one did on 2026-11-10, until that hour was up. Sent no
+ * owner is shown no progress -- nothing tells a call being written from one gone wrong -- and only
+ * the hour-long read timeout ends it: a call that has become a loop, or one that retypes a whole
+ * dashboard configuration into one argument, as one did on 2026-11-10, until that hour was up. Sent no
  * {@code tools} field, Ollama passes the same call through as the text the model writes, line by
  * line like any other (measured the same day: 112 lines for a short call).
  * <p>
@@ -697,7 +697,7 @@ final class TextToolCalls {
      * The reply's text as it streams in, told to the progress hook as what it is: the answer until
      * a call begins, then the call -- its name ({@link LlmProgress.Part#CALL}) once that is written,
      * and every piece of it as {@link LlmProgress.Part#ARGUMENTS}, so the owner sees the call being
-     * written and the loop guard reads it. A piece that may be the start of a tag is held back until
+     * written. A piece that may be the start of a tag is held back until
      * the next one says whether it is, and never more than {@link #HELD_AT_MOST} characters of it.
      * Only what the hook is told depends on this; the reply is read whole, by {@link #parse}, once it
      * has ended.
@@ -709,8 +709,8 @@ final class TextToolCalls {
         /**
          * How much of a call's beginning is held back while it is not yet clear whether it is one,
          * or while its function's name is written: a name is a few dozen characters, and past this
-         * the text is told as a call's, named or not, so neither the owner nor the loop guard is left
-         * without it -- a tag followed by a hundred thousand line breaks was.
+         * the text is told as a call's, named or not, so the owner is not left without it -- a tag
+         * followed by a hundred thousand line breaks was.
          */
         static final int HELD_AT_MOST = 256;
 
@@ -788,8 +788,7 @@ final class TextToolCalls {
          * Where the call under way ends: the first {@code </tool_call>} at or after {@code from} that
          * the function's end or a parameter's end comes before, past whitespace -- or -1. One inside a
          * value -- {@code echo '</tool_call>' >> log.txt} -- is the value's: ended there, the rest of
-         * the call was told as the answer, which the loop guard judges as an answer, and a grid of
-         * zeros after it was ended as a loop.
+         * the call would be told as the answer.
          */
         private int callEnd(int from) {
             for (int at = all.indexOf(CLOSE, from); at >= 0; at = all.indexOf(CLOSE, at + 1)) {

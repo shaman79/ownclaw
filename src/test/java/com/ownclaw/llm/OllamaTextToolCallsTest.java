@@ -115,8 +115,8 @@ class OllamaTextToolCallsTest {
     }
 
     @Test
-    @DisplayName("a call whose argument has become a loop is ended by the loop guard while it is written")
-    void aLoopingArgumentIsEnded() throws Exception {
+    @DisplayName("a call's argument that repeats itself is output: it streams whole, shown as it grows, and is run as written")
+    void aRepeatingArgumentRunsWhole() throws Exception {
         var looping = new StringBuilder("#!/bin/sh\n");
         for (int i = 0; i < 400; i++) {
             looping.append("echo 'checking the configuration of the second router again, because the first answer "
@@ -127,14 +127,12 @@ class OllamaTextToolCallsTest {
         var task = new AgentContext("u1", "t1", "check the routers");
         LiveCall live = task.call(OllamaStreamingTest.provider(OllamaStreamingTest.config(), http), true, "delegation turn 1");
 
-        var e = assertThrows(RepeatedOutput.class, () -> OllamaStreamingTest.provider(OllamaStreamingTest.config(), http)
+        LlmResponse r = assertDoesNotThrow(() -> OllamaStreamingTest.provider(OllamaStreamingTest.config(), http)
                 .chat(ASK, withTools(List.of(SHELL)).withProgress(live)));
-        assertTrue(e.getMessage().contains("repeated the same 300 characters"), e.getMessage());
-        assertTrue(e.getMessage().contains("in a tool call it went on repeating"), e.getMessage());
-        int seen = (int) live.shown().data().get("answerChars");
-        assertTrue(seen < reply.length() / 2, "ended while it went on, not at its end: " + seen + " of " + reply.length());
-        assertTrue(seen >= 3 * 2_000, "not before the checks in a row had found it going on: " + seen);
+        assertEquals(looping.toString(), r.toolCalls().get(0).arguments().get("command"), "all 400 lines, as written");
+        assertEquals(reply.length(), live.shown().data().get("answerChars"), "the owner saw every character of it arrive");
         assertEquals(List.of("shell_exec"), live.shown().data().get("toolCalls"), "the owner saw which call it was");
+        // Mutation: end a call's text after checks find it repeating (the 18,000-character cap) -> RepeatedOutput.
         assertEquals(http.opened.get(), http.closed.get(), "the stream was closed behind it");
         live.close();
     }
@@ -160,10 +158,10 @@ class OllamaTextToolCallsTest {
         assertEquals(script.toString(), r.toolCalls().get(0).arguments().get("command"), "the whole script, run as written");
         live.close();
 
-        // The same text as an answer is ended: there the rule is the first check that finds it.
+        // The same text as an answer is output too, and goes on whole.
         var answer = new AgentContext("u1", "t2", "say it");
         LiveCall prose = answer.call(OllamaStreamingTest.provider(OllamaStreamingTest.config(), http), true, "step 1");
-        assertThrows(RepeatedOutput.class, () -> {
+        assertDoesNotThrow(() -> {
             for (int i = 0; i < script.length(); i += 37) {
                 prose.received(Part.ANSWER, script.substring(i, Math.min(script.length(), i + 37)));
             }
@@ -181,8 +179,8 @@ class OllamaTextToolCallsTest {
     }
 
     @Test
-    @DisplayName("a dashboard card written again and again, only its entity changing, is ended within a few checks")
-    void aVaryingLoopIsEnded() throws Exception {
+    @DisplayName("a dashboard of 460 cards that differ in one line streams whole: no length of data ends a call")
+    void aLongDashboardRunsWhole() throws Exception {
         var looping = new StringBuilder("views:\n- title: Car\n  cards:\n");
         for (int i = 0; looping.length() < 200_000; i++) looping.append(card(i));
         String reply = TextToolCallsTest.call("ha_api", "mode", "ws", "ws_commands", looping.toString());
@@ -190,10 +188,9 @@ class OllamaTextToolCallsTest {
         var task = new AgentContext("u1", "t1", "fix the chart");
         LiveCall live = task.call(OllamaStreamingTest.provider(OllamaStreamingTest.config(), http), true, "delegation turn 7");
 
-        var e = assertThrows(RepeatedOutput.class, () -> OllamaStreamingTest.provider(OllamaStreamingTest.config(), http)
+        LlmResponse r = assertDoesNotThrow(() -> OllamaStreamingTest.provider(OllamaStreamingTest.config(), http)
                 .chat(ASK, withTools(List.of(TextToolCallsTest.HA)).withProgress(live)));
-        int seen = (int) live.shown().data().get("answerChars");
-        assertTrue(seen <= 24_000, "ended within the checks in a row of the loop beginning: " + seen + " -- " + e.getMessage());
+        assertEquals(looping.toString(), r.toolCalls().get(0).arguments().get("ws_commands"), "some 200,000 characters, whole");
         live.close();
     }
 
