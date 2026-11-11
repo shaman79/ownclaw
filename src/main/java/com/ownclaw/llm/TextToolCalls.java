@@ -355,8 +355,9 @@ final class TextToolCalls {
      * and {@link LlmResponse#requireComplete} refuses the reply for it, as it does a native call
      * whose arguments do not parse: one cut off before its value, its function's name or its
      * function ends; one with text where a parameter should be; one that names a parameter twice;
-     * and every call of a reply that leaves a closing tag outside its calls -- what a value holding
-     * the format's own tags leaves behind when it splits the call it was in.
+     * and every call of a reply that leaves, after a call, a value's end with the format's structure
+     * after it ({@link #leftOver}) -- what a value holding the format's own tags leaves behind when it
+     * splits the call it was in.
      *
      * @param tools the tools of the request, offered or deferred, whose schemas type the values
      */
@@ -373,14 +374,10 @@ final class TextToolCalls {
             int open = callStart(content, pos);
             String between = content.substring(pos, open < 0 ? content.length() : open);
             outside.append(between);
-            if (afterACall && malformed == null) {
-                for (String tag : new String[] {PARAMETER_END, FUNCTION_END, CLOSE}) {
-                    if (between.contains(tag)) {
-                        malformed = "the model's tool call cannot be read (the text after a call holds " + tag
-                                + ", which a value holding the format's own tags leaves behind):\n" + between;
-                        break;
-                    }
-                }
+            if (afterACall && malformed == null && leftOver(between)) {
+                malformed = "the model's tool call cannot be read (the text after a call holds </parameter> and the "
+                        + "format's structure after it, which a value holding the format's own tags leaves behind):\n"
+                        + between;
             }
             if (open < 0) break;
             Read read = readCall(content, open, schemas);
@@ -400,6 +397,23 @@ final class TextToolCalls {
     private record Read(Call call, String problem, int end) {}
 
     /**
+     * Whether text after a call holds what a value split by the format's own tags leaves behind: the
+     * outer value's own {@code </parameter>}, with its function's end, its call's end or another
+     * parameter after it, past whitespace. A split always leaves that much, and nothing a reply says
+     * about the format does: a {@code </tool_call>} quoted or written twice, a {@code </parameter>}
+     * named in a sentence.
+     */
+    static boolean leftOver(String text) {
+        for (int at = text.indexOf(PARAMETER_END); at >= 0; at = text.indexOf(PARAMETER_END, at + 1)) {
+            int next = skipSpace(text, at + PARAMETER_END.length());
+            if (text.startsWith(FUNCTION_END, next) || text.startsWith(CLOSE, next) || text.startsWith(PARAMETER, next)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
      * A function's or a parameter's name as the format writes it: one word, no space and no tag in
      * it. A name that runs into a line break or the next tag lost its {@code >}, and the call is not
      * read as the one the model meant.
@@ -415,30 +429,52 @@ final class TextToolCalls {
     }
 
     /**
-     * Whether the {@code <tool_call>} at {@code at} opens a call: it does when a function follows it,
-     * past any whitespace, and the tag stands where the model writes its calls -- at the start of a
-     * line, or with a line break after it; and, at the start of a line, when nothing but whitespace
-     * follows it to the reply's end, a call cut off as it began. A tag anywhere else is text that
-     * mentions it -- "the tag `<tool_call> <function=x>` is how" -- and is read as the text it is.
+     * Whether the {@code <tool_call>} at {@code at} opens a call. It does when a function follows it,
+     * past any whitespace, and either the tag stands where the model writes its calls -- at the start
+     * of a line, or with a line break after it -- or the format's structure goes on after the
+     * function's name: a parameter, the function's end or the call's end, as in a call written
+     * compactly after text on the same line ({@code Sure.<tool_call><function=x>\n<parameter=...}).
+     * At the start of a line, a tag with nothing but whitespace after it to the reply's end is a
+     * call cut off as it began. Anywhere else the tag is text that mentions it -- "the tag
+     * `<tool_call> <function=x>` is how" -- and is read as the text it is.
      *
      * @param ended whether the text is the whole reply
      * @return null while the text so far cannot tell: it has not ended, and what follows the tag is
-     *         whitespace or the start of {@code <function=}
+     *         whitespace, or the start of what would decide
      */
     static Boolean opens(CharSequence text, int at, boolean ended) {
         boolean lineStart = atLineStart(text, at);
-        boolean lineBreak = false;
+        boolean whereCallsAre = lineStart;
         int p = at + OPEN.length();
         while (p < text.length() && Character.isWhitespace(text.charAt(p))) {
-            if (text.charAt(p) == '\n') lineBreak = true;
+            if (text.charAt(p) == '\n') whereCallsAre = true;
             p++;
         }
         if (p >= text.length()) return ended ? lineStart : null;
-        if (startsWith(text, p, FUNCTION)) return lineStart || lineBreak;
-        if (!ended && text.length() - p < FUNCTION.length() && FUNCTION.startsWith(text.subSequence(p, text.length()).toString())) {
-            return null;
+        if (!startsWith(text, p, FUNCTION)) return !ended && beginsTag(text, p, FUNCTION) ? null : false;
+        if (whereCallsAre) return true;
+        // Mid-line: a call only if the structure goes on after the function's name.
+        int nameEnd = -1;
+        for (int i = p + FUNCTION.length(); i < text.length(); i++) {
+            if (text.charAt(i) == '>') {
+                nameEnd = i;
+                break;
+            }
         }
-        return false;
+        if (nameEnd < 0) return ended ? false : null;
+        if (!NAME.matcher(text.subSequence(p + FUNCTION.length(), nameEnd).toString().strip()).matches()) return false;
+        int q = nameEnd + 1;
+        while (q < text.length() && Character.isWhitespace(text.charAt(q))) q++;
+        if (q >= text.length()) return ended ? false : null;
+        if (startsWith(text, q, PARAMETER) || startsWith(text, q, FUNCTION_END) || startsWith(text, q, CLOSE)) return true;
+        boolean undecided = beginsTag(text, q, PARAMETER) || beginsTag(text, q, FUNCTION_END) || beginsTag(text, q, CLOSE);
+        return !ended && undecided ? null : false;
+    }
+
+    /** Whether the text from {@code at} to its end is the beginning of {@code tag}, not all of it. */
+    private static boolean beginsTag(CharSequence text, int at, String tag) {
+        int left = text.length() - at;
+        return left > 0 && left < tag.length() && tag.startsWith(text.subSequence(at, text.length()).toString());
     }
 
     /** Whether nothing but spaces and tabs stands between {@code at} and the line's start. */
@@ -601,8 +637,10 @@ final class TextToolCalls {
 
     /**
      * A value's text as a number a tool can be handed, or null: at most {@link #NUMBER_AT_MOST}
-     * characters, and within what a double holds. Both are known from the digits and the exponent
-     * as written, before anything is worked out from them.
+     * characters, and one a double holds as the number it is -- not infinite, as 2e308 would be,
+     * and not zero when it is not, as 1e-324 would be; such a value stays the text it is. How large
+     * it is, is known from the digits and the exponent as written, before anything is worked out
+     * from them.
      */
     static BigDecimal number(String v) {
         if (v.isEmpty() || v.length() > NUMBER_AT_MOST) return null;
@@ -614,7 +652,9 @@ final class TextToolCalls {
         }
         if (d.signum() == 0) return BigDecimal.ZERO;
         long digitsBeforeThePoint = (long) d.precision() - d.scale();   // 0 or less below 1
-        return digitsBeforeThePoint > 309 || digitsBeforeThePoint < -323 ? null : d;
+        if (digitsBeforeThePoint > 309 || digitsBeforeThePoint < -323) return null;
+        double held = d.doubleValue();
+        return Double.isFinite(held) && held != 0 ? d : null;
     }
 
     private static int skipSpace(CharSequence text, int from) {
@@ -706,7 +746,7 @@ final class TextToolCalls {
                         state = State.CALL;
                     }
                     case CALL -> {
-                        int close = all.indexOf(CLOSE, told);
+                        int close = callEnd(told);
                         tell(progress, LlmProgress.Part.ARGUMENTS, close >= 0 ? close + CLOSE.length()
                                 : ended ? all.length() : all.length() - heldBack(CLOSE));
                         if (close < 0) return;
@@ -714,6 +754,26 @@ final class TextToolCalls {
                     }
                 }
             }
+        }
+
+        /**
+         * Where the call under way ends: the first {@code </tool_call>} at or after {@code from} that
+         * the function's end or a parameter's end comes before, past whitespace -- or -1. One inside a
+         * value -- {@code echo '</tool_call>' >> log.txt} -- is the value's: ended there, the rest of
+         * the call was told as the answer, which the loop guard judges as an answer, and a grid of
+         * zeros after it was ended as a loop.
+         */
+        private int callEnd(int from) {
+            for (int at = all.indexOf(CLOSE, from); at >= 0; at = all.indexOf(CLOSE, at + 1)) {
+                int before = at;
+                while (before > 0 && Character.isWhitespace(all.charAt(before - 1))) before--;
+                if (endsWith(all, before, FUNCTION_END) || endsWith(all, before, PARAMETER_END)) return at;
+            }
+            return -1;
+        }
+
+        private static boolean endsWith(CharSequence text, int end, String suffix) {
+            return startsWith(text, end - suffix.length(), suffix);
         }
 
         /** Tell the hook the text from where it was last told up to {@code upTo}, if there is any. */

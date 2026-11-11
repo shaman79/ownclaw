@@ -305,4 +305,125 @@ class LiveCallTest {
         call.close();
         assertEquals(1, ended.get());
     }
+
+    // ── a tool call's text: loops are ended, data is not ───────────────────────────────────
+
+    /** A dashboard card of some 430 characters, the same each time but for its entity line. */
+    static String card(int i) {
+        return "  - type: custom:apexcharts-card\n    header:\n      show: true\n      title: Spot price and charging\n"
+                + "    graph_span: 48h\n    span:\n      start: day\n    now:\n      show: true\n      label: Now\n"
+                + "    series:\n      - entity: sensor.current_spot_electricity_price_" + i + "\n        type: column\n"
+                + "        name: Price\n        color: '#4caf50'\n        data_generator: |\n          return entity.attributes.prices;\n"
+                + "        show:\n          in_header: false\n";
+    }
+
+    /** {@code head} and then rounds of {@code round}, to {@code length} characters. */
+    static String rounds(String head, java.util.function.IntFunction<String> round, int length) {
+        var sb = new StringBuilder(head);
+        for (int i = 0; sb.length() < length; i++) sb.append(round.apply(i));
+        return sb.toString();
+    }
+
+    /** Lines no 300-character stretch of which repeats. */
+    static String unique(int lines) {
+        return unique(0, lines);
+    }
+
+    /** Lines no 300-character stretch of which repeats, numbered from {@code from}. */
+    static String unique(int from, int lines) {
+        var sb = new StringBuilder();
+        for (int i = from; i < from + lines; i++) {
+            sb.append("# line ").append(i * 7919 % 10007).append(" of the rest, ").append(i).append('\n');
+        }
+        return sb.toString();
+    }
+
+    /** {@code text} as a call's arguments, 40 characters a piece: how much was told when it was ended, or -1. */
+    static int asACall(String text) {
+        var ctx = task(3);
+        LiveCall call = ctx.call(OLLAMA, true, ctx.atStep("delegation turn 2"));
+        call.received(Part.CALL, "ha_api");
+        int fed = 0;
+        try {
+            for (int i = 0; i < text.length(); i += 40) {
+                String piece = text.substring(i, Math.min(text.length(), i + 40));
+                call.received(Part.ARGUMENTS, piece);
+                fed += piece.length();
+            }
+        } catch (RepeatedOutput e) {
+            assertTrue(e.seen().endsWith("in a tool call it went on repeating"), e.seen());
+            return fed;
+        }
+        return -1;
+    }
+
+    static final String HEAD = "<tool_call>\n<function=ha_api>\n<parameter=ws_commands>\n";
+
+    @Test
+    @DisplayName("a call that loops is ended within a few checks, however each round varies and wherever the checks fall in it")
+    void aLoopingCallIsEnded() {
+        // Measured on the reviewer's shapes before the checks looked through all of the new text:
+        // the card whose entity line changes ran 300,000 characters, to the window's end.
+        int card = asACall(rounds(HEAD, LiveCallTest::card, 300_000));
+        assertTrue(card > 0 && card <= 12_000, "a card repeated with only its entity changing: " + card);
+        String same600 = "the same six hundred characters of a script, again and again; ".repeat(10).substring(0, 600);
+        int varied = asACall(rounds(HEAD, i -> same600 + String.format(java.util.Locale.ROOT, "# round %31d\n", i), 300_000));
+        assertTrue(varied > 0 && varied <= 14_000, "600 the same, then 40 that differ, round after round: " + varied);
+        String same380 = "echo 'checking the router configuration once more before deciding' && ".repeat(6).substring(0, 380);
+        int counted = asACall(rounds(HEAD, i -> same380 + "\n# count " + i + "\n", 300_000));
+        assertTrue(counted > 0 && counted <= 12_000, "380 the same and a line that counts: " + counted);
+        int same = asACall(rounds(HEAD, i -> LOOP, 300_000));
+        assertTrue(same > 0 && same <= 12_000, "the same paragraph again and again: " + same);
+        // Not on the first checks that see it: those are data's too.
+        assertTrue(Math.min(Math.min(card, varied), Math.min(counted, same))
+                >= (LiveCall.LOOP_CALL_CHECKS - 1) * LiveCall.LOOP_CHECK_EVERY, "ended only after checks in a row");
+        // Mutation: LOOP_STRIDE 4,000 (the last characters alone) -> the card runs to the end.
+    }
+
+    @Test
+    @DisplayName("a call's repeated data runs whole: a grid of zeros, a table's identical rows, a dozen cards that differ in one line")
+    void repeatedDataInACallRunsWhole() {
+        var grid = new StringBuilder(HEAD).append("GRID = [\n");
+        for (int i = 0; i < 40; i++) grid.append("    [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],\n");
+        assertEquals(-1, asACall(grid + "]\n" + unique(100)), "a 40-row grid of zeros");
+        String row = "2026-11-11,router-1,eth0,up,1500,0,0,0,0,0,0,0,0,0,0,ok,ok,ok,ok\n";
+        assertEquals(-1, asACall(HEAD + row.repeat(80) + unique(100)), "80 identical rows");
+        var cards = new StringBuilder(HEAD);
+        for (int i = 0; i < 12; i++) cards.append(card(i));
+        assertEquals(-1, asACall(cards + unique(200)), "a dashboard of a dozen similar cards");
+        // As an answer, the grid is ended at the first check that finds it: the rule for prose.
+        var ctx = task(1);
+        LiveCall answer = ctx.call(OLLAMA, true, ctx.atStep(null));
+        assertThrows(RepeatedOutput.class, () -> stream(answer, Part.ANSWER, grid.toString(), 40));
+        // Mutation: LOOP_CALL_CHECKS 3 -> the dozen cards are ended.
+    }
+
+    @Test
+    @DisplayName("a check of a call's text looks through what was written since the last, and only so far back")
+    void theCheckLooksThroughTheNewText() {
+        // Longer than the stretch a check looks for by more than LOOP_STRIDE, so a check finds it
+        // wherever it falls.
+        String paragraph = (LOOP + LOOP).substring(0, LiveCall.LOOP_WINDOW + 40);
+        // A stretch four times near the start of the new text, and none at its end: found.
+        var text = new StringBuilder(unique(60));
+        int since = text.length();
+        for (int i = 0; i < 4; i++) text.append(paragraph).append("--").append(i).append('\n');
+        text.append(unique(5_000, 30));
+        assertTrue(LiveCall.repeatingSince(text, since));
+        // The same, all before the check before: not this check's.
+        assertFalse(LiveCall.repeatingSince(text, text.length() - 200));
+        // Copies further back than LOOP_REACH do not count.
+        var far = new StringBuilder();
+        for (int i = 0; i < 3; i++) far.append(paragraph).append(unique(i * 1_200, 1_200));
+        int at = far.length();
+        far.append(paragraph);
+        assertTrue(far.indexOf(paragraph, 1) - paragraph.length() > LiveCall.LOOP_REACH, "the copies lie far apart");
+        assertFalse(LiveCall.repeatingSince(far, at));
+        // ...and within it, they do.
+        var near = new StringBuilder();
+        for (int i = 0; i < 3; i++) near.append(paragraph).append(unique(i * 20, 20));
+        int nearAt = near.length();
+        near.append(paragraph);
+        assertTrue(LiveCall.repeatingSince(near, nearAt));
+    }
 }

@@ -66,17 +66,36 @@ public final class LiveCall implements LlmProgress, AutoCloseable {
     static final int LOOP_REPEATS = 4;
 
     /**
-     * How many checks in a row must find a tool call's text repeating so before the reply is ended:
-     * 4, where reasoning and an answer take one. A call's text is data, and data repeats -- a grid of
-     * zeros in a script, a table's rows, a line of dashes -- where prose does not; the same 300
-     * characters four times is what eighteen identical 68-character lines are. But data ends, and the
-     * check after it finds the end of the text unrepeated, while a loop goes on and is found again at
-     * every check. Four checks in a row are some 6,000 characters of the same text still being
-     * written after it was first seen -- a few minutes of the local model's writing, where a loop in
-     * a call used to run for the hour the read timeout allowed -- and more than the repeated data of
-     * any call seen so far: a script's 40-row grid was 2,800 characters.
+     * How many checks in a row must find a tool call's text repeating ({@link #repeatingSince})
+     * before the reply is ended: 5, where reasoning and an answer take one. A call's text is data,
+     * and data repeats -- a grid of zeros in a script, a table's rows, a dashboard's cards that differ
+     * in one line -- where prose does not. But data ends, and a check whose new text is past it finds
+     * nothing, while a loop goes on and is found at every check. A check still finds data that ended
+     * within its new text, so a stretch of repeated data is found by the checks it spans and one
+     * more: five in a row are some 8,000 characters of the same text still being written after it
+     * was first seen. That is a few minutes of the local model's writing -- where a loop in a call
+     * used to run for the hour the read timeout allowed, and, streamed, would run until the context
+     * window was full -- and more than the repeated data of any call seen so far: a script's 40-row
+     * grid of zeros was 2,640 characters, a dozen similar dashboard cards some 5,000.
      */
-    static final int LOOP_CALL_CHECKS = 4;
+    static final int LOOP_CALL_CHECKS = 5;
+
+    /**
+     * How far apart the stretches a check of a call's text looks for end, through the text written
+     * since the check before: every 25 characters. A loop that varies a little each round -- a card
+     * whose entity line changes -- repeats only the stretches that lie wholly in what stays the same,
+     * and only looking at every place in the new text, not at its last characters alone, finds one
+     * wherever in the round the check falls. 25 apart, it finds a loop whose part that stays the same
+     * is 25 characters longer than {@link #LOOP_WINDOW}.
+     */
+    static final int LOOP_STRIDE = 25;
+
+    /**
+     * How far back from a stretch its earlier copies are looked for, at a check of a call's text:
+     * 32,000 characters, four rounds of a loop up to some 8,000 characters long. A longer round is
+     * found by the check every text gets, of its last characters through all of it.
+     */
+    static final int LOOP_REACH = 32_000;
 
     /**
      * How much of the end of each text the ops API shows of a call under way ({@link #forOps}):
@@ -208,14 +227,18 @@ public final class LiveCall implements LlmProgress, AutoCloseable {
             if (repeating(reasoning)) throw looped(reasoning, "of reasoning");
         }
         if (answer.length() - answerChecked >= LOOP_CHECK_EVERY) {
+            int since = answerChecked;
             answerChecked = answer.length();
             boolean inACall = part == Part.ARGUMENTS || part == Part.CALL;
-            if (!repeating(answer)) {
+            if (!inACall) {
                 callRepeats = 0;
-            } else if (!inACall) {
-                throw looped(answer, "of its answer");
-            } else if (++callRepeats >= LOOP_CALL_CHECKS) {
-                throw looped(answer, "of its answer, in a tool call it went on repeating");
+                if (repeating(answer)) throw looped(answer, "of its answer");
+            } else if (repeating(answer) || repeatingSince(answer, since)) {
+                if (++callRepeats >= LOOP_CALL_CHECKS) {
+                    throw looped(answer, "of its answer, in a tool call it went on repeating");
+                }
+            } else {
+                callRepeats = 0;
             }
         }
     }
@@ -242,6 +265,37 @@ public final class LiveCall implements LlmProgress, AutoCloseable {
             times++;
         }
         return times >= LOOP_REPEATS;
+    }
+
+    /**
+     * Whether a stretch of {@link #LOOP_WINDOW} characters ending anywhere in the text written since
+     * {@code since} -- every {@link #LOOP_STRIDE} characters of it -- appears {@link #LOOP_REPEATS}
+     * times or more, none overlapping another, within the {@link #LOOP_REACH} characters before it.
+     * Whether a check finds a loop does not depend on where in the loop's round it falls: looking at
+     * the text's last characters alone, a loop whose rounds differ in one line was found only by the
+     * checks that fell in what stays the same, and five such checks in a row came, measured, after
+     * 300,000 characters or never. Only the last {@code 2 * LOOP_CHECK_EVERY} characters are looked
+     * through when more came at once -- a native call's arguments arrive whole -- so a check costs
+     * the same whatever the text's length.
+     */
+    static boolean repeatingSince(StringBuilder text, int since) {
+        int n = text.length();
+        int from = Math.max(Math.max(since, n - 2 * LOOP_CHECK_EVERY), LOOP_WINDOW);
+        if (from > n) return false;
+        int start = Math.max(0, from - LOOP_WINDOW - LOOP_REACH);
+        String region = text.substring(start, n);
+        for (int end = n; end >= from; end -= LOOP_STRIDE) {
+            int r = end - start;
+            String stretch = region.substring(r - LOOP_WINDOW, r);
+            int reach = Math.max(0, r - LOOP_WINDOW - LOOP_REACH);
+            int times = 1;
+            for (int at = r - LOOP_WINDOW; times < LOOP_REPEATS; times++) {
+                at = region.lastIndexOf(stretch, at - LOOP_WINDOW);
+                if (at < reach) break;
+            }
+            if (times >= LOOP_REPEATS) return true;
+        }
+        return false;
     }
 
     /** The reply's end, a loop: what was seen, in figures, and nothing of the text itself. */

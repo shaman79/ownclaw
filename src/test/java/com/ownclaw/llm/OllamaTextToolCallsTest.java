@@ -171,6 +171,48 @@ class OllamaTextToolCallsTest {
         prose.close();
     }
 
+    /** A dashboard card of some 430 characters, the same each time but for its entity line. */
+    static String card(int i) {
+        return "  - type: custom:apexcharts-card\n    header:\n      show: true\n      title: Spot price and charging\n"
+                + "    graph_span: 48h\n    span:\n      start: day\n    now:\n      show: true\n      label: Now\n"
+                + "    series:\n      - entity: sensor.current_spot_electricity_price_" + i + "\n        type: column\n"
+                + "        name: Price\n        color: '#4caf50'\n        data_generator: |\n          return entity.attributes.prices;\n"
+                + "        show:\n          in_header: false\n";
+    }
+
+    @Test
+    @DisplayName("a dashboard card written again and again, only its entity changing, is ended within a few checks")
+    void aVaryingLoopIsEnded() throws Exception {
+        var looping = new StringBuilder("views:\n- title: Car\n  cards:\n");
+        for (int i = 0; looping.length() < 200_000; i++) looping.append(card(i));
+        String reply = TextToolCallsTest.call("ha_api", "mode", "ws", "ws_commands", looping.toString());
+        var http = ollama(lines(reply, 40) + last("stop", 900, 60));
+        var task = new AgentContext("u1", "t1", "fix the chart");
+        LiveCall live = task.call(OllamaStreamingTest.provider(OllamaStreamingTest.config(), http), true, "delegation turn 7");
+
+        var e = assertThrows(RepeatedOutput.class, () -> OllamaStreamingTest.provider(OllamaStreamingTest.config(), http)
+                .chat(ASK, withTools(List.of(TextToolCallsTest.HA)).withProgress(live)));
+        int seen = (int) live.shown().data().get("answerChars");
+        assertTrue(seen <= 12_000, "ended within a few checks of the loop beginning: " + seen + " -- " + e.getMessage());
+        live.close();
+    }
+
+    @Test
+    @DisplayName("a </tool_call> inside a value leaves the rest of the call judged as a call: a grid of zeros after it runs whole")
+    void aCloseInsideAValueKeepsTheCallACall() throws Exception {
+        var script = new StringBuilder("echo '</tool_call>' >> log.txt\nGRID = [\n");
+        for (int i = 0; i < 40; i++) script.append("    [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],\n");
+        script.append("]\nprint(len(GRID))\n");
+        String reply = TextToolCallsTest.call("shell_exec", "command", script.toString());
+        var http = ollama(lines(reply, 37) + last("stop", 900, 60));
+        var task = new AgentContext("u1", "t1", "write it");
+        LiveCall live = task.call(OllamaStreamingTest.provider(OllamaStreamingTest.config(), http), true, "delegation turn 3");
+        LlmResponse r = assertDoesNotThrow(() -> OllamaStreamingTest.provider(OllamaStreamingTest.config(), http)
+                .chat(ASK, withTools(List.of(SHELL)).withProgress(live)));
+        assertEquals(script.toString(), r.toolCalls().get(0).arguments().get("command"));
+        live.close();
+    }
+
     @Test
     @DisplayName("a call to a tool deferred and not yet offered has its values typed by that tool's schema all the same")
     void deferredToolsAreTyped() throws Exception {

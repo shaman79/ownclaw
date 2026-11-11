@@ -317,6 +317,53 @@ class TextToolCallsTest {
     }
 
     @Test
+    @DisplayName("a call written compactly after text on the same line is a call: the format's structure follows its tag")
+    void compactCalls() {
+        var a = TextToolCalls.parse("Sure.<tool_call><function=shell_exec>\n<parameter=command>\nls\n</parameter>\n"
+                + "</function>\n</tool_call>", OFFERED);
+        assertNull(a.malformed());
+        assertEquals(Map.of("command", "ls"), a.calls().get(0).arguments());
+        assertEquals("Sure.", a.text());
+        var b = TextToolCalls.parse("Done: <tool_call><function=done><parameter=summary>ok</parameter></function></tool_call>",
+                OFFERED);
+        assertNull(b.malformed());
+        assertEquals(Map.of("summary", "ok"), b.calls().get(0).arguments());
+        var c = TextToolCalls.parse("Nothing to pass: <tool_call> <function=done> </function></tool_call>", OFFERED);
+        assertEquals("done", c.calls().get(0).name());
+        // Its name followed by anything but the format's structure, mid-line, it is a mention.
+        assertTrue(TextToolCalls.parse("Call <tool_call><function=done> to finish.", OFFERED).calls().isEmpty());
+    }
+
+    @Test
+    @DisplayName("what a reply says about the format after a call is not taken for a split value")
+    void sayingTheTagsAfterACall() {
+        String call = call("shell_exec", "command", "uptime");
+        for (String after : new String[] {
+                "\nI wrapped it in <tool_call>...</tool_call> as asked.",
+                "\nThe value ends at </parameter>.",
+                "\n</tool_call>",
+                "\nThe tags are <parameter=x> and </parameter> around a value."}) {
+            var read = TextToolCalls.parse(call + after, OFFERED);
+            assertNull(read.malformed(), after);
+            assertEquals(1, read.calls().size(), after);
+        }
+        var ok = TextToolCalls.parse("<tool_call>\n<function=shell_exec>\n<parameter=command>\nls\n</parameter>\n"
+                + "</function>\nok\n</tool_call>", OFFERED);
+        assertNull(ok.malformed());
+        assertEquals(Map.of("command", "ls"), ok.calls().get(0).arguments());
+    }
+
+    @Test
+    @DisplayName("a number a double cannot hold as itself -- infinite, or zero when it is not -- stays the text it is")
+    void numbersADoubleCannotHold() {
+        for (String unheld : new String[] {"2e308", "9.99e308", "-2e308", "1e-324", "-1e-330"}) {
+            assertEquals(unheld, argumentsOf(call("ha_api", "ratio", unheld)).get("ratio"), unheld);
+        }
+        assertEquals(4.9e-324, argumentsOf(call("ha_api", "ratio", "4.9e-324")).get("ratio"), "the smallest it holds");
+        assertEquals(1.7976931348623157e308, argumentsOf(call("ha_api", "ratio", "1.7976931348623157e308")).get("ratio"));
+    }
+
+    @Test
     @DisplayName("a call cut off inside a value, a name or right after it opened cannot be read, and says so")
     void cutOff() {
         String cut = "Running it.\n<tool_call>\n<function=shell_exec>\n<parameter=command>\necho one\necho tw";
@@ -410,6 +457,21 @@ class TextToolCallsTest {
         }
         // A call cut off before its name ended is told all the same, unnamed.
         assertEquals(List.of(new Heard(Part.ARGUMENTS, "<tool_call>\n<function=shell")), heard("<tool_call>\n<function=shell", 3));
+    }
+
+    @Test
+    @DisplayName("a </tool_call> inside a value does not end the call as it streams: only one after the function's or a value's end does")
+    void aCloseInsideAValue() {
+        String value = "echo '</tool_call>' >> log.txt\necho done";
+        String c = call("shell_exec", "command", value);
+        for (int size : new int[]{1, 3, 40, 10_000}) {
+            assertEquals(List.of(new Heard(Part.CALL, "shell_exec"), new Heard(Part.ARGUMENTS, c)), heard(c, size),
+                    "in pieces of " + size);
+        }
+        assertEquals(Map.of("command", value), argumentsOf(c));
+        String compact = "<tool_call>\n<function=done>\n<parameter=summary>\nok</parameter></function></tool_call>\nAfter.";
+        assertEquals(List.of(new Heard(Part.CALL, "done"), new Heard(Part.ARGUMENTS, compact.substring(0, compact.indexOf("\nAfter"))),
+                new Heard(Part.ANSWER, "\nAfter.")), heard(compact, 2), "a call closed right after its function's end");
     }
 
     @Test
