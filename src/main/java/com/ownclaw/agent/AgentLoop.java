@@ -2721,9 +2721,15 @@ public class AgentLoop {
      * latest attempt only, in the
      * specification's own message so the roles still alternate. Each used to append the reply and
      * a numbered copy of it to everything sent before, so the third repair resent both earlier
-     * attempts twice over: 195,723 bytes for a 6,434-byte request. A reply that reached the
-     * model's maximum output is refused -- never syntax-checked, never repaired: the file is
-     * incomplete, and asking for the complete corrected code asks for the same length again.
+     * attempts twice over: 195,723 bytes for a 6,434-byte request.
+     * <p>
+     * Every attempt's reply is taken whole ({@link CodeWriting#reply}): one that reaches the
+     * model's maximum output is continued from where it stopped, part after part, until a part
+     * ends by itself, and the parts joined ({@link ReplySeam}) are the reply that is checked and,
+     * when it must be, repaired -- a repair's reply too, which is the complete corrected code and
+     * so as long again. A reply cut off at the maximum output used to be refused, never checked
+     * and never repaired, so a skill longer than one reply could not be made at all; the owner,
+     * 2026-11-11: if the skill is needed to finish the task, the skill must be finished.
      * <p>
      * Every call streams with the task's progress hook, so a long one is seen as alive and a
      * Stop ends it; between calls the stop is checked before the next is sent. Every call's
@@ -2790,6 +2796,7 @@ public class AgentLoop {
                 .withEgress(context.egress("codegen"))
                 .withEffort(context.options().effort());
 
+        var writing = new CodeWriting(context, provider, local, name, providerLabel, codeGenConfig);
         List<LlmMessage> prompt = spec;
         // What the attempts have brought back: a repair that brings either again has not got past it.
         var triedCode = new java.util.HashSet<String>();
@@ -2801,64 +2808,17 @@ public class AgentLoop {
                         "Repairing syntax error · " + providerLabel + " (attempt " + attempt + ")",
                         tokenData(context));
             }
-            // The task's own hook goes with the call, and while it runs its chat is shown what it is
-            // doing (AgentContext#call).
-            LiveCall live = context.call(provider, local, context.atStep(
-                    (attempt == 0 ? "the code of skill '" : "repairing the code of skill '") + name + "'"));
-            LlmResponse reply;
-            try {
-                LlmProvider writer = provider;
-                List<LlmMessage> asked = prompt;
-                LlmRequestConfig asking = codeGenConfig.withProgress(live);
-                java.util.function.Supplier<LlmResponse> call = () -> writer.chat(asked, asking);
-                // On the local model, when the cloud is not available: work the task waits on.
-                reply = local ? lane.foreground(context, call) : call.get();
-            } catch (TaskCancellationService.TaskCancelledException stop) {
-                return Codegen.stopped(name);
-            } catch (ProviderRefused declined) {
-                account(context, local, provider, declined.reply());
-                return Codegen.failed("the model declined to write the code for '" + name + "' ("
-                        + declined.getMessage() + "), so nothing was created.");
-            } catch (OutputTruncated cutOff) {
-                account(context, local, provider, cutOff.reply());
-                if (cutOff.replyRanOn()) {
-                    context.chat().ranOn(cutOff, live, "the code of '" + name + "' was not written");
-                    return Codegen.failed("writing the code for '" + name + "' did not end: " + cutOff.getMessage()
-                            + ", so nothing was created.");
-                }
-                return Codegen.failed(cutOff.limit() == OutputTruncated.Limit.MAX_OUTPUT
-                        ? "the code for '" + name + "' did not fit in one reply (" + cutOff.getMessage()
-                                + "). It was discarded, not repaired, and nothing was created. A "
-                                + "smaller skill fits: one job per skill, or split this one into several."
-                        : "the request for the code of '" + name + "' did not fit ("
-                                + cutOff.getMessage() + "), so nothing was created.");
-            } catch (EgressRefused refused) {
-                return Codegen.failed("the request for the code of '" + name + "' was not sent ("
-                        + refused.getMessage() + "), so nothing was created.");
-            } catch (LlmException callFailed) {
-                if (!local && callFailed.unreachable() && goesOnWithoutTheCloud(context, provider, callFailed)) {
-                    if (!context.onLocal()) {
-                        attempt--; // the same attempt, asked of the cloud once more
-                        continue;
-                    }
-                    // Written from the start on the local model, whose prompt is its own.
-                    live.close();
-                    return generateSkillCode(originalParams, context);
-                }
-                return Codegen.failed("the request for the code of '" + name + "' failed ("
-                        + callFailed.getMessage() + "), so nothing was created.");
-            } finally {
-                live.close();
-            }
-            // A reply came back: the task is alive, whatever the reply holds.
-            context.markProgress();
-            if (!local) context.cloudAnswered();
-            account(context, local, provider, reply);
+            Written reply = writing.reply(prompt,
+                    (attempt == 0 ? "the code of skill '" : "repairing the code of skill '") + name + "'");
+            // Written from the start on the local model, whose prompt is its own.
+            if (reply.onLocal()) return generateSkillCode(originalParams, context);
+            if (reply.ended() != null) return reply.ended();
+            String text = reply.text();
 
-            String code = extractPythonCode(reply.content());
+            String code = extractPythonCode(text);
             if (code == null || !code.contains("def run(")) {
                 log.warn("Skill '{}': a reply of {} chars held {}", name,
-                        reply.content() == null ? 0 : reply.content().length(),
+                        text == null ? 0 : text.length(),
                         code == null ? "no Python code" : "Python code without def run(params)");
                 return Codegen.failed(code == null
                         ? "the reply for '" + name + "' held no Python code, so nothing was created."
@@ -2879,12 +2839,13 @@ public class AgentLoop {
                         + "), so nothing was created.");
             }
             if (syntaxError == null) {
-                log.info("{} generated {} chars of skill code for '{}' ({} tokens)",
-                        local ? "Local LLM (fallback)" : "Cloud LLM", code.length(), name, reply.totalTokens());
+                log.info("{} generated {} chars of skill code for '{}' ({} tokens{})",
+                        local ? "Local LLM (fallback)" : "Cloud LLM", code.length(), name, reply.tokens(),
+                        reply.parts() > 1 ? ", in " + reply.parts() + " parts" : "");
                 Map<String, Object> enhanced = new HashMap<>(originalParams);
                 enhanced.put("code", code);
                 // The model may also name better requirements
-                String cloudRequirements = extractRequirements(reply.content());
+                String cloudRequirements = extractRequirements(text);
                 if (cloudRequirements != null) {
                     enhanced.put("requirements", cloudRequirements);
                 }
@@ -2902,6 +2863,207 @@ public class AgentLoop {
                     + "\n\nThe previous attempt failed the syntax check:\n" + syntaxError
                     + "\n\nNumbered code:\n" + numberCodeLines(code)
                     + "\n\nFix the error. Return the COMPLETE corrected code in a ```python fence."));
+        }
+    }
+
+    /**
+     * What a reply cut off at the model's maximum output is followed by: the request to go on. The
+     * words only help -- the join is the code's, whatever the model does with them ({@link ReplySeam}).
+     */
+    static final String CONTINUE = "Your reply was cut off at the model's maximum output. Continue it from "
+            + "the exact character where it stops: repeat nothing already written, do not reopen a code "
+            + "fence that is already open, and do not explain. When the code is complete, close the "
+            + "```python fence and give the ```requirements fence as asked.";
+
+    /**
+     * What one attempt at a skill's code brought back ({@link CodeWriting#reply}): the reply whole
+     * or, when there is none, how the code generation ends instead.
+     *
+     * @param text    the reply's text, every part of it joined; null when the attempt ends the code
+     *                generation
+     * @param parts   how many replies the text took
+     * @param tokens  their prompt and completion tokens together, for the log
+     * @param ended   how the code generation ends, when it ends with this attempt; otherwise null
+     * @param onLocal the cloud could not be reached and the task has moved to the local model,
+     *                which writes the code from the start
+     */
+    private record Written(String text, int parts, int tokens, Codegen ended, boolean onLocal) {
+        static Written ending(Codegen how) {
+            return new Written(null, 0, 0, how, false);
+        }
+    }
+
+    /**
+     * The calls that write one skill's code, on one model: each attempt's reply taken whole
+     * ({@link #reply}), at the task's thinking effort -- or at low effort, from the first reply on
+     * that spent the model's whole maximum output reasoning and wrote nothing.
+     */
+    private final class CodeWriting {
+        private final AgentContext context;
+        private final LlmProvider provider;
+        private final boolean local;
+        private final String name;
+        /** How the steps the page shows name the model: "cloud", "local (degraded)". */
+        private final String label;
+        /** What every call is sent with. */
+        private LlmRequestConfig config;
+
+        CodeWriting(AgentContext context, LlmProvider provider, boolean local, String name, String label,
+                    LlmRequestConfig config) {
+            this.context = context;
+            this.provider = provider;
+            this.local = local;
+            this.name = name;
+            this.label = label;
+            this.config = config;
+        }
+
+        /**
+         * The reply to {@code prompt}, whole. A reply that reaches the model's maximum output with
+         * text in it is kept as the reply so far, and the model is asked to go on: the request
+         * again, with that text as the model's turn and {@link #CONTINUE} after it. Each part that
+         * stops at the maximum output again is joined to the ones before ({@link ReplySeam}) and
+         * asked to go on in its turn, until one ends by itself: joined to them, that is the reply.
+         * The model's own limit ends each part, never a count of them.
+         * <p>
+         * Every continuation appends to the request before it and rewrites nothing, so its request
+         * begins with the one before -- which the provider's cache holds: Anthropic's sliding mark
+         * is on the turn before the newest, the part just written -- and it ends with a turn of the
+         * caller's, as it must: a request that ends on the model's own words, a prefill, is refused
+         * with HTTP 400 by claude-opus-5-5 and every Claude model since the 4.6 ones. A part's turn
+         * is its visible text alone, never its reasoning.
+         * <p>
+         * Where it ends without a reply:
+         * <ul>
+         *   <li>Stop, before a call or during one.</li>
+         *   <li>No progress: a part that reached the maximum output again and added nothing past
+         *   the seam -- its text was the end of the reply so far written again. The next part would
+         *   be asked the same, and get no further.</li>
+         *   <li>Nothing written: a part that reached the maximum output with no text at all -- the
+         *   model reasoned through all of it -- has nothing to go on from. Less reasoning first is
+         *   the remedy, so the same request is asked again at low effort, and every call after it
+         *   is made at low effort too; at low effort a part that writes nothing ends the code. A
+         *   part of nothing but blanks is one of these: the provider refuses a turn of only
+         *   blanks, and there is nothing in it to go on from.</li>
+         *   <li>The window, as before: a part that ran on until the window was full, or a request
+         *   refused as too long for it -- where the continuations end once their parts fill it.</li>
+         *   <li>A refusal, a request the gateway did not send, a failed call, and a cloud that
+         *   cannot be reached, each as the first call meets them: a connection that failed is asked
+         *   again once; a cloud given up on hands the task to the local model, which writes the
+         *   code from the start -- the parts so far were written for a prompt it is not sent, and
+         *   its window holds less than they can fill.</li>
+         * </ul>
+         * Each part is a live call of its own, shown in the chat as it streams and ended by Stop;
+         * each continuation is said in the chat ({@link TaskChat#continuing}) and logged; and each
+         * part's tokens are counted once, against the tier that did the work.
+         *
+         * @param what what the first part's call is for, as the owner reads it
+         */
+        Written reply(List<LlmMessage> prompt, String what) {
+            List<LlmMessage> asked = prompt;
+            // The reply so far, from its first part that reached the maximum output on.
+            String sofar = null;
+            int part = 1;
+            int tokens = 0;
+            while (true) {
+                if (context.isCancelled()) return Written.ending(Codegen.stopped(name));
+                // The task's own hook goes with the call, and while it runs its chat is shown what it
+                // is doing (AgentContext#call).
+                LiveCall live = context.call(provider, local, context.atStep(part == 1 ? what
+                        : "continuing the code of skill '" + name + "' (part " + part + ")"));
+                LlmResponse reply;
+                OutputTruncated cut = null;
+                try {
+                    List<LlmMessage> sent = asked;
+                    LlmRequestConfig asking = config.withProgress(live);
+                    java.util.function.Supplier<LlmResponse> call = () -> provider.chat(sent, asking);
+                    // On the local model, when the cloud is not available: work the task waits on.
+                    reply = local ? lane.foreground(context, call) : call.get();
+                } catch (TaskCancellationService.TaskCancelledException stop) {
+                    return Written.ending(Codegen.stopped(name));
+                } catch (ProviderRefused declined) {
+                    account(context, local, provider, declined.reply());
+                    return Written.ending(Codegen.failed("the model declined to write the code for '" + name
+                            + "' (" + declined.getMessage() + "), so nothing was created."));
+                } catch (OutputTruncated cutOff) {
+                    account(context, local, provider, cutOff.reply());
+                    if (cutOff.limit() != OutputTruncated.Limit.MAX_OUTPUT) {
+                        if (cutOff.replyRanOn()) {
+                            context.chat().ranOn(cutOff, live, "the code of '" + name + "' was not written");
+                            return Written.ending(Codegen.failed("writing the code for '" + name
+                                    + "' did not end: " + cutOff.getMessage() + ", so nothing was created."));
+                        }
+                        return Written.ending(Codegen.failed("the request for the code of '" + name
+                                + "' did not fit (" + cutOff.getMessage() + "), so nothing was created."));
+                    }
+                    cut = cutOff;
+                    reply = cutOff.reply();
+                } catch (EgressRefused refused) {
+                    return Written.ending(Codegen.failed("the request for the code of '" + name
+                            + "' was not sent (" + refused.getMessage() + "), so nothing was created."));
+                } catch (LlmException callFailed) {
+                    if (!local && callFailed.unreachable() && goesOnWithoutTheCloud(context, provider, callFailed)) {
+                        if (context.onLocal()) return new Written(null, 0, 0, null, true);
+                        continue; // the same request, asked of the cloud once more
+                    }
+                    return Written.ending(Codegen.failed("the request for the code of '" + name
+                            + "' failed (" + callFailed.getMessage() + "), so nothing was created."));
+                } finally {
+                    live.close();
+                }
+                // A reply came back: the task is alive, whatever the reply holds.
+                context.markProgress();
+                if (!local) context.cloudAnswered();
+                if (reply != null) tokens += reply.totalTokens();
+                String text = reply == null ? null : reply.content();
+                if (cut == null) {
+                    account(context, local, provider, reply);
+                    return new Written(sofar == null ? text
+                            : provider.restoreJoined(ReplySeam.join(sofar, text), config), part, tokens, null, false);
+                }
+
+                if (text == null || text.isBlank()) {
+                    if ("low".equals(config.effort())) {
+                        log.error("Skill '{}': part {} reached the model's maximum output with nothing written, "
+                                + "at low effort", name, part);
+                        return Written.ending(Codegen.failed("the model reasoned through its whole maximum output "
+                                + "without writing any of " + (part == 1 ? "the code" : "part " + part + " of the code")
+                                + " for '" + name + "', even at low effort (" + cut.getMessage() + "), so nothing "
+                                + "was created. A smaller skill fits: one job per skill, or split this one into several."));
+                    }
+                    config = config.withEffort("low");
+                    log.warn("Skill '{}': part {} reached the model's maximum output with nothing written; asking "
+                            + "again at low effort", name, part);
+                    // Stopped meanwhile: nothing is asked again, and the chat is not told it will be.
+                    if (context.isCancelled()) return Written.ending(Codegen.stopped(name));
+                    context.chat().askedAgainAtLowEffort(name, cut, part);
+                    statusEmitter.emitForTask(context.userId(), context.taskId(), StatusMessage.Type.STEP,
+                            "Asking again at low effort · " + label, tokenData(context));
+                    continue; // the same request, at low effort
+                }
+                String joined = sofar == null ? text : ReplySeam.join(sofar, text);
+                if (sofar != null && joined.length() == sofar.length()) {
+                    log.error("Skill '{}': part {} reached the model's maximum output again and added nothing to "
+                            + "the {} characters before it", name, part, sofar.length());
+                    return Written.ending(Codegen.failed(String.format(Locale.ROOT, "continuing the code for '%s' "
+                            + "got no further: part %d was cut off again (%s) and added nothing to the %,d "
+                            + "characters written before it, so nothing was created. A smaller skill fits: one job "
+                            + "per skill, or split this one into several.", name, part, cut.getMessage(),
+                            sofar.length())));
+                }
+                sofar = sofar == null ? joined : provider.restoreJoined(joined, config);
+                var next = new ArrayList<>(asked);
+                next.add(LlmMessage.assistant(text));
+                next.add(LlmMessage.user(CONTINUE));
+                asked = List.copyOf(next);
+                part++;
+                log.info("Skill '{}': part {} of its code reached the model's maximum output; {} characters so "
+                        + "far, asking for part {}", name, part - 1, sofar.length(), part);
+                if (context.isCancelled()) return Written.ending(Codegen.stopped(name));
+                context.chat().continuing(name, cut, part);
+                statusEmitter.emitForTask(context.userId(), context.taskId(), StatusMessage.Type.STEP,
+                        "Continuing skill code · " + label + " (part " + part + ")", tokenData(context));
+            }
         }
     }
 
@@ -3192,8 +3354,9 @@ public class AgentLoop {
         }
 
         // Handle a ```python fence that is never closed. A reply cut off at the model's maximum
-        // output never gets here -- the provider path refuses it (OutputTruncated) -- so this is
-        // a model that left the fence open.
+        // output gets here only whole -- continued until a part of it ended by itself, the parts
+        // joined (CodeWriting#reply) -- so this is a model that left the fence open, not where a
+        // cut fell.
         java.util.regex.Matcher unclosedPy = java.util.regex.Pattern
                 .compile("```[Pp]ython\\s*\n(.*)", java.util.regex.Pattern.DOTALL)
                 .matcher(response);

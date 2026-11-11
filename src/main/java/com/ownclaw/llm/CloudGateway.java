@@ -310,6 +310,21 @@ public final class CloudGateway implements LlmProvider {
                 r.model(), r.maxOutputTokens(), r.contextWindow(), r.usage());
     }
 
+    /**
+     * A text the caller joined from the texts of replies to calls made with {@code cfg} -- a reply
+     * cut off at the model's maximum output, and its continuations -- with the user's placeholders
+     * put back. Each reply's were put back as it came ({@link #chat}), but one the cut fell in was
+     * whole in neither reply: "&lt;ssid_" ended one, "1&gt;" began the next. In a text whose other
+     * placeholders are values already, such a one is what is left to put back, and it is put back
+     * as one within a reply is -- between the other quotes when its value holds the quote around
+     * it, the quote before it standing in the reply before.
+     */
+    @Override
+    public String restoreJoined(String text, LlmRequestConfig cfg) {
+        EgressContext egress = cfg == null ? null : cfg.egress();
+        return egress == null ? text : redactor.restore(egress.userId(), text);
+    }
+
     // ── parts ──
 
     /** One piece of the outbound body, with what the ledger may keep of it. */

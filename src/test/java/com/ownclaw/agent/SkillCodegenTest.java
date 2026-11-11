@@ -45,7 +45,10 @@ class SkillCodegenTest {
         return c -> Replies.of("```python\n" + code + "\n```\n", 3_000, 4_000, 0, 0, "end_turn");
     }
 
-    /** A reply stopped at the model's maximum output, as Anthropic reports one. */
+    /**
+     * A reply stopped at the model's maximum output, as Anthropic reports one: continued, not
+     * refused (SkillCodeInPartsTest).
+     */
     static Reply cutOff(String text) {
         return c -> new LlmResponse(text, List.of(), null, "max_tokens", null,
                 "claude-opus-5", 128_000, 1_000_000,
@@ -54,22 +57,6 @@ class SkillCodegenTest {
 
     static AgentContext task() {
         return new AgentContext("u1", "a1b2c3d4", "audit the routers");
-    }
-
-    @Test
-    @DisplayName("a reply cut off at the output limit is refused after one call, says which limit, and is not an outage")
-    void aCutOffReplyIsRefusedNotRepaired(@TempDir Path tmp) throws Exception {
-        var rig = new LoopRig(tmp, List.of());
-        for (int i = 0; i < 4; i++) rig.cloud.codegen.add(cutOff("```python\n" + module("    an =")));
-        var ctx = task();
-        AgentLoop.Codegen out = rig.loop.generateSkillCode(spec(), ctx);
-        assertEquals(1, rig.cloud.calls("codegen").size(), "a cut-off file was sent back for repair");
-        assertNull(out.params());
-        assertTrue(out.error().startsWith("ERROR: the code for 'openwrt_audit' did not fit in one reply "
-                + "([anthropic] the reply reached the model's maximum output of 128,000 tokens and was cut off)."),
-                out.error());
-        assertFalse(out.error().toLowerCase().contains("unavailable"), out.error());
-        assertEquals(131_000, ctx.cloudTokens(), "the cut-off reply was billed, and counted");
     }
 
     /**

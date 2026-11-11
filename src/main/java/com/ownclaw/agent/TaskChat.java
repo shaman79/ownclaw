@@ -28,6 +28,8 @@ import java.util.function.BiConsumer;
  * privacy filter changes before the cloud model reads it, a note when a step the provider stopped
  * as reasoning extraction is asked again, one when the task moves to the local model because its
  * cloud model cannot be reached, one when a model's reply ran on until it filled the model's context window,
+ * one when the code of a skill reached the model's maximum output and is continued where it
+ * stopped, or asked for again at low effort because the model spent all of it reasoning,
  * one when a delegation is not started because the local model would have had to retype a block
  * of its plan, the local model's summary of each
  * private result the cloud's own calls produced, and one when the task reads what the owner sent
@@ -299,6 +301,42 @@ public final class TaskChat {
     }
 
     /**
+     * The code of a skill reached the model's maximum output, and the model is asked to go on from
+     * where it stopped -- in as many parts as the code takes, each joined to the ones before
+     * ({@code AgentLoop#generateSkillCode}): which skill, the limit and the part asked for now,
+     * nothing of the code. Said, because the owner watched the reply grow and would otherwise see
+     * it end and another call begin.
+     *
+     * @param part the part asked for now: 2 for the first continuation
+     */
+    void continuing(String skill, OutputTruncated cut, int part) {
+        if (sessionId == null) return;
+        note("⏩ The code of '" + skill + "' reached " + maximumOutput(cut) + " -- continuing where it "
+                + "stopped (part " + part + ").");
+    }
+
+    /**
+     * A part of a skill's code reached the model's maximum output with nothing of it written: the
+     * model spent all of it reasoning. The same part is asked for again at low effort, so the model
+     * reasons less before it writes ({@code AgentLoop#generateSkillCode}). Said, because the call
+     * the owner watched ended with nothing to show for it, and another begins.
+     *
+     * @param part the part: 1 for the code's beginning
+     */
+    void askedAgainAtLowEffort(String skill, OutputTruncated cut, int part) {
+        if (sessionId == null) return;
+        note("⏩ " + (part == 1 ? "The code of '" + skill + "'" : "Part " + part + " of the code of '" + skill + "'")
+                + " reached " + maximumOutput(cut) + " before any of it was written: the model spent all of it "
+                + "reasoning. Asking again at low effort, so it reasons less first.");
+    }
+
+    /** "the model's maximum output of 128,000 tokens", or with no figure when the provider gives none. */
+    private static String maximumOutput(OutputTruncated cut) {
+        return cut.tokens() == null ? "the model's maximum output"
+                : String.format(Locale.ROOT, "the model's maximum output of %,d tokens", cut.tokens());
+    }
+
+    /**
      * The delegation of step {@code step} was not started: its plan holds a block of lines the
      * local model would have had to retype ({@link LiteralBlocks}), and the model that delegated
      * is asked to hand it over by name instead. Said, because otherwise the step row is followed
@@ -501,7 +539,8 @@ public final class TaskChat {
 
     /**
      * A line about the task that is no step of it -- the filter's counts, a step asked again, the
-     * move to the local model, a reply that ran on until the window was full, a delegation not started --
+     * move to the local model, a reply that ran on until the window was full, a skill's code
+     * continued past the maximum output or asked for again at low effort, a delegation not started --
      * posted without a header, so it is not read as one more step. The page draws a row without
      * one as its text.
      */

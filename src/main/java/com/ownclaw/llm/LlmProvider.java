@@ -23,6 +23,16 @@ public interface LlmProvider {
     LlmResponse chat(List<LlmMessage> messages, LlmRequestConfig config);
 
     /**
+     * {@code text}, which the caller joined from the texts of replies to calls made with
+     * {@code config} -- a reply cut off at the model's maximum output, and its continuations --
+     * as the caller may read it. Each of those replies was handed back readable, but their join
+     * can hold what none of them did: a placeholder of the cloud gateway's that the cut fell in,
+     * half of it in one reply and half in the next. The gateway puts such ones back
+     * ({@code CloudGateway}); a provider that hands back no placeholders returns the text as it is.
+     */
+    default String restoreJoined(String text, LlmRequestConfig config) { return text; }
+
+    /**
      * Quick health check — can we reach the provider?
      */
     boolean isAvailable();

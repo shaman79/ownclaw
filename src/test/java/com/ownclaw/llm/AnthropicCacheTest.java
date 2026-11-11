@@ -152,6 +152,32 @@ class AnthropicCacheTest {
     }
 
     @Test
+    @DisplayName("a reply continued in parts: each round sends the last round's messages as they were, the newest part carries the sliding mark, the caller's turn is last")
+    void aReplyContinuedInParts() {
+        var round2 = new ArrayList<>(List.of(LlmMessage.system("Write the skill."), LlmMessage.user("a scanner"),
+                LlmMessage.assistant("```python\nimport json\n"), LlmMessage.user("Continue it.")));
+        var round3 = new ArrayList<>(round2);
+        round3.add(LlmMessage.assistant("def run(params):\n"));
+        round3.add(LlmMessage.user("Continue it."));
+        JsonNode two = body(round2, false);
+        JsonNode three = body(round3, false);
+        assertEquals(two.path("system"), three.path("system"));
+        JsonNode sent2 = two.path("messages");
+        JsonNode sent3 = three.path("messages");
+        for (int i = 0; i < sent2.size(); i++) {
+            assertEquals(sent2.get(i).path("role"), sent3.get(i).path("role"));
+            assertEquals(text(sent2.get(i).path("content")), text(sent3.get(i).path("content")),
+                    "message " + i + " is the same bytes, so the cache round 2 wrote is round 3's to read");
+        }
+        assertEquals(FIVE_MINUTES, sent2.get(1).path("content").get(0).path("cache_control").toString(),
+                "round 2: the mark on part 1");
+        assertEquals(FIVE_MINUTES, sent3.get(3).path("content").get(0).path("cache_control").toString(),
+                "round 3: on part 2, two blocks on from where round 2's was");
+        assertEquals(List.of(FIVE_MINUTES, FIVE_MINUTES), marks(three).stream().map(JsonNode::toString).toList());
+        assertEquals("user", sent3.get(sent3.size() - 1).path("role").asText(), "no prefill: the model's words are never last");
+    }
+
+    @Test
     @DisplayName("the hour-long writes the usage reports are read apart, and priced at 2x the input rate")
     void hourLongWritesAreReadAndPriced() {
         var start = AnthropicStreamingTest.node("message_start");
