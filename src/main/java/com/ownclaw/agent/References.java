@@ -228,7 +228,14 @@ final class References {
         ArtifactRef whole = ArtifactRef.parse(s);
         if (whole != null) {
             String value = filled(whole, namespace, used, why);
-            return value == null ? v : value;
+            if (value != null) return value;
+            // A template written as the whole value -- {{ 3.6 * states('x') }} for a value_template
+            // -- is text, as the same inside a longer string is.
+            if (ArtifactRef.numberExpression(s)) {
+                why[0] = null;
+                return v;
+            }
+            return v;
         }
         if (ArtifactRef.LEGACY.matcher(ArtifactRef.trim(s)).matches() && legacyReference(s, namespace) != null) {
             why[0] = "'" + s.strip() + "' is the old way of writing a reference. Write "
@@ -252,17 +259,25 @@ final class References {
                     return v;
                 }
                 replacement = text == null ? m.group() : text;   // no such text: a template's own
-            } else if (!ArtifactRef.referenceLike(m.group())) {
-                replacement = m.group();   // a template's expression that starts with a number
             } else {
                 ArtifactRef inner = ArtifactRef.parse(m.group());
+                if (inner == null && ArtifactRef.numberExpression(m.group())) {
+                    m.appendReplacement(sb, java.util.regex.Matcher.quoteReplacement(m.group()));
+                    continue;   // a template's expression, {{ 2.4 * x }}: text
+                }
                 if (inner == null) {
                     why[0] = "'" + m.group().strip() + "' looks like a reference but is not a valid one. "
                             + "Write {{N}} or {{N.field}}, with N one of the task's results.";
                     return v;
                 }
                 replacement = filled(inner, namespace, used, why);
-                if (replacement == null) return v;
+                if (replacement == null) {
+                    // What cannot be filled, written as a template's number expression, is one:
+                    // {{ 3.6 * states('x') }} is result 3's field "6 * states(...)" to the grammar.
+                    if (!ArtifactRef.numberExpression(m.group())) return v;
+                    why[0] = null;
+                    replacement = m.group();
+                }
                 // A field hung outside the braces, {{1}}.body_text: the whole of a JSON result and
                 // the literal ".body_text" would go out. Only a whole reference to a JSON object:
                 // {{1.path}}.bak is a file name, and {{1}}.json one too when result 1 is text.
@@ -275,7 +290,10 @@ final class References {
                             + "follows the braces is text, so all of it and a literal '." + after + "' would go out. "
                             + (field(namespace.get(inner.handle() - 1).output(), asField) != null
                                     ? "Write " + asField + " for its field."
-                                    : "Put the field you mean inside the braces, as {{" + inner.handle() + ".name}}.");
+                                    : com.ownclaw.agent.tools.ToolResult.jsonObject(namespace.get(inner.handle() - 1).output()) != null
+                                    ? "Put the field you mean inside the braces, as {{" + inner.handle() + ".name}}."
+                                    : "It is a list, which has no field to name after its braces; pass it whole, or "
+                                            + "take the part you need with another call.");
                     return v;
                 }
             }

@@ -553,6 +553,58 @@ class DelegationCallsTest {
     }
 
     @Test
+    @DisplayName("a field a result has is filled in whatever it is called; one it lacks is refused; a number expression is text")
+    void fieldsAreFilledWhateverTheirName() {
+        var headers = new FakeTool("read_headers", false, List.of(), p -> ToolResult.success(
+                "{\"ok\":true,\"Content-Type\":\"text/plain\",\"2fa_code\":\"481516\",\"2026-11-11\":\"dentist 14:00\"}"));
+        var notify = new FakeTool("notify", true, List.of(), p -> ToolResult.success("ok"));
+        var filled = executor(new Scripted(), new Usage(), headers, notify).execute(calls("",
+                c("read_headers", Map.of()),
+                c("notify", Map.of("message", "{{call1.Content-Type}} {{call1.2fa_code}} {{call1.2026-11-11}}"))),
+                task(), UNCOUNTED);
+        assertTrue(filled.ok(), filled.text());
+        assertEquals("text/plain 481516 dentist 14:00", notify.calls.get(0).get("message"));
+        for (String missing : List.of("{{call1.messages.0.body}}", "{{call1.messages[0].body}}", "{{call1.body text}}",
+                "Value: {{call1.body_text|upper}}")) {
+            var refused = executor(new Scripted(), new Usage(), headers, notify).execute(calls("",
+                    c("read_headers", Map.of()), c("notify", Map.of("message", missing))), task(), UNCOUNTED);
+            assertFalse(refused.ok(), missing + " went out as " + notify.calls.get(notify.calls.size() - 1));
+        }
+        assertEquals(1, notify.calls.size());
+        // A template written as the whole value is text, as inside a longer one.
+        var ha = new FakeTool("ha_config_file", true, List.of(), p -> ToolResult.success("{\"ok\":true}"));
+        for (String template : List.of("{{ 3.6 * states('sensor.wind_speed')|float }}", "{{ 2.4 }}")) {
+            var outcome = executor(new Scripted(), new Usage(), ha).execute(calls("",
+                    c("ha_config_file", Map.of("value_template", template))), withMail(), UNCOUNTED);
+            assertTrue(outcome.ok(), template + ": " + outcome.text());
+            assertEquals(template, ha.calls.get(ha.calls.size() - 1).get("value_template"));
+        }
+        assertFalse(ArtifactRef.numberExpression("{{1.2026-11-11}}"));
+        assertFalse(ArtifactRef.numberExpression("{{1.2fa_code}}"));
+        assertTrue(ArtifactRef.numberExpression("{{ 1.5 if x else 1.0 }}"));
+        long start = System.nanoTime();
+        assertFalse(ArtifactRef.numberExpression("{{1." + " ".repeat(40_000) + "*}}"));
+        assertTrue(System.nanoTime() - start < 500_000_000L, "one look per character");
+    }
+
+    @Test
+    @DisplayName("prose that mentions a task result is not the mark: only a result the model was shown as one is refused")
+    void proseIsNotTheMark() {
+        var smtp = new FakeTool("smtp_send_email", true, List.of(), p -> ToolResult.success("Sent"));
+        var weather = new FakeTool("weather", false, List.of(), p -> ToolResult.success("Rain"));
+        var llm = new Scripted(call("smtp_send_email", Map.of("to", "petr@example.com",
+                "body", "The scheduler's task result 3 days ago was fine.")), done("sent"));
+        var outcome = executor(llm, new Usage(), smtp, weather).execute(calls("Mail Petr the scheduler's state.",
+                c("weather", Map.of())), task(), UNCOUNTED);
+        assertTrue(outcome.ok(), outcome.text());
+        assertEquals(1, smtp.calls.size());
+        var plain = new Scripted(call("smtp_send_email", Map.of("to", "petr@example.com",
+                "body", "Task result 1 of the review is attached.")), done("sent"));
+        assertTrue(executor(plain, new Usage(), smtp).execute(plan("mail Petr"), task(), UNCOUNTED).ok(),
+                "no calls ran, so no mark was shown");
+    }
+
+    @Test
     @DisplayName("a delegation the calls ended is no failed delegation: the cloud keeps orchestrating")
     void theValveStaysShut() {
         var ctx = task();

@@ -623,6 +623,20 @@ class DelegationSafetyTest {
     }
 
     @Test
+    @DisplayName("a crafted run of combining marks normalises in linear time, for the canary and the copy rule alike")
+    void combiningMarksAreCheap() {
+        var marks = new StringBuilder("a");
+        for (int i = 0; i < 400_000; i++) marks.append(i % 2 == 0 ? '́' : '̖');
+        long start = System.nanoTime();
+        com.ownclaw.privacy.PrivateIndex.normalise(marks.toString());
+        LocalExecutor.light(marks.toString());
+        assertTrue(System.nanoTime() - start < 5_000_000_000L, "about 90 seconds each before");
+        assertEquals(com.ownclaw.privacy.PrivateIndex.normalise("Příliš žluťoučký kůň"),
+                com.ownclaw.privacy.PrivateIndex.normalise(java.text.Normalizer.normalize("Příliš žluťoučký kůň",
+                        java.text.Normalizer.Form.NFD)), "ordinary text normalises as before");
+    }
+
+    @Test
     @DisplayName("a line of a hundred thousand blanks is read at once, not tried at every blank")
     void blanksInsideALineAreCheap() {
         String mail = plain(350) + " ".repeat(100_000) + "x\n" + plain(300);

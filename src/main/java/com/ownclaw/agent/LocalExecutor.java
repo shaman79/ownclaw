@@ -822,6 +822,19 @@ public class LocalExecutor {
      */
     static final String TASK_RESULT = "\u27E6task result ";
 
+    /** The task results the calls name, which the local model is shown as marks ({@link #renderPlanned}). */
+    private static java.util.Set<Integer> markedResults(List<DelegationPlan.Call> calls) {
+        var out = new java.util.HashSet<Integer>();
+        for (var call : calls) {
+            var t = ArtifactRef.TOKEN.matcher(String.valueOf(call.params()));
+            while (t.find()) {
+                ArtifactRef ref = ArtifactRef.parse(t.group());
+                if (ref != null) out.add(ref.handle());
+            }
+        }
+        return out;
+    }
+
     /** A copy of {@link #TASK_RESULT}'s mark, however written: brackets or none, escaped, any case. */
     static final java.util.regex.Pattern MARK_COPY = java.util.regex.Pattern.compile(
             "(?i)task[\\s\\u00A0]+result[\\s\\u00A0]+(\\d{1,9})");
@@ -1107,10 +1120,17 @@ public class LocalExecutor {
         // a 33-line script install came back with a line broken in five calls of seven (2026-10-08).
         // A result of the task it was shown in a call that ran for it, copied -- the mark whole,
         // its words without the brackets, or the brackets escaped: no result of its own.
-        if (!byCode) {
+        if (!byCode && !plan.calls().isEmpty()) {
             var mark = MARK_COPY.matcher(String.valueOf(action.params));
-            if (mark.find()) {
-                int n = Integer.parseInt(mark.group(1));
+            Integer shown = null;
+            // Only a result it was shown as a mark: "the task result 3 days ago" in a mail is prose.
+            var marked = markedResults(plan.calls());
+            while (shown == null && mark.find()) {
+                int k = Integer.parseInt(mark.group(1));
+                if (marked.contains(k)) shown = k;
+            }
+            if (shown != null) {
+                int n = shown;
                 boolean isGiven = given.stream().anyMatch(a -> a.n() == n);
                 return "Not run: 'task result " + n + "' stands for a result of the task, and it has no reference "
                         + "here. " + (isGiven
@@ -1439,7 +1459,7 @@ public class LocalExecutor {
                 while (token.find()) {
                     ArtifactRef ref = ArtifactRef.parse(token.group());
                     // A template's expression that starts with a number is no reference.
-                    if (ref != null && ref.field() != null && ArtifactRef.referenceLike(token.group())) {
+                    if (ref != null && ref.field() != null && !ArtifactRef.numberExpression(token.group())) {
                         held = token.group().strip();
                         break;
                     }
@@ -1919,7 +1939,7 @@ public class LocalExecutor {
      * and a copy that changed them is a copy that lost something.
      */
     static String light(String s) {
-        String t = java.text.Normalizer.normalize(s, java.text.Normalizer.Form.NFC)
+        String t = java.text.Normalizer.normalize(PrivateIndex.streamSafe(s), java.text.Normalizer.Form.NFC)
                 .replace("\r\n", "\n").replace('\r', '\n');
         var sb = new StringBuilder();
         boolean blank = false;

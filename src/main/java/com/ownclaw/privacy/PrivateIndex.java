@@ -72,7 +72,7 @@ public final class PrivateIndex {
     /** How every text is seen — indexed and checked alike — so casing and wrapping cannot hide a run. */
     public static String normalise(String text) {
         if (text == null || text.isEmpty()) return "";
-        String s = Normalizer.normalize(text, Normalizer.Form.NFKC).toLowerCase(Locale.ROOT);
+        String s = Normalizer.normalize(streamSafe(text), Normalizer.Form.NFKC).toLowerCase(Locale.ROOT);
         var sb = new StringBuilder(s.length());
         boolean space = false;
         for (int i = 0; i < s.length(); i++) {
@@ -86,6 +86,33 @@ public final class PrivateIndex {
             }
         }
         return sb.toString().strip();
+    }
+
+    /**
+     * Text that normalises in linear time: after 30 combining marks in a row a COMBINING GRAPHEME
+     * JOINER (U+034F) is put in, as Unicode's stream-safe text format does (UAX #15). Normalising
+     * reorders a run of combining marks, and a crafted run of 400,000 -- a page or a mail can carry
+     * one -- took 90 seconds on every check of it; no text a person writes has 30 in a row.
+     */
+    public static String streamSafe(String text) {
+        if (text == null) return null;
+        StringBuilder out = null;
+        int run = 0;
+        for (int i = 0; i < text.length(); i++) {
+            char c = text.charAt(i);
+            int type = Character.getType(c);
+            boolean mark = type == Character.NON_SPACING_MARK || type == Character.ENCLOSING_MARK
+                    || type == Character.COMBINING_SPACING_MARK;
+            if (mark && ++run > 30) {
+                if (out == null) out = new StringBuilder(text.length() + 16).append(text, 0, i);
+                out.append('\u034F');
+                run = 1;
+            } else if (!mark) {
+                run = 0;
+            }
+            if (out != null) out.append(c);
+        }
+        return out == null ? text : out.toString();
     }
 
     /** Register an artifact's text under its handle. Nothing of the text is kept. */
