@@ -1223,9 +1223,11 @@ public class AgentLoop {
                 // is: three in a row end the task. Such a stop no longer opens the valve (byCode),
                 // and the critic does not judge delegations, so without this the cloud could send
                 // the same wrong call for as long as it liked.
-                if (outcome.byCode() && outcome.stepCount() == 0) {
+                if (outcome.byCode() && outcome.stepCount() == 0 && !context.isCancelled()) {
                     var ranNone = new LinkedHashMap<String, Object>(asked);
                     ranNone.put(BY_CODE, true);
+                    // Nobody carried it out: none of the calls ran (the task page says so).
+                    ranNone.put(NOT_STARTED, true);
                     AgentResult end = stepRanNothing(context, action, result, null, step, nothing, ranNone);
                     if (end != null) return end;
                     continue;

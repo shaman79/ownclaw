@@ -278,20 +278,6 @@ public class LocalExecutor {
             return out.toString();
         };
         String goal = inWords.apply(plan.goal());
-        // A result of the task that a call names is the local model's to read too, when it goes on
-        // from the calls with a goal: it is shown the calls, with "result 4" in them
-        // (renderPlanned), and "send Jana the same reminder" has to have that reminder.
-        if (!plan.goal().isBlank()) {
-            for (var call : plan.calls()) {
-                var m = ArtifactRef.TOKEN.matcher(String.valueOf(call.params()));
-                while (m.find()) {
-                    ArtifactRef ref = ArtifactRef.parse(m.group());
-                    if (ref != null && ref.handle() <= results.size()) {
-                        named.putIfAbsent(ref.handle(), results.get(ref.handle() - 1));
-                    }
-                }
-            }
-        }
         var steps = new ArrayList<DelegationPlan.Step>();
         for (var st : plan.steps()) {
             steps.add(new DelegationPlan.Step(inWords.apply(st.description()), st.tool(), st.params()));
@@ -810,9 +796,11 @@ public class LocalExecutor {
     /**
      * The plan's calls written as the model's own turn, as {@link #renderCalls} writes its calls --
      * in its numbering, not the cloud's: a call's result, {{call2}}, is its own {{2}}, and a
-     * result of the task, {{4}} to the cloud, is "result 4", one it was given ({@link #given}).
-     * Shown as the cloud wrote them, the model copied "{{1.text}}" into a call of its own and sent
-     * its own first result -- the weather -- where the cloud had sent the task's first, a note.
+     * result of the task, {{4}} to the cloud, is {@link #TASK_RESULT} 4: no reference of its, and
+     * refused if it copies it into a call ({@link #act}). Shown as the cloud wrote them, the model
+     * copied "{{1.text}}" into a call of its own and sent its own first result -- the weather --
+     * where the cloud had sent the task's first, a note; shown as "result 1.text", it sent those
+     * words.
      */
     private static String renderPlanned(List<DelegationPlan.Call> calls) {
         var lines = new ArrayList<String>();
@@ -827,10 +815,25 @@ public class LocalExecutor {
         return String.join("\n", lines);
     }
 
+    /**
+     * How a result of the task stands in a call the local model is shown ({@link #renderPlanned}):
+     * not a reference of its own, and a mark nobody writes, so a copy of it into a call is found and
+     * refused rather than sent as words.
+     */
+    static final String TASK_RESULT = "\u27E6task result ";
+
     /** A value of a call the cloud wrote, as the local model numbers: see {@link #renderPlanned}. */
     private static Object inOwnNumbering(Object v) {
         if (v instanceof String s) {
-            String words = TaskRecord.inWords(s);
+            var t = ArtifactRef.TOKEN.matcher(s);
+            var marked = new StringBuilder();
+            while (t.find()) {
+                ArtifactRef ref = ArtifactRef.parse(t.group());
+                t.appendReplacement(marked, java.util.regex.Matcher.quoteReplacement(ref == null ? t.group()
+                        : TASK_RESULT + ref.handle() + (ref.field() == null ? "" : "." + ref.field()) + "\u27E7"));
+            }
+            t.appendTail(marked);
+            String words = marked.toString();
             var m = CALL_REF.matcher(words);
             var sb = new StringBuilder();
             while (m.find()) {
@@ -1098,6 +1101,12 @@ public class LocalExecutor {
         // It was once computed twice, which is how a guard and the thing it guards drift
         // apart. The texts the cloud handed the delegation are put in here too, by name: retyped,
         // a 33-line script install came back with a line broken in five calls of seven (2026-10-08).
+        // A result of the task it was shown in a call that ran for it, copied: no result of its own.
+        if (!byCode && String.valueOf(action.params).contains(TASK_RESULT)) {
+            return "Not run: '" + TASK_RESULT + "...\u27E7' stands for a result of the task that you were not "
+                    + "given, and it has no reference here. Leave it out; if the goal needs it, say so when you "
+                    + "call done.";
+        }
         // The local model's {{call2}} is its own {{2}}: the calls ran first (callsAsOwn).
         if (!byCode && !plan.calls().isEmpty()) {
             String[] bad = {null};
@@ -1409,13 +1418,25 @@ public class LocalExecutor {
                 throw new IllegalArgumentException("texts." + name + " must be a string: the exact "
                         + "text, as it is to be inserted.");
             }
-            // A text goes in exactly as written, and nothing inside it is filled in.
+            // A text goes in exactly as written, and nothing inside it is filled in: a call's result
+            // in it, or a result's field -- which no template's own placeholder is written as --
+            // would go out as braces.
             var inText = CALL_REF.matcher(text);
-            if (inText.find()) {
-                throw new IllegalArgumentException("texts." + name + " holds a call's result ("
-                        + inText.group().strip() + "), and a text is put in exactly as written, with "
-                        + "nothing in it filled in. Put the reference in the call's own argument, as the "
-                        + "whole value or inside its text.");
+            String held = inText.find() ? inText.group().strip() : null;
+            if (held == null) {
+                var token = ArtifactRef.TOKEN.matcher(text);
+                while (token.find()) {
+                    ArtifactRef ref = ArtifactRef.parse(token.group());
+                    if (ref != null && ref.field() != null) {
+                        held = token.group().strip();
+                        break;
+                    }
+                }
+            }
+            if (held != null) {
+                throw new IllegalArgumentException("texts." + name + " holds a reference (" + held
+                        + "), and a text is put in exactly as written, with nothing in it filled in. Put the "
+                        + "reference in the call's own argument, as the whole value or inside its text.");
             }
             texts.put(name, text);
         }
@@ -1481,7 +1502,8 @@ public class LocalExecutor {
             for (int i = 0; i < n; i++) {
                 sb.append(i + 1).append(". ").append(plan.calls().get(i).tool()).append("\n");
             }
-            sb.append("\n");
+            sb.append("In them, ").append(TASK_RESULT).append("N\u27E7 is a result of the task, not one of yours: it has\n");
+            sb.append("no reference here.\n\n");
         }
 
         // Whole, on this machine: reading what the cloud is shown only as a description is what
@@ -1890,7 +1912,7 @@ public class LocalExecutor {
         var sb = new StringBuilder();
         boolean blank = false;
         for (String line : t.split("\n", -1)) {
-            String l = line.stripTrailing();
+            String l = line.replaceAll("[\\s\\p{Z}]+$", "");
             if (l.isEmpty()) {
                 blank = sb.length() > 0;
                 continue;

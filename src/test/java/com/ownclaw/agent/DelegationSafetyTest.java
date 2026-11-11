@@ -611,6 +611,10 @@ class DelegationSafetyTest {
         var send = sideEffecting("smtp_send_email");
         assertEquals("body", refused(LocalExecutor.retyped(send, Map.of("body", text.replace("\n\n", "\n")), done, List.of())));
         assertNull(LocalExecutor.retyped(send, Map.of("body", text.replace("\n\n", "\n\n\n")), done, List.of()));
+        // A mail turned into text from HTML separates its paragraphs with lines of no-break spaces.
+        String html = text.replace("\n\n", "\n\u00A0\n");
+        assertNull(LocalExecutor.retyped(send, Map.of("body", text), List.of(step("mail_read", Map.of(), html)), List.of()),
+                "typed with empty lines, it is still the whole mail");
     }
 
     @Test

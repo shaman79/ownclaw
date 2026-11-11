@@ -261,10 +261,12 @@ final class References {
                 }
                 replacement = filled(inner, namespace, used, why);
                 if (replacement == null) return v;
-                // A field hung outside the braces, {{1}}.body_text: the whole result and the
-                // literal ".body_text" would go out.
-                if (s.startsWith(".", m.end()) && m.end() + 1 < s.length()
-                        && Character.isLetter(s.charAt(m.end() + 1))) {
+                // A field hung outside the braces, {{1}}.body_text: the whole of a JSON result and
+                // the literal ".body_text" would go out. Only a whole reference to a JSON object:
+                // {{1.path}}.bak is a file name, and {{1}}.json one too when result 1 is text.
+                if (inner.field() == null && s.startsWith(".", m.end()) && m.end() + 1 < s.length()
+                        && Character.isLetter(s.charAt(m.end() + 1))
+                        && com.ownclaw.agent.tools.ToolResult.jsonObject(namespace.get(inner.handle() - 1).output()) != null) {
                     why[0] = "'" + m.group().strip() + s.substring(m.end()).split("[^.\\p{L}\\p{N}_]", 2)[0]
                             + "' has its field outside the braces. Write " + new ArtifactRef(inner.handle(),
                             s.substring(m.end() + 1).split("[^\\p{L}\\p{N}_]", 2)[0]) + " instead.";

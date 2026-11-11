@@ -100,5 +100,8 @@ class DelegationCallsLoopTest {
         assertEquals(AgentResult.TerminationReason.FAILURE_LIMIT, r.terminationReason(), r.response());
         assertEquals(3, rig.cloud.calls("think").size(), "three, then the task ends");
         assertTrue(sent.isEmpty());
+        String step = rig.jdbc.queryForList("SELECT details FROM events WHERE event_type = 'step' "
+                + "AND json_extract(details, '$.tool') = 'delegate'", String.class).get(0);
+        assertTrue(JSON.readTree(step).path("notStarted").asBoolean(), "the page says nobody carried it out: " + step);
     }
 }

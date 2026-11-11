@@ -422,11 +422,24 @@ class DelegationCallsTest {
         int before = notify.calls.size();
         for (var args : List.<Map<String, Object>>of(Map.of("message", "{{call1}}.level"),
                 Map.of("data", Map.of("{{call1.level}}", "x")), Map.of("data", Map.of("{{1}}", "x")))) {
+            // {{call1}}.level: the whole JSON result and a literal ".level" would go out.
             var outcome = executor(new Scripted(), new Usage(), level, notify).execute(calls("",
                     c("battery_level", Map.of()), c("notify", args)), task(), UNCOUNTED);
             assertFalse(outcome.ok(), args + " should be refused: " + outcome.text());
         }
         assertEquals(before, notify.calls.size(), "a field outside the braces, a reference in a key: refused");
+        // A field's value, or a text result, followed by a file's extension is a name, not a field.
+        var file = new FakeTool("find_invoice", false, List.of(),
+                p -> ToolResult.success("{\"ok\":true,\"path\":\"/srv/docs/invoice_42\",\"host\":\"nas\"}"));
+        var plainName = new FakeTool("latest_name", false, List.of(), p -> ToolResult.success("invoice_42"));
+        var shell = new FakeTool("shell_exec", true, List.of(), p -> ToolResult.success("ok"));
+        var copy = executor(new Scripted(), new Usage(), file, plainName, shell).execute(calls("",
+                c("find_invoice", Map.of()), c("latest_name", Map.of()),
+                c("shell_exec", Map.of("command", "cp {{call1.path}} {{call1.path}}.bak && ssh root@{{call1.host}}.lan ls "
+                        + "/docs/{{call2}}.pdf"))), task(), UNCOUNTED);
+        assertTrue(copy.ok(), copy.text());
+        assertEquals("cp /srv/docs/invoice_42 /srv/docs/invoice_42.bak && ssh root@nas.lan ls /docs/invoice_42.pdf",
+                shell.calls.get(0).get("command"));
     }
 
     @Test
@@ -435,32 +448,44 @@ class DelegationCallsTest {
         var e = assertThrows(IllegalArgumentException.class, () -> LocalExecutor.parsePlan(Map.of(
                 "calls", List.of(Map.of("tool", "daily_menu_fetcher")),
                 "texts", Map.of("email", "Dobrý den,\n\ndnešní menu:\n{{call1.body_text}}\n\nPetr"))));
-        assertTrue(e.getMessage().contains("texts.email holds a call's result ({{call1.body_text}})"), e.getMessage());
+        assertTrue(e.getMessage().contains("texts.email holds a reference ({{call1.body_text}})"), e.getMessage());
+        var field = assertThrows(IllegalArgumentException.class, () -> LocalExecutor.parsePlan(Map.of(
+                "texts", Map.of("email", "Menu:\n{{1.body_text}}"))));
+        assertTrue(field.getMessage().contains("texts.email holds a reference ({{1.body_text}})"), field.getMessage());
+        assertEquals("Hi {{1}}, your code is {{2}}", LocalExecutor.parsePlan(Map.of(
+                "texts", Map.of("whatsapp", "Hi {{1}}, your code is {{2}}"))).texts().get("whatsapp"),
+                "a template's own placeholders, with no field, stay");
     }
 
     @Test
-    @DisplayName("after calls and a goal the local model is shown them in its own numbering, given the task's results they named")
+    @DisplayName("after calls and a goal the local model is shown them in its own numbering; a task result it was not given is a mark it cannot send")
     void theModelReadsTheCallsInItsOwnNumbering() {
         var weather = new FakeTool("weather", false, List.of(), p -> ToolResult.success("{\"ok\":true,\"text\":\"Rain, 7 C\"}"));
         var smtp = new FakeTool("smtp_send_email", true, List.of(), p -> ToolResult.success("Sent"));
         var ctx = task();
         ctx.addArtifact("note", Map.of(), Map.of(), "{\"ok\":true,\"text\":\"Pick up the kids at 15:30.\"}", true,
                 new Artifact.Decision(com.ownclaw.privacy.Label.PUBLIC, List.of()));
-        // The local model sends Jana what its first call returned, by the cloud's {{call1}} spelling.
-        var llm = new Scripted(call("smtp_send_email", Map.of("to", "jana@example.com", "body", "{{call1.text}}")),
+        // The local model copies what it was shown for Petr's email, then sends the weather by
+        // the cloud's {{call1}} spelling.
+        var llm = new Scripted(
+                call("smtp_send_email", Map.of("to", "jana@example.com", "body", "⟦task result 1.text⟧")),
+                call("smtp_send_email", Map.of("to", "jana@example.com", "body", "{{call1.text}}")),
                 done("sent"));
 
-        var outcome = executor(llm, new Usage(), weather, smtp).execute(calls("Send Jana the same reminder you sent Petr.",
+        var outcome = executor(llm, new Usage(), weather, smtp).execute(calls("Send Jana the weather too.",
                 c("weather", Map.of()),
                 c("smtp_send_email", Map.of("to", "petr@example.com", "body", "{{1.text}}"))), ctx, UNCOUNTED);
 
         assertTrue(outcome.ok(), outcome.text());
         assertEquals("Pick up the kids at 15:30.", smtp.calls.get(0).get("body"), "Petr got the task's note");
+        assertEquals(2, smtp.calls.size(), "the copied mark was refused, not sent as words");
         assertEquals("Rain, 7 C", smtp.calls.get(1).get("body"), "{{call1}} is the model's own result 1");
         var first = llm.calls.get(0);
-        assertTrue(first.get(2).content().contains("\"body\":\"result 1.text\""), first.get(2).content());
+        assertTrue(first.get(2).content().contains("\"body\":\"⟦task result 1.text⟧\""), first.get(2).content());
         assertFalse(first.get(2).content().contains("{{1.text}}"), "the cloud's handle would be the model's own result 1");
-        assertTrue(first.get(0).content().contains("Pick up the kids at 15:30."), "the note it named is given to read");
+        assertFalse(first.get(0).content().contains("Pick up the kids"),
+                "a task result a call named is not handed over whole: it would not fold");
+        assertTrue(llm.allSeen().contains("stands for a result of the task that you were not given"), llm.allSeen());
     }
 
     @Test
