@@ -76,7 +76,7 @@ class ChatPastePageTest {
                 + "{ method: 'DELETE',"), u);
         assertTrue(u.indexOf("if (!chips[i].isConnected)") < u.indexOf("pendingFiles.push("),
                 "checked before it joins what the next message carries: " + u);
-        assertTrue(u.contains("if (!files[i].size) { addMsg('system', files[i].name + ' is empty, so it was not attached.'); continue; }"),
+        assertTrue(u.contains("if (!files[i].size) { addMsg('system', mdLiteral(files[i].name) + ' is empty, so it was not attached.'); continue; }"),
                 "an empty file would shift the answer against the chips, and is said, not dropped in silence");
     }
 
@@ -95,6 +95,17 @@ class ChatPastePageTest {
         assertTrue(picture.contains("done(canvas.toDataURL('image/png'));"), picture);
         assertFalse((chip + picture).contains("createObjectURL"),
                 "img-src is 'self' data: (SecurityHeadersFilter): a blob: picture is blocked");
+    }
+
+    @Test
+    @DisplayName("a file's name in a notice is shown as it is: the notices are rendered as markdown")
+    void namesInNoticesAreLiteral() {
+        String u = between("function uploadFiles(files) {", "function createFileChip(");
+        assertTrue(u.contains("addMsg('system', mdLiteral(files[i].name) + ' is empty, so it was not attached.');"), u);
+        assertTrue(u.contains("addMsg('system', 'Upload failed: ' + mdLiteral(data.error));"), u);
+        assertTrue(u.contains("addMsg('system', 'Upload failed: ' + mdLiteral(err.message));"), u);
+        assertTrue(page.contains("return String(text).replace(/[\\\\`*_{}\\[\\]()#+\\-.!<>|~&]/g, '\\\\$&');"),
+                "every character markdown or HTML could read, escaped");
     }
 
     @Test

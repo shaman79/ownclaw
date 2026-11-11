@@ -7025,7 +7025,7 @@
         for (var i = 0; i < files.length; i++) {
             // The server skips an empty file, and its answer would then be one short of the chips.
             if (!files[i].size) {
-                addMsg('system', files[i].name + ' is empty, so it was not attached.');
+                addMsg('system', mdLiteral(files[i].name) + ' is empty, so it was not attached.');
                 continue;
             }
             formData.append('files', files[i]);
@@ -7042,7 +7042,7 @@
         .then(function(data) {
             if (data.error) {
                 chips.forEach(function(c) { c.remove(); });
-                addMsg('system', 'Upload failed: ' + data.error);
+                addMsg('system', 'Upload failed: ' + mdLiteral(data.error));
                 return;
             }
             var uploaded = data.files || [];
@@ -7063,11 +7063,20 @@
         })
         .catch(function(err) {
             chips.forEach(function(c) { c.remove(); });
-            addMsg('system', 'Upload failed: ' + err.message);
+            addMsg('system', 'Upload failed: ' + mdLiteral(err.message));
         });
     }
 
     /** A file's chip above the box. An image shows itself, small ({@link chipPicture}). */
+    /**
+     * Text shown as it is in a line the page renders as markdown: a file's name is whatever its
+     * owner called it, and "__init__.py" came out as a bold "init", a name holding a link as a
+     * live link. Every character markdown or HTML could read is escaped.
+     */
+    function mdLiteral(text) {
+        return String(text).replace(/[\\`*_{}\[\]()#+\-.!<>|~&]/g, '\\$&');
+    }
+
     function createFileChip(name, fileId, file) {
         var chip = document.createElement('span');
         chip.className = 'file-chip' + (fileId ? '' : ' uploading');
