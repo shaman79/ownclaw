@@ -66,6 +66,19 @@ public final class LiveCall implements LlmProgress, AutoCloseable {
     static final int LOOP_REPEATS = 4;
 
     /**
+     * How many checks in a row must find a tool call's text repeating so before the reply is ended:
+     * 4, where reasoning and an answer take one. A call's text is data, and data repeats -- a grid of
+     * zeros in a script, a table's rows, a line of dashes -- where prose does not; the same 300
+     * characters four times is what eighteen identical 68-character lines are. But data ends, and the
+     * check after it finds the end of the text unrepeated, while a loop goes on and is found again at
+     * every check. Four checks in a row are some 6,000 characters of the same text still being
+     * written after it was first seen -- a few minutes of the local model's writing, where a loop in
+     * a call used to run for the hour the read timeout allowed -- and more than the repeated data of
+     * any call seen so far: a script's 40-row grid was 2,800 characters.
+     */
+    static final int LOOP_CALL_CHECKS = 4;
+
+    /**
      * How much of the end of each text the ops API shows of a call under way ({@link #forOps}):
      * enough to see what the model is writing now. The whole text is the reply's, which the call
      * returns when it ends.
@@ -108,6 +121,8 @@ public final class LiveCall implements LlmProgress, AutoCloseable {
     private final StringBuilder answer = new StringBuilder();
     /** How long each text was when it was last checked for a loop. */
     private int reasoningChecked, answerChecked;
+    /** The checks in a row that found a tool call's text repeating ({@link #LOOP_CALL_CHECKS}). */
+    private int callRepeats;
     /** Where the reasoning's line that has not ended yet begins. */
     private int lineStart;
     /** The latest complete line of the reasoning, or null before one has ended. */
@@ -156,7 +171,7 @@ public final class LiveCall implements LlmProgress, AutoCloseable {
             synchronized (this) {
                 reasoning.setLength(0);
                 answer.setLength(0);
-                reasoningChecked = answerChecked = lineStart = 0;
+                reasoningChecked = answerChecked = lineStart = callRepeats = 0;
                 line = null;
                 calls.clear();
                 last = null;
@@ -173,7 +188,8 @@ public final class LiveCall implements LlmProgress, AutoCloseable {
     /**
      * Kept, then checked for a loop: a reply whose reasoning or answer has become one is ended
      * here, with {@link RepeatedOutput}. A tool call's arguments are the model's answer too, and
-     * are checked with it.
+     * are checked with it -- ended only when the checks find them repeating {@link #LOOP_CALL_CHECKS}
+     * times in a row, as data that repeats is not.
      */
     @Override
     public synchronized void received(Part part, String text) {
@@ -189,11 +205,18 @@ public final class LiveCall implements LlmProgress, AutoCloseable {
         }
         if (reasoning.length() - reasoningChecked >= LOOP_CHECK_EVERY) {
             reasoningChecked = reasoning.length();
-            looping(reasoning, "of reasoning");
+            if (repeating(reasoning)) throw looped(reasoning, "of reasoning");
         }
         if (answer.length() - answerChecked >= LOOP_CHECK_EVERY) {
             answerChecked = answer.length();
-            looping(answer, "of its answer");
+            boolean inACall = part == Part.ARGUMENTS || part == Part.CALL;
+            if (!repeating(answer)) {
+                callRepeats = 0;
+            } else if (!inACall) {
+                throw looped(answer, "of its answer");
+            } else if (++callRepeats >= LOOP_CALL_CHECKS) {
+                throw looped(answer, "of its answer, in a tool call it went on repeating");
+            }
         }
     }
 
@@ -207,21 +230,25 @@ public final class LiveCall implements LlmProgress, AutoCloseable {
     }
 
     /**
-     * Ends the call when the last {@link #LOOP_WINDOW} characters of {@code text} appear in it
+     * Whether the last {@link #LOOP_WINDOW} characters of {@code text} appear in it
      * {@link #LOOP_REPEATS} times or more, none overlapping another -- they themselves are one.
      * Counting stops at that many, so a check reads the text at most once.
      */
-    private void looping(StringBuilder text, String which) {
-        if (text.length() < LOOP_WINDOW) return;
+    private static boolean repeating(StringBuilder text) {
+        if (text.length() < LOOP_WINDOW) return false;
         String end = text.substring(text.length() - LOOP_WINDOW);
         int times = 0;
         for (int at = text.indexOf(end); at >= 0 && times < LOOP_REPEATS; at = text.indexOf(end, at + LOOP_WINDOW)) {
             times++;
         }
-        if (times < LOOP_REPEATS) return;
-        throw new RepeatedOutput(provider, String.format(Locale.ROOT,
+        return times >= LOOP_REPEATS;
+    }
+
+    /** The reply's end, a loop: what was seen, in figures, and nothing of the text itself. */
+    private RepeatedOutput looped(StringBuilder text, String which) {
+        return new RepeatedOutput(provider, String.format(Locale.ROOT,
                 "the %s model repeated the same %,d characters %d times, after %s and %,d characters %s",
-                local ? "local" : "cloud", LOOP_WINDOW, times, elapsed(System.currentTimeMillis() - startedAt),
+                local ? "local" : "cloud", LOOP_WINDOW, LOOP_REPEATS, elapsed(System.currentTimeMillis() - startedAt),
                 text.length(), which));
     }
 

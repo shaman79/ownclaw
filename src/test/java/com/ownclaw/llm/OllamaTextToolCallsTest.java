@@ -118,7 +118,7 @@ class OllamaTextToolCallsTest {
     @DisplayName("a call whose argument has become a loop is ended by the loop guard while it is written")
     void aLoopingArgumentIsEnded() throws Exception {
         var looping = new StringBuilder("#!/bin/sh\n");
-        for (int i = 0; i < 60; i++) {
+        for (int i = 0; i < 200; i++) {
             looping.append("echo 'checking the configuration of the second router again, because the first answer "
                     + "did not show the route to 192.0.2.254 and I need it before I decide which command to run next'\n");
         }
@@ -130,9 +130,58 @@ class OllamaTextToolCallsTest {
         var e = assertThrows(RepeatedOutput.class, () -> OllamaStreamingTest.provider(OllamaStreamingTest.config(), http)
                 .chat(ASK, withTools(List.of(SHELL)).withProgress(live)));
         assertTrue(e.getMessage().contains("repeated the same 300 characters"), e.getMessage());
+        assertTrue(e.getMessage().contains("in a tool call it went on repeating"), e.getMessage());
+        int seen = (int) live.shown().data().get("answerChars");
+        assertTrue(seen < reply.length() / 2, "ended while it went on, not at its end: " + seen + " of " + reply.length());
+        assertTrue(seen >= 3 * 2_000, "not before the checks in a row had found it going on: " + seen);
         assertEquals(List.of("shell_exec"), live.shown().data().get("toolCalls"), "the owner saw which call it was");
         assertEquals(http.opened.get(), http.closed.get(), "the stream was closed behind it");
         live.close();
+    }
+
+    @Test
+    @DisplayName("data that repeats in a call -- a grid of zeros, a table's identical rows, a rule of dashes -- is no loop")
+    void repeatedDataIsNoLoop() throws Exception {
+        var script = new StringBuilder("import numpy as np\n\n# The board, empty.\nGRID = [\n");
+        for (int i = 0; i < 40; i++) script.append("    [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],\n");
+        script.append("]\n\n# ").append("-".repeat(76)).append("\nROWS = '''\n");
+        for (int i = 0; i < 18; i++) script.append("2026-11-11,router-1,eth0,up,1500,0,0,0,0,0,0,0,0,0,0,ok,ok,ok,ok\n");
+        script.append("'''\n");
+        for (int i = 0; i < 10; i++) script.append("# ").append("=".repeat(66)).append('\n');
+        script.append("\ndef main():\n    print(len(GRID), len(ROWS.splitlines()))\n\nif __name__ == '__main__':\n    main()\n");
+        String reply = "Writing the script.\n" + TextToolCallsTest.call("shell_exec", "command", script.toString(),
+                "timeout", "30");
+        var http = ollama(lines(reply, 37) + last("stop", 900, 60));
+        var task = new AgentContext("u1", "t1", "write the script");
+        LiveCall live = task.call(OllamaStreamingTest.provider(OllamaStreamingTest.config(), http), true, "delegation turn 2");
+
+        LlmResponse r = assertDoesNotThrow(() -> OllamaStreamingTest.provider(OllamaStreamingTest.config(), http)
+                .chat(ASK, withTools(List.of(SHELL)).withProgress(live)));
+        assertEquals(script.toString(), r.toolCalls().get(0).arguments().get("command"), "the whole script, run as written");
+        live.close();
+
+        // The same text as an answer is ended: there the rule is the first check that finds it.
+        var answer = new AgentContext("u1", "t2", "say it");
+        LiveCall prose = answer.call(OllamaStreamingTest.provider(OllamaStreamingTest.config(), http), true, "step 1");
+        assertThrows(RepeatedOutput.class, () -> {
+            for (int i = 0; i < script.length(); i += 37) {
+                prose.received(Part.ANSWER, script.substring(i, Math.min(script.length(), i + 37)));
+            }
+        });
+        prose.close();
+    }
+
+    @Test
+    @DisplayName("a call to a tool deferred and not yet offered has its values typed by that tool's schema all the same")
+    void deferredToolsAreTyped() throws Exception {
+        String reply = TextToolCallsTest.call("ha_api", "ratio", "2", "verbose", "true", "body", "{\"a\": [1, 2]}");
+        var http = ollama(lines(reply, 9) + last("stop", 900, 60));
+        LlmResponse r = OllamaStreamingTest.provider(OllamaStreamingTest.config(), http)
+                .chat(ASK, withTools(List.of(SHELL, TextToolCallsTest.HA.asDeferred())));
+        assertEquals(Map.of("ratio", 2, "verbose", true, "body", Map.of("a", List.of(1, 2))), r.toolCalls().get(0).arguments());
+        String system = JSON.readTree(http.to(CHAT).get(0).body()).path("messages").get(0).path("content").asText();
+        assertEquals(TextToolCalls.system(List.of(SHELL), "You are the executor.\n"), system,
+                "the system message offers what is offered, the deferred tool not among it");
     }
 
     @Test

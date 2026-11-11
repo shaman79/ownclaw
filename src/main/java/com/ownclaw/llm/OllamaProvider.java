@@ -300,19 +300,22 @@ public class OllamaProvider implements LlmProvider {
             msgs.addObject().put("role", "system").put("content", TextToolCalls.system(offered, null));
         }
 
+        // Every tool of the request, deferred ones too: a call to one the model has not been offered
+        // yet still has its values typed by its schema, and is named while it is written.
         JsonNode last = streamChat(httpClient, config.getUrl(), body, contextLength, reqConfig.progress(), mapper,
-                callsAsText ? new TextToolCalls.Stream() : null);
+                callsAsText ? new TextToolCalls.Stream(reqConfig.tools().stream().map(ToolSpec::name)
+                        .collect(java.util.stream.Collectors.toSet())) : null);
         // The one check every reply passes before a caller sees it -- here, because local calls
         // have no gateway to apply it.
-        return response(last, model, contextLength, callsAsText ? offered : null).requireComplete("ollama");
+        return response(last, model, contextLength, callsAsText ? reqConfig.tools() : null).requireComplete("ollama");
     }
 
     /**
      * The reply {@link #streamChat} read, as the response every provider gives.
      *
-     * @param callsAsText the tools offered, when the model was asked to write its calls as text
-     *                    ({@link TextToolCalls}): they are read out of its text. Null when it was
-     *                    offered them natively.
+     * @param callsAsText the request's tools, offered or deferred, when the model was asked to write
+     *                    its calls as text ({@link TextToolCalls}): they are read out of its text,
+     *                    their values typed by these schemas. Null when it was offered them natively.
      */
     private LlmResponse response(JsonNode last, String model, int contextLength, List<ToolSpec> callsAsText) {
         var reply = new StreamedReply("ollama", mapper);

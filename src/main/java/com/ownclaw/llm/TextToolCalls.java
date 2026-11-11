@@ -1,7 +1,9 @@
 package com.ownclaw.llm;
 
 import com.fasterxml.jackson.core.json.JsonReadFeature;
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.ObjectReader;
 import com.fasterxml.jackson.databind.json.JsonMapper;
 
 import java.math.BigDecimal;
@@ -12,7 +14,6 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
@@ -34,6 +35,12 @@ import java.util.regex.Pattern;
  * back out of the reply here ({@link #parse}). The model reads the same prompt it would read with
  * the tools sent natively, and every piece of a call reaches the progress hook as it is written
  * ({@link Stream}).
+ * <p>
+ * The format has no way to quote its own tags: text the model copies into a value that holds them
+ * -- an email, a web page -- cannot always be told from the call around it. A value ends only where
+ * the format's structure follows its {@code </parameter>}, a call that names a parameter twice is
+ * not run, and neither is a reply that leaves a closing tag outside its calls -- what a value split
+ * by such text leaves behind -- but text built to look exactly like a whole call is read as one.
  * <pre>
  * &lt;tool_call&gt;
  * &lt;function=NAME&gt;
@@ -156,6 +163,12 @@ final class TextToolCalls {
      * when it has them, a property without a type written without one; an empty set of properties
      * as {}. Anything else a schema holds -- additionalProperties, a minimum, a default, properties
      * nested in a property -- is not among them, and the model is not shown it either way.
+     * <p>
+     * Not measured, because no schema this application sends has them: an enum, a list of types,
+     * items of more than one key, $defs and anyOf -- Ollama keeps an items value as Go's "any", which
+     * writes its keys sorted, so a multi-key items may come out in another order here than there.
+     * Rendered otherwise, the model reads its tools all the same; only the prompt's bytes differ
+     * from the native ones from that tool on.
      */
     static Map<String, Object> asTemplateSeesIt(ToolSpec tool) {
         Map<String, Object> schema = tool.inputSchema() == null ? Map.of() : tool.inputSchema();
@@ -298,61 +311,86 @@ final class TextToolCalls {
     record Parsed(String text, List<Call> calls, String malformed) {}
 
     /**
-     * The model's own JSON, read as models write it: a line break or a tab left raw inside a
-     * string, single quotes, a comma before a closing bracket. Such a value read strictly failed the
-     * call it was in: a Home Assistant template sent as a request body on 2026-11-10, its line breaks
-     * raw. Each of these reads as the value the model meant. A backslash before a character JSON
-     * does not escape is not forgiven: read leniently, the {@code \d} of a regular expression would
-     * become {@code d}, a value changed without a word; read strictly, the value stays the text the
-     * model wrote, and the tool says what it makes of it.
+     * The model's own JSON, read as models write it: a line break or a tab left raw inside a string,
+     * a comma before a closing bracket. Such a value read strictly failed the call it was in: a Home
+     * Assistant template sent as a request body on 2026-11-10, its line breaks raw. Each of these
+     * reads as the value the model meant, every character kept. Nothing that drops one is forgiven:
+     * a backslash before a character JSON does not escape -- read leniently, the {@code \d} of a
+     * regular expression would become {@code d} -- nor single quotes, which bring {@code \'} with them
+     * and read the {@code 'it'\''s'} of a shell command as {@code 'it'''s'}. Such a value stays the
+     * text the model wrote, and the tool says what it makes of it.
      */
     private static final ObjectMapper LENIENT = JsonMapper.builder()
             .enable(JsonReadFeature.ALLOW_UNESCAPED_CONTROL_CHARS)
-            .enable(JsonReadFeature.ALLOW_SINGLE_QUOTES)
             .enable(JsonReadFeature.ALLOW_TRAILING_COMMA)
             .build();
 
     /**
-     * The calls in a reply, read the way they are written: each {@code <tool_call>} that opens a
-     * function (or, as an older Qwen writes it, a JSON object with its name and arguments), its
-     * parameters each delimited by the format's own structure -- a {@code </parameter>} counts as
-     * a value's end only where the next parameter, the function's end or the call's end follows it,
-     * so a value may hold that text itself. A parameter's value is its text, but for one line break
-     * at each end, which the format adds; typed by the tool's schema where it declares a type other
-     * than string: an integer, a number or a boolean as the value it reads as, an object or an array
-     * as the JSON it holds (read leniently), each kept as text when it does not read as one.
+     * One JSON value, and nothing after it: {@code {"state": "on"}} written twice is two values, and
+     * read as the first, the second would be dropped without a word.
+     */
+    private static final ObjectReader ONE_VALUE = LENIENT.readerFor(Object.class)
+            .with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
+
+    /**
+     * The longest text read as a number. A model writes a number in a few characters; one written
+     * longer, or one beyond what a double holds ({@link #number}), stays the text it is -- read,
+     * "1e10000000" was ten million digits to write out, nineteen seconds of work and an error message
+     * as long, for a value no tool takes.
+     */
+    static final int NUMBER_AT_MOST = 64;
+
+    /**
+     * The calls in a reply, read the way they are written: each {@code <tool_call>} where the model
+     * writes its calls ({@link #opens}), its function, and its parameters, each value ending only
+     * where the format's structure -- the next parameter, the function's end, the call's end --
+     * follows its {@code </parameter>}. A parameter's value is its text, but for one line break at
+     * each end, which the format adds; typed by the tool's schema where it declares a type other than
+     * string: an integer, a number or a boolean as the value it reads as, an object as a JSON object
+     * and an array as a JSON array (read leniently, {@link #LENIENT}), each kept as text when it does
+     * not read as one.
      * <p>
      * A reply with no call is returned exactly as written. One with calls returns the text outside
-     * them, trimmed. A call that cannot be read -- cut off before its value or its function's name
-     * ends, text where a parameter should be -- is not among the calls; the reply names it instead,
+     * them, trimmed. A call that cannot be read is not among the calls; the reply names it instead,
      * and {@link LlmResponse#requireComplete} refuses the reply for it, as it does a native call
-     * whose arguments do not parse.
+     * whose arguments do not parse: one cut off before its value, its function's name or its
+     * function ends; one with text where a parameter should be; one that names a parameter twice;
+     * and every call of a reply that leaves a closing tag outside its calls -- what a value holding
+     * the format's own tags leaves behind when it splits the call it was in.
      *
-     * @param offered the tools the model was offered, whose schemas type the values
+     * @param tools the tools of the request, offered or deferred, whose schemas type the values
      */
-    static Parsed parse(String content, List<ToolSpec> offered) {
+    static Parsed parse(String content, List<ToolSpec> tools) {
         if (content == null) return new Parsed("", List.of(), null);
         var schemas = new LinkedHashMap<String, ToolSpec>();
-        if (offered != null) for (ToolSpec t : offered) schemas.putIfAbsent(t.name(), t);
+        if (tools != null) for (ToolSpec t : tools) schemas.putIfAbsent(t.name(), t);
         var calls = new ArrayList<Call>();
         var outside = new StringBuilder();
         String malformed = null;
+        boolean afterACall = false;
         int pos = 0;
-        while (pos <= content.length()) {
+        while (pos < content.length()) {
             int open = callStart(content, pos);
-            if (open < 0) {
-                outside.append(content, pos, content.length());
-                break;
+            String between = content.substring(pos, open < 0 ? content.length() : open);
+            outside.append(between);
+            if (afterACall && malformed == null) {
+                for (String tag : new String[] {PARAMETER_END, FUNCTION_END, CLOSE}) {
+                    if (between.contains(tag)) {
+                        malformed = "the model's tool call cannot be read (the text after a call holds " + tag
+                                + ", which a value holding the format's own tags leaves behind):\n" + between;
+                        break;
+                    }
+                }
             }
-            outside.append(content, pos, open);
+            if (open < 0) break;
             Read read = readCall(content, open, schemas);
             if (read.call() != null) calls.add(read.call());
             else if (malformed == null) {
                 malformed = "the model's tool call cannot be read (" + read.problem() + "):\n"
                         + content.substring(open, read.end());
             }
+            afterACall = true;
             pos = read.end();
-            if (pos >= content.length()) break;
         }
         if (calls.isEmpty() && malformed == null) return new Parsed(content, List.of(), null);
         return new Parsed(outside.toString().strip(), List.copyOf(calls), malformed);
@@ -368,23 +406,60 @@ final class TextToolCalls {
      */
     private static final Pattern NAME = Pattern.compile("[^\\s<>/]+");
 
-    /**
-     * Where the next call begins at or after {@code from}: a {@code <tool_call>} followed -- past any
-     * whitespace -- by a function, a JSON object, or the end of the reply (a call cut off as it
-     * began). One followed by anything else is text, as the model may write the tag in prose.
-     */
+    /** Where the next call begins at or after {@code from} ({@link #opens}), or -1. */
     static int callStart(String content, int from) {
         for (int at = content.indexOf(OPEN, from); at >= 0; at = content.indexOf(OPEN, at + 1)) {
-            int p = skipSpace(content, at + OPEN.length());
-            if (p >= content.length() || content.startsWith(FUNCTION, p) || content.charAt(p) == '{') return at;
+            if (Boolean.TRUE.equals(opens(content, at, true))) return at;
         }
         return -1;
+    }
+
+    /**
+     * Whether the {@code <tool_call>} at {@code at} opens a call: it does when a function follows it,
+     * past any whitespace, and the tag stands where the model writes its calls -- at the start of a
+     * line, or with a line break after it; and, at the start of a line, when nothing but whitespace
+     * follows it to the reply's end, a call cut off as it began. A tag anywhere else is text that
+     * mentions it -- "the tag `<tool_call> <function=x>` is how" -- and is read as the text it is.
+     *
+     * @param ended whether the text is the whole reply
+     * @return null while the text so far cannot tell: it has not ended, and what follows the tag is
+     *         whitespace or the start of {@code <function=}
+     */
+    static Boolean opens(CharSequence text, int at, boolean ended) {
+        boolean lineStart = atLineStart(text, at);
+        boolean lineBreak = false;
+        int p = at + OPEN.length();
+        while (p < text.length() && Character.isWhitespace(text.charAt(p))) {
+            if (text.charAt(p) == '\n') lineBreak = true;
+            p++;
+        }
+        if (p >= text.length()) return ended ? lineStart : null;
+        if (startsWith(text, p, FUNCTION)) return lineStart || lineBreak;
+        if (!ended && text.length() - p < FUNCTION.length() && FUNCTION.startsWith(text.subSequence(p, text.length()).toString())) {
+            return null;
+        }
+        return false;
+    }
+
+    /** Whether nothing but spaces and tabs stands between {@code at} and the line's start. */
+    private static boolean atLineStart(CharSequence text, int at) {
+        for (int i = at - 1; i >= 0; i--) {
+            char c = text.charAt(i);
+            if (c == '\n') return true;
+            if (c != ' ' && c != '\t') return false;
+        }
+        return true;
+    }
+
+    private static boolean startsWith(CharSequence text, int at, String prefix) {
+        if (at < 0 || at + prefix.length() > text.length()) return false;
+        for (int i = 0; i < prefix.length(); i++) if (text.charAt(at + i) != prefix.charAt(i)) return false;
+        return true;
     }
 
     private static Read readCall(String content, int open, Map<String, ToolSpec> schemas) {
         int p = skipSpace(content, open + OPEN.length());
         if (p >= content.length()) return new Read(null, "it ends where its function should begin", content.length());
-        if (content.charAt(p) == '{') return readJsonCall(content, p, schemas);
 
         int nameEnd = content.indexOf('>', p + FUNCTION.length());
         if (nameEnd < 0) return new Read(null, "it ends inside its function's name", content.length());
@@ -426,6 +501,12 @@ final class TextToolCalls {
             if (valueEnd < 0) {
                 return new Read(null, "the value of '" + parameter + "' has no end", content.length());
             }
+            // A second value for one parameter is the model's mistake or text copied into a value
+            // that held the format's tags, a parameter of its own among them; neither is run.
+            if (arguments.containsKey(parameter)) {
+                return new Read(null, "it names the parameter '" + parameter + "' twice",
+                        endOfCall(content, valueEnd));
+            }
             String raw = content.substring(parameterEnd + 1, valueEnd);
             if (raw.startsWith("\n")) raw = raw.substring(1);
             if (raw.endsWith("\n")) raw = raw.substring(0, raw.length() - 1);
@@ -456,42 +537,6 @@ final class TextToolCalls {
         return close < 0 ? content.length() : close + CLOSE.length();
     }
 
-    /**
-     * A call written as a JSON object -- {@code {"name": ..., "arguments": {...}}} -- as Qwen2.5 and
-     * Qwen3 write theirs: read leniently, its arguments an object or a string holding one.
-     */
-    @SuppressWarnings("unchecked")
-    private static Read readJsonCall(String content, int start, Map<String, ToolSpec> schemas) {
-        Object value;
-        int after;
-        try (var parser = LENIENT.getFactory().createParser(content.substring(start))) {
-            value = LENIENT.readValue(parser, Object.class);
-            after = start + (int) parser.currentLocation().getCharOffset();
-        } catch (Exception e) {
-            return new Read(null, "its JSON does not read as an object", endOfCall(content, start));
-        }
-        int end = skipSpace(content, after);
-        end = content.startsWith(CLOSE, end) ? end + CLOSE.length() : after;
-        if (!(value instanceof Map<?, ?> object) || !(object.get("name") instanceof String name) || name.isBlank()) {
-            return new Read(null, "its JSON names no function", end);
-        }
-        Object args = object.containsKey("arguments") ? object.get("arguments") : object.get("parameters");
-        if (args instanceof String text) {
-            try {
-                args = text.isBlank() ? Map.of() : LENIENT.readValue(text, Object.class);
-            } catch (Exception e) {
-                return new Read(null, "the arguments of '" + name + "' are not a JSON object", end);
-            }
-        }
-        if (args == null) args = Map.of();
-        if (!(args instanceof Map<?, ?> map)) {
-            return new Read(null, "the arguments of '" + name + "' are not a JSON object", end);
-        }
-        var arguments = new LinkedHashMap<String, Object>();
-        map.forEach((k, v) -> arguments.put(String.valueOf(k), v));
-        return new Read(new Call(name.strip(), arguments), null, end);
-    }
-
     /** The JSON Schema type a tool declares for a parameter, or null when it declares none. */
     static String declaredType(ToolSpec tool, String parameter) {
         if (tool == null || tool.inputSchema() == null) return null;
@@ -518,14 +563,20 @@ final class TextToolCalls {
         try {
             switch (type) {
                 case "integer" -> {
-                    // "4.0" too: a whole number written with a point.
-                    return new BigDecimal(v).toBigIntegerExact();
+                    BigDecimal d = number(v);
+                    if (d == null) return raw;
+                    try {
+                        return d.longValueExact();   // "4.0" and "1e3" too: whole numbers written so
+                    } catch (ArithmeticException notAWholeLong) {
+                        return raw;
+                    }
                 }
                 case "number" -> {
-                    BigDecimal d = new BigDecimal(v);
+                    BigDecimal d = number(v);
+                    if (d == null) return raw;
                     try {
-                        return d.toBigIntegerExact();
-                    } catch (ArithmeticException notWhole) {
+                        return d.longValueExact();
+                    } catch (ArithmeticException notAWholeLong) {
                         return d.doubleValue();
                     }
                 }
@@ -535,8 +586,9 @@ final class TextToolCalls {
                     return raw;
                 }
                 case "object", "array" -> {
-                    Object read = LENIENT.readValue(v, Object.class);
-                    return read instanceof Map<?, ?> || read instanceof List<?> ? read : raw;
+                    Object read = ONE_VALUE.readValue(v);
+                    boolean fits = "object".equals(type) ? read instanceof Map<?, ?> : read instanceof List<?>;
+                    return fits ? read : raw;
                 }
                 default -> {
                     return raw;
@@ -545,6 +597,24 @@ final class TextToolCalls {
         } catch (Exception doesNotRead) {
             return raw;
         }
+    }
+
+    /**
+     * A value's text as a number a tool can be handed, or null: at most {@link #NUMBER_AT_MOST}
+     * characters, and within what a double holds. Both are known from the digits and the exponent
+     * as written, before anything is worked out from them.
+     */
+    static BigDecimal number(String v) {
+        if (v.isEmpty() || v.length() > NUMBER_AT_MOST) return null;
+        BigDecimal d;
+        try {
+            d = new BigDecimal(v);
+        } catch (NumberFormatException notANumber) {
+            return null;
+        }
+        if (d.signum() == 0) return BigDecimal.ZERO;
+        long digitsBeforeThePoint = (long) d.precision() - d.scale();   // 0 or less below 1
+        return digitsBeforeThePoint > 309 || digitsBeforeThePoint < -323 ? null : d;
     }
 
     private static int skipSpace(CharSequence text, int from) {
@@ -560,32 +630,36 @@ final class TextToolCalls {
      * a call begins, then the call -- its name ({@link LlmProgress.Part#CALL}) once that is written,
      * and every piece of it as {@link LlmProgress.Part#ARGUMENTS}, so the owner sees the call being
      * written and the loop guard reads it. A piece that may be the start of a tag is held back until
-     * the next one says whether it is. Only what the hook is told depends on this; the reply is read
-     * whole, by {@link #parse}, once it has ended.
+     * the next one says whether it is, and never more than {@link #HELD_AT_MOST} characters of it.
+     * Only what the hook is told depends on this; the reply is read whole, by {@link #parse}, once it
+     * has ended.
      */
     static final class Stream {
 
         private enum State { TEXT, OPENED, CALL }
 
         /**
-         * How much of a call's beginning is held back while its function's name is written: a name
-         * is a few dozen characters, and past this the call is told as it is, named or not.
+         * How much of a call's beginning is held back while it is not yet clear whether it is one,
+         * or while its function's name is written: a name is a few dozen characters, and past this
+         * the text is told as a call's, named or not, so neither the owner nor the loop guard is left
+         * without it -- a tag followed by a hundred thousand line breaks was.
          */
         static final int HELD_AT_MOST = 256;
 
-        /** How far into a call written as JSON its name is looked for. */
-        static final int NAME_WITHIN = 4_096;
-
-        private static final Pattern JSON_NAME = Pattern.compile("\"name\"\\s*:\\s*\"([^\"\\\\]*)\"");
-
+        /**
+         * The names the hook may be told: the request's tools'. A call to anything else is shown as
+         * a call to "a tool" -- its name is the model's text, which the owner is shown unscrubbed.
+         */
+        private final java.util.Set<String> tools;
         private final StringBuilder all = new StringBuilder();
         /** How much of {@link #all} the hook has been told. */
         private int told;
         private State state = State.TEXT;
-        /** Where the call under way begins: its {@code <tool_call>}. */
-        private int callFrom;
-        /** Whether the hook has been told the name of the call under way. */
-        private boolean named;
+
+        /** @param tools the names of the request's tools */
+        Stream(java.util.Set<String> tools) {
+            this.tools = tools == null ? java.util.Set.of() : java.util.Set.copyOf(tools);
+        }
 
         /** The next piece of the reply's text. */
         void content(String piece, LlmProgress progress) {
@@ -609,64 +683,32 @@ final class TextToolCalls {
                         }
                         tell(progress, LlmProgress.Part.ANSWER, open);
                         state = State.OPENED;
-                        callFrom = open;
-                        named = false;
                     }
                     case OPENED -> {
-                        // A call when what follows the tag, past any whitespace, is a function, a JSON
-                        // object or the reply's end -- as parse reads it -- and text otherwise.
-                        int p = skipSpace(all, told + OPEN.length());
-                        String rest = all.substring(Math.min(p, all.length()), Math.min(all.length(), p + FUNCTION.length()));
-                        boolean call;
-                        if (p >= all.length()) {
-                            if (!ended) return;
-                            call = true;
-                        } else if (all.charAt(p) == '{') {
-                            Matcher m = JSON_NAME.matcher(all);
-                            m.region(p, all.length());
-                            boolean found = m.find();
-                            if (!found && !ended && all.length() - told < HELD_AT_MOST) return;
-                            if (found) {
-                                progress.received(LlmProgress.Part.CALL, m.group(1));
-                                named = true;
-                            }
-                            call = true;
-                        } else if (startsWith(all, p, FUNCTION)) {
-                            int end = all.indexOf(">", p + FUNCTION.length());
-                            if (end < 0 && !ended && all.length() - told < HELD_AT_MOST) return;
-                            if (end >= 0) {
-                                String name = all.substring(p + FUNCTION.length(), end).strip();
-                                if (!name.isEmpty()) {
-                                    progress.received(LlmProgress.Part.CALL, name);
-                                    named = true;
-                                }
-                            }
-                            call = true;
-                        } else if (FUNCTION.startsWith(rest) && !ended) {
-                            return;   // "<func": the next piece says whether it is one
-                        } else {
-                            call = false;
+                        boolean holding = !ended && all.length() - told < HELD_AT_MOST;
+                        Boolean call = opens(all, told, ended);
+                        if (call == null) {
+                            if (holding) return;
+                            call = true;   // held long enough: told as the call it may be
                         }
-                        if (call) {
-                            state = State.CALL;
-                        } else {
+                        if (!call) {
                             tell(progress, LlmProgress.Part.ANSWER, told + OPEN.length());
                             state = State.TEXT;
+                            continue;
                         }
+                        int p = skipSpace(all, told + OPEN.length());
+                        if (startsWith(all, p, FUNCTION)) {
+                            int end = all.indexOf(">", p + FUNCTION.length());
+                            if (end < 0 && holding) return;
+                            String name = end < 0 ? "" : all.substring(p + FUNCTION.length(), end).strip();
+                            if (tools.contains(name)) progress.received(LlmProgress.Part.CALL, name);
+                        }
+                        state = State.CALL;
                     }
                     case CALL -> {
                         int close = all.indexOf(CLOSE, told);
-                        int upTo = close >= 0 ? close + CLOSE.length()
-                                : ended ? all.length() : all.length() - heldBack(CLOSE);
-                        if (!named && upTo - callFrom <= NAME_WITHIN) {
-                            Matcher m = JSON_NAME.matcher(all);
-                            m.region(callFrom, Math.max(callFrom, upTo));
-                            if (m.find()) {
-                                progress.received(LlmProgress.Part.CALL, m.group(1));
-                                named = true;
-                            }
-                        }
-                        tell(progress, LlmProgress.Part.ARGUMENTS, upTo);
+                        tell(progress, LlmProgress.Part.ARGUMENTS, close >= 0 ? close + CLOSE.length()
+                                : ended ? all.length() : all.length() - heldBack(CLOSE));
                         if (close < 0) return;
                         state = State.TEXT;
                     }
@@ -692,12 +734,6 @@ final class TextToolCalls {
                 if (startsWith(tag, 0, all.substring(all.length() - n))) return n;
             }
             return 0;
-        }
-
-        private static boolean startsWith(CharSequence text, int at, String prefix) {
-            if (at < 0 || at + prefix.length() > text.length()) return false;
-            for (int i = 0; i < prefix.length(); i++) if (text.charAt(at + i) != prefix.charAt(i)) return false;
-            return true;
         }
     }
 }
