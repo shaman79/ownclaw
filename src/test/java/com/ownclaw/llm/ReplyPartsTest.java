@@ -11,8 +11,8 @@ import static org.junit.jupiter.api.Assertions.*;
 
 /**
  * What each provider tells a call's hook its reply carried, event by event, as it streams in
- * ({@link LlmProgress#received}): what the owner is shown of a call while it runs, and what the
- * loop guard reads. Each through the real provider over a scripted stream.
+ * ({@link LlmProgress#received}): what the owner is shown of a call while it runs. Each through the
+ * real provider over a scripted stream.
  */
 class ReplyPartsTest {
 

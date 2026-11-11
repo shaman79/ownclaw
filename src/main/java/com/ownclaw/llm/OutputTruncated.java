@@ -38,28 +38,43 @@ public final class OutputTruncated extends LlmException {
     public Integer tokens() { return tokens; }
 
     /**
-     * Whether the reply filled the context window, not the request: the request was read whole,
-     * with room to spare -- under half the window, or shorter than the reply that came of it -- and
-     * the reply ran on until the window was full: a local generation, which is sent no output limit,
-     * that did not stop. Nothing of this application ends a reply for its length or for repeating,
-     * so this is where a runaway ends. Folding the request makes room only for the reply to run on
-     * again, each round a whole window of generation; and it is no conversation too long for the
-     * window, which a new chat would answer.
+     * Whether a reply ran on until the context window was full: there is a reply, and the request
+     * it came of was read whole -- one longer than the window is refused before any reply -- so the
+     * reply filled the rest. A local generation is sent no output limit, and nothing of this
+     * application ends a reply for its length or for repeating, so this is where a runaway ends.
+     * Said so, with both sizes ({@link #describe}): "the conversation is longer than the window"
+     * was not true of it.
      */
-    public boolean replyFilledTheWindow() {
-        return filledByReply(limit, tokens, reply());
+    public boolean replyRanOn() {
+        return ranOn(limit, tokens, reply());
     }
 
-    private static boolean filledByReply(Limit limit, Integer tokens, LlmResponse reply) {
-        if (limit != Limit.CONTEXT_WINDOW || reply == null || tokens == null) return false;
-        int read = reply.billedInputTokens();
-        return read > 0 && (read < tokens / 2 || reply.completionTokens() > read);
+    /**
+     * Whether the reply, not the request, filled most of the window: it ran on ({@link #replyRanOn})
+     * from a request under half of it. Folding the request then makes room only for the reply to
+     * run on again, each round a whole window of generation, and a new chat would not help either:
+     * nothing is folded, and the task ends as an error. From a request over half the window, the
+     * request is folded and asked again as one too long would be -- the room it frees is the
+     * reply's -- and once nothing is left to fold, a new chat is what makes room.
+     */
+    public boolean replyFilledTheWindow() {
+        return replyRanOn() && reply().billedInputTokens() < tokens / 2;
+    }
+
+    private static boolean ranOn(Limit limit, Integer tokens, LlmResponse reply) {
+        return limit == Limit.CONTEXT_WINDOW && reply != null && tokens != null && reply.billedInputTokens() > 0;
     }
 
     private static String describe(Limit limit, Integer tokens, LlmResponse reply) {
-        if (filledByReply(limit, tokens, reply)) {
-            return String.format(Locale.ROOT, "the reply ran on until it filled the model's %,d-token context "
-                    + "window, from a request of %,d tokens", tokens, reply.billedInputTokens());
+        if (ranOn(limit, tokens, reply)) {
+            // Both sizes, so the reader sees which filled it: a reply of 261,244 tokens to a request of
+            // 900 ran on; one of 1,000 to a request of 999,000 had little room.
+            int wrote = reply.completionTokens();
+            return wrote > 0
+                    ? String.format(Locale.ROOT, "a request of %,d tokens and a reply of %,d tokens filled the "
+                            + "model's %,d-token context window", reply.billedInputTokens(), wrote, tokens)
+                    : String.format(Locale.ROOT, "a request of %,d tokens and its reply filled the model's %,d-token "
+                            + "context window", reply.billedInputTokens(), tokens);
         }
         return switch (limit) {
             case MAX_OUTPUT -> tokens == null

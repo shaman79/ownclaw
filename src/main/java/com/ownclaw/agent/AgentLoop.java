@@ -2729,7 +2729,7 @@ public class AgentLoop {
                         + declined.getMessage() + "), so nothing was created.");
             } catch (OutputTruncated cutOff) {
                 account(context, local, provider, cutOff.reply());
-                if (cutOff.replyFilledTheWindow()) {
+                if (cutOff.replyRanOn()) {
                     context.chat().ranOn(cutOff, live, "the code of '" + name + "' was not written");
                     return Codegen.failed("writing the code for '" + name + "' did not end: " + cutOff.getMessage()
                             + ", so nothing was created.");

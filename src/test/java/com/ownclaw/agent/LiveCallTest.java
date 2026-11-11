@@ -17,7 +17,7 @@ import static org.junit.jupiter.api.Assertions.*;
 
 /**
  * A model call of a task as it streams in ({@link LiveCall}): the live state the owner is shown,
- * what the ops API reads of it, and the guard that ends a reply that has become a verbatim loop.
+ * what the ops API reads of it -- and that nothing a reply holds, however long, ends it.
  */
 class LiveCallTest {
 
@@ -120,6 +120,16 @@ class LiveCallTest {
                 call.shown().text());
         assertEquals("step 3, delegation turn 2", task(3).atStep("delegation turn 2"));
         assertEquals("step 3", task(3).atStep(null));
+    }
+
+    @Test
+    @DisplayName("what a call is doing, said for a long one: reading its prompt, or writing and how much")
+    void whatACallIsDoing() {
+        var ctx = task(1);
+        LiveCall call = ctx.call(OLLAMA, true, ctx.atStep(null));
+        assertEquals("0s, loading the model and reading the prompt, nothing written yet", call.doing());
+        call.received(Part.REASONING, "Checking the router.\n");
+        assertEquals("0s, reasoning, 21 characters so far", call.doing());
     }
 
     @Test

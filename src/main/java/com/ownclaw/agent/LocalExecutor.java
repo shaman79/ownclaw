@@ -588,11 +588,11 @@ public class LocalExecutor {
                         continue;
                     }
                 }
-                // A reply that ran on until it filled the window ended there: the delegation fails,
-                // as it does on any failed call, and its work goes back to the model that delegated
-                // it -- the cloud's, unless the task runs on the local model. The owner, who watched
-                // it grow, is told why it stopped.
-                if (e instanceof OutputTruncated cut && cut.replyFilledTheWindow()) {
+                // A reply that ran on until it filled the window, with nothing left to fold, ended
+                // there: the delegation fails, as it does on any failed call, and its work goes back
+                // to the model that delegated it -- the cloud's, unless the task runs on the local
+                // model. The owner, who watched it grow, is told why it stopped.
+                if (e instanceof OutputTruncated cut && cut.replyRanOn()) {
                     parentContext.chat().ranOn(cut, live,
                             parentContext.options().localOnly() || parentContext.onLocal()
                                     ? "the delegation has failed" : "the cloud model takes over");

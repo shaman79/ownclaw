@@ -22,8 +22,8 @@ import static org.junit.jupiter.api.Assertions.*;
 /**
  * A task's model calls as the owner sees them while they run, through the real loop: the live
  * state sent to his chat while a call is under way and never after it, what a page that connects
- * meanwhile is told, what the ops API reads -- and a reply that has become a loop, ended, with the
- * work handed on and the owner told. The local model is the real Ollama provider over a scripted
+ * meanwhile is told, what the ops API reads -- and a reply that ran on until the model's window was
+ * full, with the work handed on and the owner told. The local model is the real Ollama provider over a scripted
  * stream; the cloud is scripted.
  */
 class LiveCallTaskTest {
@@ -66,8 +66,8 @@ class LiveCallTaskTest {
         return SilentOllama.runsOn(thinking, 900);
     }
 
-    static final String SEEN = "the reply ran on until it filled the model's 262,144-token context window, from a "
-            + "request of 900 tokens";
+    static final String SEEN = "a request of 900 tokens and a reply of 261,244 tokens filled the model's 262,144-token "
+            + "context window";
 
     @Test
     @DisplayName("a local reply that runs on until the window is full ends the delegation: the cloud takes over, and the chat says why")
@@ -99,6 +99,27 @@ class LiveCallTaskTest {
         assertEquals(true, state(turn.get(turn.size() - 1)).get("ended"), "and as it ended");
         // Mutation: replyFilledTheWindow false -> the turn is folded and asked again, and the
         // script has no second reply.
+    }
+
+    @Test
+    @DisplayName("a reply that ran on from a request over half the window says so too, in the cloud's words and the chat's note")
+    void aRunawayFromABigRequest(@TempDir Path tmp) throws Exception {
+        var thinking = new ArrayList<String>();
+        for (int i = 1; i <= 20; i++) thinking.add("Step " + i + " of the audit.\n");
+        var ollama = new SilentOllama(0, SilentOllama.runsOn(thinking, 140_000));
+        var rig = new LoopRig(tmp, List.of(NOOP), 600, ollama.provider());
+        rig.cloud.think.add(call(AgentAction.DELEGATE, Map.of("goal", "audit both routers")));
+        rig.cloud.think.add(respond("Both routers answer; I checked them myself."));
+
+        AgentResult r = rig.turn(session(rig), "audit the routers");
+
+        assertEquals(AgentResult.TerminationReason.COMPLETED, r.terminationReason(), r.response());
+        String told = String.join("\n", userParts(rig.cloud.calls("think").get(1)));
+        assertTrue(told.contains("Local LLM call failed: [ollama] a request of 140,000 tokens and a reply of 122,144 "
+                + "tokens filled the model's 262,144-token context window"), told);
+        assertFalse(told.contains("conversation is longer"), told);
+        assertEquals(1, rows(rig).stream().filter(row -> row.startsWith("⏹️")).count(), rows(rig).toString());
+        // Mutation: word it by the half-window test, as before -> "the conversation is longer than ...".
     }
 
     @Test
@@ -145,8 +166,8 @@ class LiveCallTaskTest {
         assertEquals(2, ollama.chats(), "the long reply was read to its end, and the delegation went on");
         String told = String.join("\n", userParts(rig.cloud.calls("think").get(1)));
         assertTrue(told.contains("Both routers answer."), told);
-        assertFalse(told.contains("repeated the same"), told);
-        assertTrue(rows(rig).stream().noneMatch(row -> row.startsWith("🔁")), rows(rig).toString());
+        assertFalse(told.contains("filled the model's"), told);
+        assertTrue(rows(rig).stream().noneMatch(row -> row.startsWith("⏹️")), rows(rig).toString());
     }
 
     @Test
@@ -191,7 +212,7 @@ class LiveCallTaskTest {
         assertEquals(AgentResult.TerminationReason.COMPLETED, r.terminationReason(), r.response());
         assertEquals(500, r.response().split("\\| eth0 \\|", -1).length - 1, "every row reached the owner");
         assertEquals(1, rig.cloud.calls("think").size(), "asked once: nothing was ended");
-        assertTrue(rows(rig).stream().noneMatch(row -> row.startsWith("🔁")), rows(rig).toString());
+        assertTrue(rows(rig).stream().noneMatch(row -> row.startsWith("⏹️")), rows(rig).toString());
         // Mutation: check the answer for a loop as the reasoning is -> the table is ended, the step asked again.
     }
 
@@ -217,7 +238,7 @@ class LiveCallTaskTest {
         for (var channel : List.of(TaskChat.Channel.TELEGRAM, TaskChat.Channel.WEB)) {
             var rig = new LoopRig(java.nio.file.Files.createDirectories(tmp.resolve(channel.name())), List.of(NOOP));
             rig.loop.liveEveryMs = 20;
-            rig.loop.longCallMs = 100;    // ten minutes, shortened: the reply below takes some 500 ms
+            rig.loop.longCallMs = 300;    // ten minutes, shortened: the reply below takes some 500 ms
             var statuses = rig.statuses();
             rig.cloud.think.add(c -> reasoning(12, () -> { }).answer(c));
             rig.cloud.think.add(respond("Both routers answer."));
@@ -227,16 +248,18 @@ class LiveCallTaskTest {
             AgentResult r = rig.loop.executeFull("u1", "check the routers", false, row, List.of(), channel);
 
             assertEquals(AgentResult.TerminationReason.COMPLETED, r.terminationReason(), r.response());
-            var told = rows(rig).stream().filter(t -> t.contains("model is still writing")).toList();
+            var told = rows(rig).stream().filter(t -> t.contains("model has been at it for")).toList();
             if (channel == TaskChat.Channel.WEB) {
                 assertEquals(List.of(), told, "the web chat shows the call as it runs: nothing more is said");
                 continue;
             }
             assertEquals(1, told.size(), "once, however long it runs: " + rows(rig));
-            assertTrue(told.get(0).startsWith("☁️ Step 1: the cloud model is still writing, "), told.get(0));
-            assertTrue(told.get(0).endsWith(" characters so far. /cancel stops it."), told.get(0));
+            assertTrue(told.get(0).startsWith("☁️ Step 1: the cloud model has been at it for "), told.get(0));
+            assertTrue(told.get(0).contains(", reasoning, "), "what it is doing: " + told.get(0));
+            assertTrue(told.get(0).endsWith(" characters so far. /cancel stops it, and all other running work with it."),
+                    told.get(0));
             assertTrue(statuses.stream().anyMatch(m -> m.type() == StatusMessage.Type.PROGRESS_MESSAGE
-                    && m.text().contains("model is still writing") && Boolean.TRUE.equals(m.data().get("telegram"))),
+                    && m.text().contains("model has been at it for") && Boolean.TRUE.equals(m.data().get("telegram"))),
                     "and sent to Telegram");
         }
         // Mutation: drop the channel check in TaskChat#longCall -> the web chat is told too.

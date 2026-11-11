@@ -142,8 +142,10 @@ class OllamaStreamingTest {
                 () -> provider(config(), http).chat(ASK, new LlmRequestConfig(null, null, false)));
         assertEquals(OutputTruncated.Limit.CONTEXT_WINDOW, e.limit());
         assertEquals(262_144, e.tokens());
-        assertEquals("[ollama] the conversation is longer than the model's 262,144-token context window",
-                e.getMessage());
+        assertEquals("[ollama] a request of 200,000 tokens and a reply of 62,144 tokens filled the model's "
+                + "262,144-token context window", e.getMessage(), "the request fit; the reply filled the rest");
+        assertTrue(e.replyRanOn());
+        assertFalse(e.replyFilledTheWindow(), "a request over half the window: folding it makes room");
     }
 
     @Test

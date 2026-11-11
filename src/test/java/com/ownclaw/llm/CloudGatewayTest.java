@@ -592,7 +592,7 @@ class CloudGatewayTest {
         assertEquals(List.of(cancel), handed, "the caller's hook is handed the cancel of what the call waits on");
         provider.configs.get(0).progress().received(LlmProgress.Part.REASONING, "Checking the router.");
         assertEquals(List.of("REASONING:Checking the router."), heard,
-                "and told what each event carried, which the owner is shown and the loop guard reads");
+                "and told what each event carried, which the owner is shown");
         assertEquals(EgressLedger.Decision.ERROR, rows.last().decision());
 
         var withTools = cfg.withTools(List.of(new ToolSpec("fx_rates", "Rates.", Map.of("type", "object"))));

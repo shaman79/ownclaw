@@ -73,6 +73,21 @@ class SkillCodegenTest {
     }
 
     @Test
+    @DisplayName("code that ran on until it filled the model's window is not asked again, and says what happened")
+    void aRunawayCodeReplySaysSo(@TempDir Path tmp) throws Exception {
+        var rig = new LoopRig(tmp, List.of());
+        rig.cloud.codegen.add(c -> {
+            throw new com.ownclaw.llm.OutputTruncated("ollama", com.ownclaw.llm.OutputTruncated.Limit.CONTEXT_WINDOW,
+                    262_144, Replies.of("```python\nimport json\n", 900, 261_244, 0, 0, "length"));
+        });
+        AgentLoop.Codegen out = rig.loop.generateSkillCode(spec(), task());
+        assertEquals(1, rig.cloud.calls("codegen").size(), "not asked again: it would run on again");
+        assertEquals("ERROR: writing the code for 'openwrt_audit' did not end: [ollama] a request of 900 tokens and a "
+                + "reply of 261,244 tokens filled the model's 262,144-token context window, so nothing was created.",
+                out.error());
+    }
+
+    @Test
     @DisplayName("a repair sends the specification and the latest attempt only, so it does not grow")
     void aRepairSendsOnlyTheLatestAttempt(@TempDir Path tmp) throws Exception {
         var rig = new LoopRig(tmp, List.of());

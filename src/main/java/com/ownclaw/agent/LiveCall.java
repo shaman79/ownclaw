@@ -114,6 +114,16 @@ public final class LiveCall implements LlmProgress, AutoCloseable {
 
     public String purpose() { return purpose; }
 
+    /**
+     * What the call is doing, and for how long: "10m 3s, reasoning, 42,000 characters so far", or
+     * "10m 3s, loading the model and reading the prompt, nothing written yet".
+     */
+    public synchronized String doing() {
+        int chars = reasoning.length() + answer.length();
+        return elapsed(System.currentTimeMillis() - startedAt) + ", " + phase() + ", "
+                + (chars == 0 ? "nothing written yet" : String.format(Locale.ROOT, "%,d characters so far", chars));
+    }
+
     /** "23m 5s and 41,200 characters": how long the call has run and how much it has written. */
     public synchronized String ranFor() {
         return elapsed(System.currentTimeMillis() - startedAt) + " and "

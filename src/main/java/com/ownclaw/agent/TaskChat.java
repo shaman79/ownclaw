@@ -284,16 +284,18 @@ public final class TaskChat {
     }
 
     /**
-     * A model call of a task asked from Telegram has run long: said there once, with how long and
-     * how much so far, and how to stop it. The web chat shows every call as it runs (LiveCall);
-     * Telegram is told none of that, and nothing ends a call for its length.
+     * A model call of a task asked from Telegram has run long: said there once, with what it is doing
+     * -- reading its prompt or waiting its turn, which writes nothing, or writing, and how much --
+     * and how to stop it. The web chat shows every call as it runs (LiveCall); Telegram is told none
+     * of that, and nothing ends a call for its length. /cancel there has no chat to keep to: it
+     * stops everything running, which the note says.
      */
     void longCall(LiveCall call) {
         if (sessionId == null || channel != Channel.TELEGRAM) return;
         String purpose = call.purpose();
         note((call.local() ? Actor.LOCAL : Actor.CLOUD).emoji + " " + Character.toUpperCase(purpose.charAt(0))
-                + purpose.substring(1) + ": the " + (call.local() ? "local" : "cloud") + " model is still writing, "
-                + call.ranFor() + " so far. /cancel stops it.");
+                + purpose.substring(1) + ": the " + (call.local() ? "local" : "cloud") + " model has been at it for "
+                + call.doing() + ". /cancel stops it, and all other running work with it.");
     }
 
     /**
@@ -499,7 +501,7 @@ public final class TaskChat {
 
     /**
      * A line about the task that is no step of it -- the filter's counts, a step asked again, the
-     * move to the local model, a reply ended as a loop, a delegation not started --
+     * move to the local model, a reply that ran on until the window was full, a delegation not started --
      * posted without a header, so it is not read as one more step. The page draws a row without
      * one as its text.
      */

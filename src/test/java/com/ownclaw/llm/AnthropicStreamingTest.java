@@ -313,8 +313,8 @@ class AnthropicStreamingTest {
         LlmResponse r = provider(http).chat(ASK, new LlmRequestConfig(null, null, false));
         var e = assertThrows(OutputTruncated.class, () -> r.requireComplete("anthropic"));
         assertEquals(OutputTruncated.Limit.CONTEXT_WINDOW, e.limit());
-        assertEquals("[anthropic] the conversation is longer than the model's 1,000,000-token context window",
-                e.getMessage());
+        assertEquals("[anthropic] a request of 999,000 tokens and a reply of 1,000 tokens filled the model's "
+                + "1,000,000-token context window", e.getMessage(), "it fit, and the reply filled the rest");
     }
 
     @Test

@@ -132,7 +132,7 @@ class OllamaTextToolCallsTest {
         assertEquals(looping.toString(), r.toolCalls().get(0).arguments().get("command"), "all 400 lines, as written");
         assertEquals(reply.length(), live.shown().data().get("answerChars"), "the owner saw every character of it arrive");
         assertEquals(List.of("shell_exec"), live.shown().data().get("toolCalls"), "the owner saw which call it was");
-        // Mutation: end a call's text after checks find it repeating (the 18,000-character cap) -> RepeatedOutput.
+        // Mutation: end a call's text after checks find it repeating (the 18,000-character cap) -> the call never ends whole.
         assertEquals(http.opened.get(), http.closed.get(), "the stream was closed behind it");
         live.close();
     }
