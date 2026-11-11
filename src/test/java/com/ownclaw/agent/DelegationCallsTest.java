@@ -695,6 +695,13 @@ class DelegationCallsTest {
         var text = assertThrows(IllegalArgumentException.class,
                 () -> LocalExecutor.parsePlan(Map.of("texts", Map.of("figure", "This year: {{1.0}}"))));
         assertTrue(text.getMessage().contains("holds a reference ({{1.0}})"), text.getMessage());
+        assertTrue(text.getMessage().endsWith("If it is a template's own number, write it with a blank inside the "
+                + "braces, as {{ 1.0 }}."), "a template's author is told how: " + text.getMessage());
+        assertEquals("This year: {{ 1.0 }}", LocalExecutor.parsePlan(Map.of("texts",
+                Map.of("figure", "This year: {{ 1.0 }}"))).texts().get("figure"), "and that is accepted");
+        var named = assertThrows(IllegalArgumentException.class,
+                () -> LocalExecutor.parsePlan(Map.of("texts", Map.of("figure", "From {{1.body_text}}"))));
+        assertFalse(named.getMessage().contains("template's own number"), "a field by name gets no such hint");
 
         // A template's text: a blank or an operator in the braces, a handle past the last result, or 0.
         for (String template : List.of("{{ 2.4 }}", "{{1.5*x}}", "{{ 3.6 * states('sensor.x')|float }}", "{{9.5}}",

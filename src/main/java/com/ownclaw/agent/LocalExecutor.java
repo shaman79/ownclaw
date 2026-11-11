@@ -1492,9 +1492,14 @@ public class LocalExecutor {
                 }
             }
             if (held != null) {
+                // A number alone in braces is also how a template could write a constant: say how.
+                String spaced = ArtifactRef.bareNumber(held) > 0
+                        ? " If it is a template's own number, write it with a blank inside the braces, as {{ "
+                                + held.substring(held.indexOf("{{") + 2, held.lastIndexOf("}}")) + " }}."
+                        : "";
                 throw new IllegalArgumentException("texts." + name + " holds a reference (" + held
                         + "), and a text is put in exactly as written, with nothing in it filled in. Put the "
-                        + "reference in the call's own argument, as the whole value or inside its text.");
+                        + "reference in the call's own argument, as the whole value or inside its text." + spaced);
             }
             texts.put(name, text);
         }
