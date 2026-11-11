@@ -31,14 +31,19 @@ class ChatPastePageTest {
         return h.substring(0, h.indexOf("});") + 3);
     }
 
+    private static String between(String from, String to) {
+        String s = page.substring(page.indexOf(from));
+        return s.substring(0, s.indexOf(to));
+    }
+
     @Test
-    @DisplayName("an image pasted with no text beside it is uploaded as an attachment, the paste itself cancelled")
-    void anImageIsAttached() {
+    @DisplayName("files pasted with no text beside them are uploaded as attachments, the paste itself cancelled")
+    void filesAreAttached() {
         String h = handler();
-        assertTrue(h.contains("var images = pastedImages(e.clipboardData); if (!images.length) return;"), h);
-        assertTrue(h.contains("e.preventDefault(); uploadFiles(images);"), h);
+        assertTrue(h.contains("var files = pastedFiles(e.clipboardData); if (!files.length) return;"), h);
+        assertTrue(h.contains("e.preventDefault(); uploadFiles(files);"), h);
         // Mutation: cancel before looking -> every text paste into the box would do nothing.
-        assertTrue(h.indexOf("if (!images.length) return;") < h.indexOf("e.preventDefault();"), h);
+        assertTrue(h.indexOf("if (!files.length) return;") < h.indexOf("e.preventDefault();"), h);
     }
 
     @Test
@@ -51,29 +56,45 @@ class ChatPastePageTest {
     }
 
     @Test
-    @DisplayName("each pasted image is named for when it was pasted, with its type's extension")
-    void pastedImagesAreNamed() {
-        String f = page.substring(page.indexOf("function pastedImages(data) {"));
-        f = f.substring(0, f.indexOf("function createFileChip("));
-        assertTrue(f.contains("items[i].kind === 'file' && /^image\\//.test(items[i].type)"), f);
-        assertTrue(f.contains("var name = 'pasted-image-' + stamp + (found.length > 1 ? '-' + (k + 1) : '') + '.' + ext;"), f);
+    @DisplayName("every typed file is taken, a folder's empty type is not; only the browser's own 'image.png' is renamed, distinct within a second")
+    void pastedFilesAreNamed() {
+        String f = between("function pastedFiles(data) {", "function uploadFiles(");
+        assertTrue(f.contains("if (items[i].kind === 'file' && items[i].type) {"), f);
+        assertTrue(f.contains("if (f.name && !/^image\\.\\w+$/i.test(f.name)) return f;"),
+                "a file copied in a file manager keeps its name: " + f);
+        assertTrue(f.contains("if (stamp !== pasteSecond) { pasteSecond = stamp; pastedInSecond = 0; }"), f);
+        assertTrue(f.contains("+ (pastedInSecond > 1 ? '-' + pastedInSecond : '')"), f);
         assertTrue(f.contains("return new File([f], name, { type: f.type });"), f);
     }
 
     @Test
-    @DisplayName("an image's chip shows it as a data: URL, which the page's policy allows; a blob: URL would show nothing")
-    void theThumbnailIsADataUrl() {
-        assertTrue(page.contains("var chip = createFileChip(files[i].name, null, files[i]);"));
-        String chip = page.substring(page.indexOf("function createFileChip(name, fileId, file) {"));
-        chip = chip.substring(0, chip.indexOf("fileChips.appendChild(chip);"));
-        assertTrue(chip.contains("reader.readAsDataURL(file);"), chip);
-        assertFalse(page.contains("URL.createObjectURL("),
-                "img-src is 'self' data: (SecurityHeadersFilter): a blob: thumbnail is blocked");
+    @DisplayName("a chip removed while it uploads is not sent with the next message, and its file is deleted")
+    void aRemovedChipIsDropped() {
+        String u = between("function uploadFiles(files) {", "function createFileChip(");
+        assertTrue(u.contains("if (!chips[i].isConnected) { fetch('/api/files/' + encodeURIComponent(uploaded[i].id), "
+                + "{ method: 'DELETE',"), u);
+        assertTrue(u.indexOf("if (!chips[i].isConnected)") < u.indexOf("pendingFiles.push("),
+                "checked before it joins what the next message carries: " + u);
+        assertTrue(u.contains("if (!files[i].size) continue;"), "an empty file would shift the answer against the chips");
     }
 
     @Test
-    @DisplayName("the hint under the box says an image can be pasted")
+    @DisplayName("an image's chip shows a small data: picture, which the page's policy allows; one the browser cannot draw shows none")
+    void theThumbnailIsSmallAndSafe() {
+        assertTrue(page.contains("var chip = createFileChip(files[i].name, null, files[i]);"));
+        String chip = between("function createFileChip(name, fileId, file) {", "fileChips.appendChild(chip);");
+        assertTrue(chip.contains("thumb.onerror = function() { thumb.remove(); };"), chip);
+        assertTrue(chip.contains("if (url) thumb.src = url; else thumb.remove();"), chip);
+        String picture = between("function chipPicture(file, done) {", "// Send");
+        assertTrue(picture.contains("createImageBitmap(file, { resizeHeight: 44, resizeQuality: 'medium' })"), picture);
+        assertTrue(picture.contains("done(canvas.toDataURL('image/png'));"), picture);
+        assertFalse((chip + picture).contains("createObjectURL"),
+                "img-src is 'self' data: (SecurityHeadersFilter): a blob: picture is blocked");
+    }
+
+    @Test
+    @DisplayName("the hint under the box says files can be pasted")
     void theHintSaysSo() {
-        assertTrue(page.contains("Drag &amp; drop, paste an image or 📎 to attach files — they stay private"));
+        assertTrue(page.contains("Drag &amp; drop, paste or 📎 to attach files — they stay private"));
     }
 }

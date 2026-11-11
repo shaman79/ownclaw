@@ -2820,7 +2820,7 @@
             </select>
         </label>
     </div>
-    <div class="input-hint"><span id="hint-keys">Enter to send &nbsp;&middot;&nbsp; Shift+Enter for new line</span> &nbsp;&middot;&nbsp; Drag &amp; drop, paste an image or 📎 to attach files — they stay private &nbsp;&middot;&nbsp; <strong>/help</strong> for commands</div>
+    <div class="input-hint"><span id="hint-keys">Enter to send &nbsp;&middot;&nbsp; Shift+Enter for new line</span> &nbsp;&middot;&nbsp; Drag &amp; drop, paste or 📎 to attach files — they stay private &nbsp;&middot;&nbsp; <strong>/help</strong> for commands</div>
 </div>
 
     </div><!-- end #chat-main -->
@@ -6960,28 +6960,34 @@
         if (e.dataTransfer.files.length) uploadFiles(e.dataTransfer.files);
     });
 
-    // Paste: an image on the clipboard -- a screenshot, "Copy image" in a browser -- is attached
-    // as a file picked with 📎 is, private like every attachment. Text pastes as it always did: a
-    // copy from a spreadsheet or a document carries its text and a picture of it too, and the
-    // text is what was meant.
+    // Paste: files on the clipboard -- a screenshot, "Copy image" in a browser, files copied in a
+    // file manager -- are attached as files picked with 📎 are, private like every attachment.
+    // Text pastes as it always did: a copy from a spreadsheet or a document carries its text and
+    // a picture of it too, and the text is what was meant. (Chrome hides the text of a file
+    // manager's copy -- the files' paths -- so there the files are what is attached.)
     inputEl.addEventListener('paste', function(e) {
-        var images = pastedImages(e.clipboardData);
-        if (!images.length) return;
+        var files = pastedFiles(e.clipboardData);
+        if (!files.length) return;
         if ((e.clipboardData.getData('text/plain') || '').trim()) return;
         e.preventDefault();
-        uploadFiles(images);
+        uploadFiles(files);
     });
 
+    /** The second the last pasted image was named in, and how many were named in it. */
+    var pasteSecond = '', pastedInSecond = 0;
+
     /**
-     * The images on a clipboard, each named for when it was pasted: a browser names every one
-     * "image.png", so two pasted screenshots would have been two chips of the same name.
+     * The files on a clipboard. One the browser named itself -- "image.png", for every image it
+     * holds -- is named for when it was pasted, so two screenshots are two names; a file copied
+     * in a file manager keeps its own. An entry with no type is left out: a copied folder comes
+     * as one, and reading it fails the whole upload.
      */
-    function pastedImages(data) {
+    function pastedFiles(data) {
         if (!data) return [];
         var found = [];
         var items = data.items || [];
         for (var i = 0; i < items.length; i++) {
-            if (items[i].kind === 'file' && /^image\//.test(items[i].type)) {
+            if (items[i].kind === 'file' && items[i].type) {
                 var f = items[i].getAsFile();
                 if (f) found.push(f);
             }
@@ -6989,16 +6995,20 @@
         // A browser that lists the clipboard's files but not its items.
         if (!found.length && data.files) {
             for (var j = 0; j < data.files.length; j++) {
-                if (/^image\//.test(data.files[j].type)) found.push(data.files[j]);
+                if (data.files[j].type) found.push(data.files[j]);
             }
         }
         // The time of day: short enough to show whole in a chip, and the message has its date.
         var d = new Date();
         function two(n) { return (n < 10 ? '0' : '') + n; }
         var stamp = two(d.getHours()) + two(d.getMinutes()) + two(d.getSeconds());
-        return found.map(function(f, k) {
-            var ext = (f.type.split('/')[1] || 'png').replace(/\+.*$/, '').replace('jpeg', 'jpg');
-            var name = 'pasted-image-' + stamp + (found.length > 1 ? '-' + (k + 1) : '') + '.' + ext;
+        if (stamp !== pasteSecond) { pasteSecond = stamp; pastedInSecond = 0; }
+        return found.map(function(f) {
+            if (f.name && !/^image\.\w+$/i.test(f.name)) return f;
+            var ext = (f.type.split('/')[1] || '').replace(/\+.*$/, '').replace('jpeg', 'jpg').replace(/[^A-Za-z0-9]/g, '');
+            pastedInSecond++;
+            var name = 'pasted-' + (/^image\//.test(f.type) ? 'image-' : 'file-') + stamp
+                + (pastedInSecond > 1 ? '-' + pastedInSecond : '') + (ext ? '.' + ext : '');
             try {
                 return new File([f], name, { type: f.type });
             } catch (err) {
@@ -7011,10 +7021,13 @@
         var formData = new FormData();
         var chips = [];
         for (var i = 0; i < files.length; i++) {
+            // The server skips an empty file, and its answer would then be one short of the chips.
+            if (!files[i].size) continue;
             formData.append('files', files[i]);
             var chip = createFileChip(files[i].name, null, files[i]);
             chips.push(chip);
         }
+        if (!chips.length) return;
         fetch('/api/files/upload', {
             method: 'POST',
             headers: { 'Authorization': 'Bearer ' + authToken },
@@ -7028,12 +7041,19 @@
                 return;
             }
             var uploaded = data.files || [];
-            for (var i = 0; i < uploaded.length; i++) {
-                if (i < chips.length) {
-                    chips[i].classList.remove('uploading');
-                    chips[i].dataset.fileId = uploaded[i].id;
-                    pendingFiles.push({ id: uploaded[i].id, name: uploaded[i].original_name, chip: chips[i] });
+            for (var i = 0; i < uploaded.length && i < chips.length; i++) {
+                // Removed while it was uploading: no message of this box's is to carry it -- the
+                // send guard sees only chips still in the box -- and it is not kept.
+                if (!chips[i].isConnected) {
+                    fetch('/api/files/' + encodeURIComponent(uploaded[i].id), {
+                        method: 'DELETE',
+                        headers: { 'Authorization': 'Bearer ' + authToken }
+                    }).catch(function() {});
+                    continue;
                 }
+                chips[i].classList.remove('uploading');
+                chips[i].dataset.fileId = uploaded[i].id;
+                pendingFiles.push({ id: uploaded[i].id, name: uploaded[i].original_name, chip: chips[i] });
             }
         })
         .catch(function(err) {
@@ -7042,23 +7062,22 @@
         });
     }
 
-    /**
-     * A file's chip above the box. An image shows itself, small, read as a data: URL -- the page's
-     * policy allows images from the page and data: only, so a blob: URL would show nothing.
-     */
+    /** A file's chip above the box. An image shows itself, small ({@link chipPicture}). */
     function createFileChip(name, fileId, file) {
         var chip = document.createElement('span');
         chip.className = 'file-chip' + (fileId ? '' : ' uploading');
         if (fileId) chip.dataset.fileId = fileId;
 
-        if (file && /^image\//.test(file.type) && window.FileReader) {
+        if (file && /^image\//.test(file.type)) {
             var thumb = document.createElement('img');
             thumb.className = 'file-chip-thumb';
             thumb.alt = '';
+            thumb.onerror = function() { thumb.remove(); };
             chip.appendChild(thumb);
-            var reader = new FileReader();
-            reader.onload = function() { thumb.src = reader.result; };
-            reader.readAsDataURL(file);
+            chipPicture(file, function(url) {
+                if (url) thumb.src = url;
+                else thumb.remove();
+            });
         }
 
         var nameEl = document.createElement('span');
@@ -7079,6 +7098,24 @@
 
         fileChips.appendChild(chip);
         return chip;
+    }
+
+    /**
+     * A picture of an image file 44 pixels high, as a data: URL -- the page's policy allows images
+     * from the page and data: only, so a blob: URL would show nothing -- or null for an image the
+     * browser cannot draw (a TIFF, a HEIC), which shows no picture rather than a broken one. Drawn
+     * small: read whole, a 31 MB PNG stayed on its chip as a 41 MB URL.
+     */
+    function chipPicture(file, done) {
+        if (!window.createImageBitmap) { done(null); return; }
+        createImageBitmap(file, { resizeHeight: 44, resizeQuality: 'medium' }).then(function(bitmap) {
+            var canvas = document.createElement('canvas');
+            canvas.width = bitmap.width;
+            canvas.height = bitmap.height;
+            canvas.getContext('2d').drawImage(bitmap, 0, 0);
+            if (bitmap.close) bitmap.close();
+            done(canvas.toDataURL('image/png'));
+        }, function() { done(null); });
     }
 
     //  Send 
