@@ -506,7 +506,8 @@ public class LocalExecutor {
             // reads its own, and fold like them.
             messages.add(LlmMessage.user("The orchestrator's exact calls were run for you first, in its "
                     + "order. What they returned follows; then work toward the goal from there."));
-            messages.add(LlmMessage.assistant(renderPlanned(plan.calls())));   // in its own numbering
+            // In its own numbering.
+            messages.add(LlmMessage.assistant(shownCalls(plan.calls(), ran, parentContext.artifacts()).text()));
             var replies = new ArrayList<String>();
             for (int i = 0; i < ran.size(); i++) {
                 Artifact a = ran.get(i);
@@ -794,64 +795,83 @@ public class LocalExecutor {
     }
 
     /**
+     * The plan's calls as the model is shown them ({@code text}), and the results of the task shown
+     * in them as marks ({@code marked}): made in one pass, so the guard that refuses a copied mark
+     * ({@link #act}) knows exactly what the model saw.
+     */
+    record ShownCalls(String text, java.util.Set<Integer> marked) {}
+
+    /**
      * The plan's calls written as the model's own turn, as {@link #renderCalls} writes its calls --
      * in its numbering, not the cloud's: a call's result, {{call2}}, is its own {{2}}, and a
-     * result of the task, {{4}} to the cloud, is {@link #TASK_RESULT} 4: no reference of its, and
-     * refused if it copies it into a call ({@link #act}). Shown as the cloud wrote them, the model
-     * copied "{{1.text}}" into a call of its own and sent its own first result -- the weather --
-     * where the cloud had sent the task's first, a note; shown as "result 1.text", it sent those
-     * words.
+     * result of the task code filled in, {{4}} to the cloud, is {@link #TASK_RESULT} 4: no
+     * reference of its, and refused if it copies it into a call ({@link #act}). Shown as the cloud
+     * wrote them, the model copied "{{1.text}}" into a call of its own and sent its own first
+     * result -- the weather -- where the cloud had sent the task's first, a note; shown as
+     * "result 1.text", it sent those words.
+     * <p>
+     * What code filled in is decided as code decided it, against the results each call saw when it
+     * ran ({@link #seenBy}): a field named by digits, {{1.2026}}, was filled from the task's result
+     * 1, and shown as written it was the model's own result 1 (review, 2026-11-11). What code did
+     * not fill in -- a template's own text, {{ 3.6 * x }} -- went out as written and is shown so.
+     *
+     * @param ran  the calls' results, in their order: the first of what the delegation recorded
+     * @param task the task's results, a list that only grows
      */
-    private static String renderPlanned(List<DelegationPlan.Call> calls) {
+    static ShownCalls shownCalls(List<DelegationPlan.Call> calls, List<Artifact> ran, List<Artifact> task) {
+        var marked = new java.util.HashSet<Integer>();
         var lines = new ArrayList<String>();
-        for (DelegationPlan.Call call : calls) {
+        for (int i = 0; i < calls.size(); i++) {
+            DelegationPlan.Call call = calls.get(i);
+            Object params = inOwnNumbering(call.params(), seenBy(i, ran, task), marked);
             try {
-                lines.add(TextCalls.MAPPER.writeValueAsString(Map.of("tool", call.tool(),
-                        "params", inOwnNumbering(call.params()))));
+                lines.add(TextCalls.MAPPER.writeValueAsString(Map.of("tool", call.tool(), "params", params)));
             } catch (Exception e) {
                 lines.add("{\"tool\": \"" + call.tool() + "\"}");
             }
         }
-        return String.join("\n", lines);
+        return new ShownCalls(String.join("\n", lines), java.util.Set.copyOf(marked));
     }
 
     /**
-     * How a result of the task stands in a call the local model is shown ({@link #renderPlanned}):
+     * The task's results call {@code i} was resolved against when it ran: those recorded before its
+     * own -- the task's, then the results of the calls before it. A result's handle is its place in
+     * the task's list, which only grows.
+     */
+    private static List<Artifact> seenBy(int i, List<Artifact> ran, List<Artifact> task) {
+        int before = i < ran.size() ? ran.get(i).n() - 1 : task.size();
+        return task.subList(0, Math.max(0, Math.min(before, task.size())));
+    }
+
+    /**
+     * How a result of the task stands in a call the local model is shown ({@link #shownCalls}):
      * not a reference of its own, and a mark nobody writes, so a copy of it into a call is found and
      * refused rather than sent as words.
      */
     static final String TASK_RESULT = "\u27E6task result ";
 
-    /** The task results the calls name, which the local model is shown as marks ({@link #renderPlanned}). */
-    private static java.util.Set<Integer> markedResults(List<DelegationPlan.Call> calls) {
-        var out = new java.util.HashSet<Integer>();
-        for (var call : calls) {
-            var t = ArtifactRef.TOKEN.matcher(String.valueOf(call.params()));
-            while (t.find()) {
-                ArtifactRef ref = ArtifactRef.numberExpression(t.group()) ? null : ArtifactRef.parse(t.group());
-                if (ref != null) out.add(ref.handle());
-            }
-        }
-        return out;
-    }
-
     /** A copy of {@link #TASK_RESULT}'s mark, however written: brackets or none, escaped, any case. */
     static final java.util.regex.Pattern MARK_COPY = java.util.regex.Pattern.compile(
             "(?i)task[\\s\\u00A0]+result[\\s\\u00A0]+(\\d{1,9})");
 
-    /** A value of a call the cloud wrote, as the local model numbers: see {@link #renderPlanned}. */
-    private static Object inOwnNumbering(Object v) {
+    /**
+     * A value of a call the cloud wrote, as the local model numbers ({@link #shownCalls}), with the
+     * task's results it shows as marks added to {@code marked}. {@code seen} is what the call was
+     * resolved against.
+     */
+    private static Object inOwnNumbering(Object v, List<Artifact> seen, java.util.Set<Integer> marked) {
         if (v instanceof String s) {
             var t = ArtifactRef.TOKEN.matcher(s);
-            var marked = new StringBuilder();
+            var shown = new StringBuilder();
             while (t.find()) {
-                // A template's number expression is the template's, shown as written.
-                ArtifactRef ref = ArtifactRef.numberExpression(t.group()) ? null : ArtifactRef.parse(t.group());
-                t.appendReplacement(marked, java.util.regex.Matcher.quoteReplacement(ref == null ? t.group()
+                ArtifactRef ref = ArtifactRef.parse(t.group());
+                boolean filled = References.fills(ref, seen);
+                if (filled) marked.add(ref.handle());
+                t.appendReplacement(shown, java.util.regex.Matcher.quoteReplacement(!filled ? t.group()
                         : TASK_RESULT + ref.handle() + (ref.field() == null ? "" : "." + ref.field()) + "\u27E7"));
             }
-            t.appendTail(marked);
-            String words = marked.toString();
+            t.appendTail(shown);
+            String words = shown.toString();
             var m = CALL_REF.matcher(words);
             var sb = new StringBuilder();
             while (m.find()) {
@@ -863,12 +883,12 @@ public class LocalExecutor {
         }
         if (v instanceof Map<?, ?> map) {
             var out = new LinkedHashMap<String, Object>();
-            map.forEach((k, x) -> out.put(String.valueOf(k), inOwnNumbering(x)));
+            map.forEach((k, x) -> out.put(String.valueOf(k), inOwnNumbering(x, seen, marked)));
             return out;
         }
         if (v instanceof Collection<?> list) {
             var out = new ArrayList<Object>();
-            for (Object x : list) out.add(inOwnNumbering(x));
+            for (Object x : list) out.add(inOwnNumbering(x, seen, marked));
             return out;
         }
         return v;
@@ -1125,8 +1145,10 @@ public class LocalExecutor {
             var mark = MARK_COPY.matcher(String.valueOf(action.params));
             Integer shown = null;
             // Only a result it was shown as a mark: "the task result 3 days ago" in a mail is prose.
-            var marked = markedResults(plan.calls());
+            // Worked out only when something reads like one: it reads the results the calls named.
+            java.util.Set<Integer> marked = null;
             while (shown == null && mark.find()) {
+                if (marked == null) marked = shownCalls(plan.calls(), mine, parentContext.artifacts()).marked();
                 int k = Integer.parseInt(mark.group(1));
                 if (marked.contains(k)) shown = k;
             }
@@ -1459,8 +1481,11 @@ public class LocalExecutor {
                 var token = ArtifactRef.TOKEN.matcher(text);
                 while (token.find()) {
                     ArtifactRef ref = ArtifactRef.parse(token.group());
-                    // A template's expression that starts with a number is no reference.
-                    if (ref != null && ref.field() != null && !ArtifactRef.numberExpression(token.group())) {
+                    // A template's expression that starts with a number is no reference. A text has
+                    // no results to ask, and goes in as written: a number alone in braces, {{2.0}},
+                    // is taken as the reference it would be anywhere a result has that handle.
+                    if (ref != null && ref.field() != null
+                            && !References.templateText(token.group(), Integer.MAX_VALUE)) {
                         held = token.group().strip();
                         break;
                     }

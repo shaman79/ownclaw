@@ -263,6 +263,7 @@ class ArtifactRefTest {
         for (String name : List.of("#0", "#", "#7a", "# 7", "#1234567890")) {
             assertNull(new ArtifactRef(3, name).position(), name);
         }
-        assertTrue(ArtifactRef.looksLikeReference("{{3.#7}}"), "and a slip around it is refused, not sent");
+        assertTrue(ArtifactRef.looksLikeReference("{{3.#7}}", t -> References.templateText(t, 3)),
+                "and a slip around it is refused, not sent");
     }
 }
