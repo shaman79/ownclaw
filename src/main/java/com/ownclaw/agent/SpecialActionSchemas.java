@@ -142,7 +142,7 @@ public final class SpecialActionSchemas {
                             "max_runs", ToolParam.optional("integer", "Stop after this many runs."),
                             "task_id", ToolParam.optional("integer", "Which task, for cancel/pause/resume."))),
 
-            withTextsAsStrings(spec(AgentAction.DELEGATE,
+            withCallsAsCalls(withTextsAsStrings(spec(AgentAction.DELEGATE,
                     // The cloud's; the local model running a task itself is given its own below.
                     "Hand a sub-goal to the local model, which runs it on this machine with the "
                             + "tools you name and your credentials, and costs nothing. It reads "
@@ -167,11 +167,28 @@ public final class SpecialActionSchemas {
                             + "{{name}}: the local model writes {{name}} in its tool call and the text "
                             + "is put there exactly, never retyped. It does not retype long text "
                             + "exactly, so a goal holding a heredoc or a fenced block of more than "
-                            + "one line is refused.",
+                            + "one line is refused. When you know calls exactly -- the tool and every "
+                            + "argument -- put them in 'calls': code runs them on this machine in your "
+                            + "order, exactly as written, in seconds; the local model types every call "
+                            + "it makes, at a few tokens a second. In a call's params {{N}} is the "
+                            + "task's result N, as in every argument you write, and {{call1}} or "
+                            + "{{call1.field}} the result of call 1 of the list -- as the whole value or "
+                            + "inside text, at any depth; {{name}} is one of the texts. A reference that "
+                            + "cannot be filled in stops the calls; nothing goes out as literal braces. "
+                            + "The calls stop at the first that fails. With no goal, their results come "
+                            + "back to you -- a private one as its description. With a goal, the local "
+                            + "model goes on from them: give one only for what needs judgement on what "
+                            + "they return, or a long result read here rather than by you.",
                     params(
-                            "goal", ToolParam.required("string", "What to achieve, stated fully, "
-                                    + "with the handle of each earlier result it should read, and "
-                                    + "{{name}} where each of the texts is to be used."),
+                            "goal", ToolParam.optional("string", "What the local model is to achieve, "
+                                    + "stated fully, with the handle of each earlier result it should "
+                                    + "read, and {{name}} where each of the texts is to be used. Leave "
+                                    + "it out when the calls are all there is to do."),
+                            "calls", ToolParam.optional("array", "Exact tool calls, run by code in this "
+                                    + "order before anything else: [{\"tool\": \"exact_name\", \"params\": "
+                                    + "{...}}]. Params hold real JSON values -- an object or a list where "
+                                    + "the tool takes one. {{N}} is the task's result N and {{call1}} the "
+                                    + "first call's result, in the params as in the goal."),
                             // A string, not an array: OpenAI rejects an array schema with no
                             // items, and one bad schema fails every request that carries it.
                             "tools", ToolParam.optional("string", "Comma-separated exact names of "
@@ -182,7 +199,7 @@ public final class SpecialActionSchemas {
                                     + "{\"watchdog_script\": \"#!/bin/sh\\n...\"}. A name is a lowercase "
                                     + "letter, then lowercase letters, digits and underscores. Each "
                                     + "text is inserted exactly where the local model writes its "
-                                    + "{{name}} in a tool call.")))),
+                                    + "{{name}} in a tool call."))))),
 
             spec(AgentAction.READ_RESULT,
                     "Read part of an earlier step's result or of a message of this chat, or find text "
@@ -212,6 +229,25 @@ public final class SpecialActionSchemas {
     private static ToolSpec withTextsAsStrings(ToolSpec spec) {
         var properties = (Map<String, Map<String, Object>>) spec.inputSchema().get("properties");
         properties.get("texts").put("additionalProperties", Map.of("type", "string"));
+        return spec;
+    }
+
+    /**
+     * The spec with its 'calls' parameter's items declared calls -- an object with the tool's name
+     * and its arguments -- which {@link ToolParam} has no way to say: OpenAI rejects an array schema
+     * with no items, and a call in any other shape is refused (LocalExecutor#calls), so the schema
+     * says so first.
+     */
+    @SuppressWarnings("unchecked")
+    private static ToolSpec withCallsAsCalls(ToolSpec spec) {
+        var properties = (Map<String, Map<String, Object>>) spec.inputSchema().get("properties");
+        var call = new java.util.LinkedHashMap<String, Object>();
+        call.put("type", "object");
+        call.put("properties", Map.of(
+                "tool", Map.of("type", "string", "description", "The tool's exact name."),
+                "params", Map.of("type", "object", "description", "Its arguments, as the tool takes them.")));
+        call.put("required", List.of("tool"));
+        properties.get("calls").put("items", call);
         return spec;
     }
 

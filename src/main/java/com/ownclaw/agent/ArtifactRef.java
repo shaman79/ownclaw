@@ -110,6 +110,57 @@ public record ArtifactRef(int handle, String field) {
         return handle < 1 ? null : new ArtifactRef(handle, field);
     }
 
+    /**
+     * The first thing in {@code text} written as a reference, well-formed or not -- braces around
+     * digits, a field after them -- or null. For a call the cloud wrote, where what is meant as a
+     * reference is filled in or refused, never sent as literal text (References#resolveExactly).
+     */
+    static String nearReferenceIn(String text) {
+        if (text == null) return null;
+        var m = NEAR.matcher(text);
+        while (m.find()) {
+            if (!numberExpression(m.group())) return m.group().strip();
+        }
+        return null;
+    }
+
+    /**
+     * Whether braces around a number hold a template's expression -- {{ 3.6 * states('x') }},
+     * {{ 1.5 if is_on else 1.0 }}, {{ 2.4 }} -- rather than a reference: a run of digits right
+     * after the dot, then a blank, an operator or the end. A reference's field never looks so:
+     * {{1.2026-11-11}} goes on with a dash and {{1.2fa_code}} with a letter. Asked only of what
+     * would otherwise be refused as a reference that cannot be filled in (References#resolveExactly)
+     * or where there is no result to ask (a text): a field a result really has is filled in,
+     * whatever it is called. One pass over the characters, so a run of blanks costs one look each.
+     */
+    static boolean numberExpression(String token) {
+        int open = token.indexOf("{{");
+        int close = token.lastIndexOf("}}");
+        if (open < 0 || close < open + 2) return false;
+        String in = token.substring(open + 2, close);
+        int i = 0;
+        int n = in.length();
+        while (i < n && blank(in.charAt(i))) i++;
+        if (i < n && in.charAt(i) == '$') {
+            i++;
+            while (i < n && blank(in.charAt(i))) i++;
+        }
+        int digits = i;
+        while (i < n && in.charAt(i) >= '0' && in.charAt(i) <= '9') i++;
+        if (i == digits || i >= n || in.charAt(i) != '.') return false;
+        i++;
+        int fraction = i;
+        while (i < n && in.charAt(i) >= '0' && in.charAt(i) <= '9') i++;
+        if (i == fraction) return false;
+        if (i == n) return true;
+        char c = in.charAt(i);
+        return blank(c) || c != '-' && c != '_' && c != '.' && !Character.isLetterOrDigit(c);
+    }
+
+    private static boolean blank(char c) {
+        return Character.isWhitespace(c) || Character.isSpaceChar(c) || c == '\u200B' || c == '\uFEFF';
+    }
+
     /** Whether a model plausibly meant this whole value as a reference. */
     public static boolean looksLikeReference(String value) {
         if (value == null) return false;

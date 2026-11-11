@@ -108,11 +108,15 @@ final class References {
                         ArtifactRef inner = ArtifactRef.parse(m.group());
                         if (inner == null || inner.handle() > namespace.size()) continue;   // text
                         Artifact a = namespace.get(inner.handle() - 1);
+                        String value = !a.succeeded() ? null
+                                : inner.field() == null ? a.output() : field(a.output(), inner);
+                        // A template's number expression -- {{ 3.6 * states('x') }} -- that cannot
+                        // be filled is text, as on a call the cloud wrote (resolveExactly).
+                        if (value == null && ArtifactRef.numberExpression(m.group())) continue;
                         if (!a.succeeded()) {
                             return refuse(written, e.getKey(), inner + " in it is a FAILED result — its "
                                     + "output is an error message, not something to pass on.");
                         }
-                        String value = inner.field() == null ? a.output() : field(a.output(), inner);
                         if (value == null) {
                             return refuse(written, e.getKey(), inner + " in it names a field that "
                                     + "result does not have.");
@@ -141,6 +145,12 @@ final class References {
                     }
                     continue;
                 }
+                // A template written as the whole value -- {{ 3.6 * states('x') }} for a
+                // value_template -- is text when it cannot be filled.
+                Artifact whole = ref.handle() > namespace.size() ? null : namespace.get(ref.handle() - 1);
+                String filled = whole == null || !whole.succeeded() ? null
+                        : ref.field() == null ? whole.output() : field(whole.output(), ref);
+                if (filled == null && ArtifactRef.numberExpression(s)) continue;
                 if (ref.handle() > namespace.size()) {
                     return refuse(written, e.getKey(), ref + " refers to a result that does not "
                             + "exist.");
@@ -150,7 +160,7 @@ final class References {
                     return refuse(written, e.getKey(), ref + " is a FAILED result — its output "
                             + "is an error message, not something to pass on.");
                 }
-                String value = ref.field() == null ? a.output() : field(a.output(), ref);
+                String value = filled;
                 if (value == null) {
                     return refuse(written, e.getKey(), ref + " names a field that result does "
                             + "not have.");
@@ -168,6 +178,180 @@ final class References {
             }
         }
         return new Resolved(out, List.copyOf(used), null, null);
+    }
+
+    /**
+     * A call the cloud wrote whole, resolved for code to run as written (LocalExecutor#runCalls):
+     * against the task's results, where {@code {{N}}} is the task's result N -- the numbering the
+     * cloud reads in every observation and descriptor -- at any depth of the arguments, and
+     * strictly: every reference in it is filled in, or the call is refused.
+     * <p>
+     * The local model's calls leave a handle past its last result as text (a template's own
+     * placeholder) and a reference inside a nested value as text. A call the cloud wrote is meant
+     * exactly, and its arguments are real JSON -- an object, a list -- where the cloud's own tool
+     * calls are flat: on 2026-11-11 a review sent "Here is what Jana wrote: {{4.body_text}}" out
+     * literally, and "Battery at {{1.level}}%" inside an object likewise. A text's
+     * {@code {{name}}} is put in at any depth, as everywhere; a name that is no text stays text.
+     * The reasons name only what the cloud wrote -- never a result's fields, which can be private
+     * data (a contacts lookup keyed by people's names).
+     */
+    static Resolved resolveExactly(Map<String, Object> written, List<Artifact> namespace, Map<String, String> texts) {
+        if (written == null || written.isEmpty()) return new Resolved(Map.of(), List.of(), null, null);
+        var out = new LinkedHashMap<String, Object>();
+        var used = new ArrayList<Artifact>();
+        for (var e : written.entrySet()) {
+            String[] why = {null};
+            Object value = exactly(e.getValue(), namespace, texts, used, why);
+            if (why[0] != null) return refuse(written, e.getKey(), why[0]);
+            out.put(e.getKey(), value);
+        }
+        return new Resolved(out, List.copyOf(used), null, null);
+    }
+
+    /** One value of {@link #resolveExactly}, at any depth; {@code why[0]} set when it is refused. */
+    private static Object exactly(Object v, List<Artifact> namespace, Map<String, String> texts,
+                                  List<Artifact> used, String[] why) {
+        if (v instanceof Map<?, ?> map) {
+            var out = new LinkedHashMap<Object, Object>();
+            for (var e : map.entrySet()) {
+                // A key is not filled in: one written as a reference would go out as braces.
+                String inKey = ArtifactRef.nearReferenceIn(String.valueOf(e.getKey()));
+                if (inKey != null || LocalExecutor.CALL_REF.matcher(String.valueOf(e.getKey())).find()) {
+                    why[0] = "'" + e.getKey() + "' is a key written as a reference, and a key is not filled in. "
+                            + "Put the reference in a value.";
+                    return v;
+                }
+                out.put(e.getKey(), exactly(e.getValue(), namespace, texts, used, why));
+                if (why[0] != null) return v;
+            }
+            return out;
+        }
+        if (v instanceof Collection<?> list) {
+            var out = new ArrayList<Object>();
+            for (Object x : list) {
+                out.add(exactly(x, namespace, texts, used, why));
+                if (why[0] != null) return v;
+            }
+            return out;
+        }
+        if (!(v instanceof String s)) return v;
+        ArtifactRef whole = ArtifactRef.parse(s);
+        if (whole != null) {
+            String value = filled(whole, namespace, used, why);
+            if (value != null) return value;
+            // A template written as the whole value -- {{ 3.6 * states('x') }} for a value_template
+            // -- is text, as the same inside a longer string is.
+            if (ArtifactRef.numberExpression(s)) {
+                why[0] = null;
+                return v;
+            }
+            return v;
+        }
+        if (ArtifactRef.LEGACY.matcher(ArtifactRef.trim(s)).matches() && legacyReference(s, namespace) != null) {
+            why[0] = "'" + s.strip() + "' is the old way of writing a reference. Write "
+                    + legacyReference(s, namespace) + " instead.";
+            return v;
+        }
+        var m = ArtifactRef.TOKEN_OR_NAME.matcher(s);
+        var sb = new StringBuilder();
+        var rest = new StringBuilder();
+        int last = 0;
+        while (m.find()) {
+            rest.append(s, last, m.start());
+            last = m.end();
+            String replacement;
+            if (m.group(1) != null) {
+                String text = texts.get(m.group(1));
+                // A call's result that code could not place -- written as no call it knows -- is
+                // no template's placeholder: no text has that name (LocalExecutor#texts).
+                if (text == null && m.group(1).matches("(?i)call\\d+")) {
+                    why[0] = "'" + m.group().strip() + "' names a call that has not run before this one.";
+                    return v;
+                }
+                replacement = text == null ? m.group() : text;   // no such text: a template's own
+            } else {
+                ArtifactRef inner = ArtifactRef.parse(m.group());
+                if (inner == null && ArtifactRef.numberExpression(m.group())) {
+                    m.appendReplacement(sb, java.util.regex.Matcher.quoteReplacement(m.group()));
+                    continue;   // a template's expression, {{ 2.4 * x }}: text
+                }
+                if (inner == null) {
+                    why[0] = "'" + m.group().strip() + "' looks like a reference but is not a valid one. "
+                            + "Write {{N}} or {{N.field}}, with N one of the task's results.";
+                    return v;
+                }
+                replacement = filled(inner, namespace, used, why);
+                if (replacement == null) {
+                    // What cannot be filled, written as a template's number expression, is one:
+                    // {{ 3.6 * states('x') }} is result 3's field "6 * states(...)" to the grammar.
+                    if (!ArtifactRef.numberExpression(m.group())) return v;
+                    why[0] = null;
+                    replacement = m.group();
+                }
+                // A field hung outside the braces, {{1}}.body_text: the whole of a JSON result and
+                // the literal ".body_text" would go out. Only a whole reference to a JSON object:
+                // {{1.path}}.bak is a file name, and {{1}}.json one too when result 1 is text.
+                String after = s.startsWith(".", m.end()) && m.end() + 1 < s.length()
+                        && Character.isLetter(s.charAt(m.end() + 1))
+                        ? s.substring(m.end() + 1).split("[^\\p{L}\\p{N}_]", 2)[0] : null;
+                if (inner.field() == null && after != null && isJson(namespace.get(inner.handle() - 1).output())) {
+                    var asField = new ArtifactRef(inner.handle(), after);
+                    why[0] = "'" + m.group().strip() + "." + after + "': " + inner + " is a JSON result, and what "
+                            + "follows the braces is text, so all of it and a literal '." + after + "' would go out. "
+                            + (field(namespace.get(inner.handle() - 1).output(), asField) != null
+                                    ? "Write " + asField + " for its field."
+                                    : com.ownclaw.agent.tools.ToolResult.jsonObject(namespace.get(inner.handle() - 1).output()) != null
+                                    ? "Put the field you mean inside the braces, as {{" + inner.handle() + ".name}}."
+                                    : "It is a list, which has no field to name after its braces; pass it whole, or "
+                                            + "take the part you need with another call.");
+                    return v;
+                }
+            }
+            m.appendReplacement(sb, java.util.regex.Matcher.quoteReplacement(replacement));
+        }
+        rest.append(s, last, s.length());
+        // What is left once every well-formed one is taken out: a reference written wrong
+        // ({{1.}}, {{ 1 }}x}) would otherwise go out as literal text.
+        if (ArtifactRef.nearReferenceIn(rest.toString()) != null) {
+            why[0] = "'" + ArtifactRef.nearReferenceIn(rest.toString()) + "' looks like a reference but is not "
+                    + "a valid one. Write {{N}} or {{N.field}}, with N one of the task's results.";
+            return v;
+        }
+        m.appendTail(sb);
+        return sb.toString();
+    }
+
+    /** Whether a result is JSON, an object or a list: a field written after its braces is no field of it. */
+    private static boolean isJson(String output) {
+        if (output == null || output.isBlank()) return false;
+        try {
+            var node = com.ownclaw.agent.TextCalls.MAPPER.readTree(output);
+            return node != null && (node.isObject() || node.isArray());
+        } catch (Exception notJson) {
+            return false;
+        }
+    }
+
+    /** What a reference in a call the cloud wrote stands for, or null with {@code why[0]} set. */
+    private static String filled(ArtifactRef ref, List<Artifact> namespace, List<Artifact> used, String[] why) {
+        if (ref.handle() > namespace.size()) {
+            why[0] = ref + " refers to a result the task does not have: the task's results are {{1}} to "
+                    + ArtifactRef.handle(namespace.size()) + ", and a call's own result is {{callN}}.";
+            if (namespace.isEmpty()) why[0] = ref + " refers to a result the task does not have: it has none yet.";
+            return null;
+        }
+        Artifact a = namespace.get(ref.handle() - 1);
+        if (!a.succeeded()) {
+            why[0] = ref + " is a FAILED result — its output is an error message, not something to pass on.";
+            return null;
+        }
+        String value = ref.field() == null ? a.output() : field(a.output(), ref);
+        if (value == null) {
+            why[0] = ref + " names a field that result does not have.";
+            return null;
+        }
+        if (!used.contains(a)) used.add(a);
+        return value;
     }
 
     /**

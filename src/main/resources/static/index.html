@@ -3566,8 +3566,11 @@
         if (s.tool === 'delegate') {
             // No local tokens is not "never reached it": a call that fails -- a full context
             // window, a parse error, a timeout -- throws before its tokens are counted.
+            var calls = s.calls || [];
             d.appendChild(tdRow('Carried out by', s.notStarted ? 'nobody: it was not started'
-                    : s.tier === 'local' ? 'the local model'
+                    : s.tier === 'local' ? (calls.length ? 'this machine, the cloud\'s calls by code, then the local model'
+                            : 'the local model')
+                    : calls.length ? 'this machine: the cloud\'s calls, run by code exactly as written'
                     : 'not known: no local tokens were counted'));
             // What the cloud asked of the local model, whole: here, and not in the chat.
             if (s.goal) {
@@ -3578,6 +3581,13 @@
             Object.keys(s.texts || {}).forEach(function(name) {
                 d.appendChild(tdRow('{{' + name + '}}', 'a text it was handed, put in exactly where a call names it'));
                 d.appendChild(node('div', 'task-result-content', s.texts[name]));
+            });
+            // The exact calls it was handed, each whole: run by code, in this order.
+            calls.forEach(function(c, i) {
+                d.appendChild(tdRow('Call ' + (i + 1), c.tool));
+                if (c.params && c.params !== '{ }' && c.params !== '{}' && c.params !== 'null') {
+                    d.appendChild(node('div', 'task-result-content', c.params));
+                }
             });
         }
         d.appendChild(tdRow('Cloud calls', s.cloudCalls == null ? 'not recorded' : String(s.cloudCalls)));

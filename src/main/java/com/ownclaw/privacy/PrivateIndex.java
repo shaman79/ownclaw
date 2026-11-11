@@ -72,7 +72,7 @@ public final class PrivateIndex {
     /** How every text is seen — indexed and checked alike — so casing and wrapping cannot hide a run. */
     public static String normalise(String text) {
         if (text == null || text.isEmpty()) return "";
-        String s = Normalizer.normalize(text, Normalizer.Form.NFKC).toLowerCase(Locale.ROOT);
+        String s = Normalizer.normalize(streamSafe(text), Normalizer.Form.NFKC).toLowerCase(Locale.ROOT);
         var sb = new StringBuilder(s.length());
         boolean space = false;
         for (int i = 0; i < s.length(); i++) {
@@ -86,6 +86,73 @@ public final class PrivateIndex {
             }
         }
         return sb.toString().strip();
+    }
+
+    /**
+     * Text that normalises in linear time: after 30 combining marks in a row a COMBINING GRAPHEME
+     * JOINER (U+034F) is put in, as Unicode's stream-safe text format does (UAX #15). Normalising
+     * reorders a run of combining marks, and a crafted run of 400,000 -- a page or a mail can carry
+     * one -- took 90 seconds on every check of it; no text a person writes has 30 in a row.
+     */
+    public static String streamSafe(String text) {
+        if (text == null) return null;
+        StringBuilder out = null;
+        int run = 0;
+        for (int i = 0; i < text.length(); ) {
+            int cp = text.codePointAt(i);
+            int width = Character.charCount(cp);
+            // By code point, never inside a surrogate pair: a mark outside the first plane is two
+            // chars, neither of them a mark. And by what it becomes: a halfwidth voiced-sound mark
+            // is a letter modifier until NFKC makes it a combining mark.
+            boolean mark = combining(cp);
+            if (mark && ++run > 30) {
+                if (out == null) out = new StringBuilder(text.length() + 16).append(text, 0, i);
+                out.append('\u034F');
+                run = 1;
+            } else if (!mark) {
+                run = 0;
+            }
+            if (out != null) out.append(text, i, i + width);
+            i += width;
+        }
+        return out == null ? text : out.toString();
+    }
+
+    /** Whether a code point is a combining mark, or decomposes (NFKD) into one first. */
+    private static boolean combining(int cp) {
+        int type = Character.getType(cp);
+        if (type == Character.NON_SPACING_MARK || type == Character.ENCLOSING_MARK
+                || type == Character.COMBINING_SPACING_MARK) {
+            return true;
+        }
+        return cp >= 0x80 && cp < 0x20000 && DecomposesToMark.SET.get(cp);
+    }
+
+    /**
+     * The code points of the first two planes that are no mark themselves but whose NFKD form
+     * begins with one (U+FF9E, U+0F73, ...), found once, the first time they are asked about.
+     */
+    private static final class DecomposesToMark {
+        static final java.util.BitSet SET = new java.util.BitSet(0x20000);
+
+        static {
+            for (int cp = 0x80; cp < 0x20000; cp++) {
+                if (!Character.isDefined(cp) || Character.isSurrogate((char) cp) && cp < 0x10000) continue;
+                int type = Character.getType(cp);
+                if (type == Character.NON_SPACING_MARK || type == Character.ENCLOSING_MARK
+                        || type == Character.COMBINING_SPACING_MARK) {
+                    continue;
+                }
+                String one = new String(Character.toChars(cp));
+                String nfkd = Normalizer.normalize(one, Normalizer.Form.NFKD);
+                if (nfkd.equals(one) || nfkd.isEmpty()) continue;
+                int first = Character.getType(nfkd.codePointAt(0));
+                if (first == Character.NON_SPACING_MARK || first == Character.ENCLOSING_MARK
+                        || first == Character.COMBINING_SPACING_MARK) {
+                    SET.set(cp);
+                }
+            }
+        }
     }
 
     /** Register an artifact's text under its handle. Nothing of the text is kept. */

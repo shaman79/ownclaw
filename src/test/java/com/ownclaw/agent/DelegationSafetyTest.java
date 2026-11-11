@@ -55,6 +55,11 @@ class DelegationSafetyTest {
     // ── a change is never made twice in one task ──
 
     /** A tool that declares side effects, which is all the guard asks of it. */
+    /** The argument the copy rule refuses, or null. */
+    private static String refused(LocalExecutor.Retyped r) {
+        return r == null ? null : r.param();
+    }
+
     private static com.ownclaw.agent.tools.Tool sideEffecting(String name) {
         return new com.ownclaw.agent.tools.Tool() {
             public String name() { return name; }
@@ -286,14 +291,14 @@ class DelegationSafetyTest {
         var smtp = sideEffecting("smtp_send_email");
 
         String half = digest.substring(0, digest.length() / 2);
-        assertEquals("body", LocalExecutor.retyped(smtp,
-                        Map.of("to", "petr@example.com", "body", half), done, List.of()),
+        assertEquals("body", refused(LocalExecutor.retyped(smtp,
+                        Map.of("to", "petr@example.com", "body", half), done, List.of())),
                 "a copy that stops halfway is the morning email with its end missing");
-        assertEquals("body", LocalExecutor.retyped(smtp,
-                        Map.of("body", digest.replace("2026-09-22", "2025-07-10")), done, List.of()),
+        assertEquals("body", refused(LocalExecutor.retyped(smtp,
+                        Map.of("body", digest.replace("2026-09-22", "2025-07-10")), done, List.of())),
                 "one wrong date in an otherwise perfect copy is still a copy typed out by hand");
-        assertEquals("body", LocalExecutor.retyped(smtp,
-                        Map.of("body", composed(400) + "\n" + half), done, List.of()),
+        assertEquals("body", refused(LocalExecutor.retyped(smtp,
+                        Map.of("body", composed(400) + "\n" + half), done, List.of())),
                 "and so is one wrapped in a greeting");
     }
 
@@ -334,25 +339,333 @@ class DelegationSafetyTest {
     }
 
     @Test
-    @DisplayName("a run the model wrote itself, or was given in the plan, is not a copy of the result echoing it")
+    @DisplayName("text the model wrote itself, or was given in the plan, is not a copy of the result echoing it")
     void theModelsOwnWordsAreNotACopy() {
         var smtp = sideEffecting("smtp_send_email");
-        // The write echoes the path the model chose for it; attaching that file is not retyping.
-        String report = "/srv/reports/2026-09-30-network-audit.md";
-        var wrote = List.of(new Artifact(1, "write_file", Map.of("path", report, "content", "# Audit"),
-                Map.of(), "Wrote 7 bytes to " + report, true, com.ownclaw.privacy.Label.PUBLIC, List.of()));
-        assertNull(LocalExecutor.retyped(smtp, Map.of("attachment", report), wrote, List.of()));
+        // The send echoes the body it was given; the same body to a second recipient is not a
+        // copy of the echo.
+        String body = composed(600);
+        var sent = List.of(new Artifact(1, "smtp_send_email", Map.of("to", "petr@example.com", "body", body),
+                Map.of(), "Sent to petr@example.com:\n" + body, true, com.ownclaw.privacy.Label.PUBLIC, List.of()));
+        assertNull(LocalExecutor.retyped(smtp, Map.of("to", "jana@example.com", "body", body), sent, List.of()));
 
-        // A path the plan named, which a listing then showed: the model had it from the plan.
+        // Text the plan handed it, which a result then echoed: the model had it from the plan.
+        var echoed = List.of(step("smtp_send_email", Map.of(), "Sent:\n" + body));
+        String most = body.substring(0, 500);
+        assertNull(LocalExecutor.retyped(smtp, Map.of("body", most), echoed,
+                LocalExecutor.planText(new DelegationPlan("Send this: " + body, List.of(), List.of()))));
+        assertEquals("body", refused(LocalExecutor.retyped(smtp, Map.of("body", most), echoed, List.of())),
+                "from nowhere but the echo, most of it typed out again is a copy");
+    }
+
+    @Test
+    @DisplayName("a path picked out of a listing is a quote: a short result is a value to use, not a text to pass on")
+    void aShortResultIsAValue() {
+        // The rule used to refuse this: one run of 32 characters of any result was a copy.
         String forwarded = "/tmp/ownclaw_forward_45243a4.txt";
-        var listed = List.of(new Artifact(1, "list_dir", Map.of("dir", "/tmp"), Map.of(),
-                "files:\n" + forwarded + "\n/tmp/other.txt", true, com.ownclaw.privacy.Label.PUBLIC, List.of()));
-        assertNull(LocalExecutor.retyped(smtp, Map.of("attachment", forwarded), listed,
-                LocalExecutor.planText(new DelegationPlan("Send " + forwarded + " to Petr", List.of(),
-                        List.of()))));
-        assertEquals("attachment", LocalExecutor.retyped(smtp, Map.of("attachment", forwarded), listed,
-                        List.of()),
-                "from nowhere but the listing, it is a copy out of a result -- as before");
+        var listed = List.of(step("list_dir", Map.of("dir", "/tmp"), "files:\n" + forwarded + "\n/tmp/other.txt"));
+        assertNull(LocalExecutor.retyped(sideEffecting("smtp_send_email"), Map.of("attachment", forwarded),
+                listed, List.of()));
+    }
+
+    /** A Home Assistant templates.yaml the model has read: thirty sensors, each its own lines. */
+    static String config() {
+        var sb = new StringBuilder("### power sensors\n");
+        for (int i = 1; i <= 30; i++) {
+            sb.append("- sensor:\n    - name: \"inverter output ").append(i).append(" in kW\"\n")
+              .append("      unique_id: inverter_output_kw_").append(i).append('\n')
+              .append("      state: \"{{ states('sensor.inverter_").append(i).append("') | float / 1000 }}\"\n");
+        }
+        return sb.toString();
+    }
+
+    @Test
+    @DisplayName("an edit quotes what it changes: a replacement, a script naming a path, an API body with an entity id")
+    void anEditIsNotACopy() throws Exception {
+        // Four delegations of 8 to 10 November 2026 ended on three such refusals in a row, the
+        // battery's "stop the charging" among them.
+        var json = new com.fasterxml.jackson.databind.ObjectMapper();
+        String config = config();
+        var read = List.of(step("ha_config_file", Map.of("action", "read"), config));
+        String find = "      unique_id: inverter_output_kw_7\n      state: \"{{ states('sensor.inverter_7') | float / 1000 }}\"";
+        String replace = find.replace("/ 1000 }}", "/ 1000 | round(2) }}");
+        assertNull(LocalExecutor.retyped(sideEffecting("ha_config_file"), Map.of("replacements",
+                json.writeValueAsString(List.of(Map.of("find", find, "replace", replace)))), read, List.of()),
+                "the text to find and the text to put there");
+        assertNull(LocalExecutor.retyped(sideEffecting("ha_config_file"), Map.of("find", find, "replace", replace),
+                read, List.of()), "and the same as arguments of their own");
+        assertNull(LocalExecutor.retyped(sideEffecting("fileserver_ssh_run"), Map.of("script",
+                "cp /homeassistant/templates.yaml /homeassistant/templates.yaml.bak\n"
+                        + "grep -n \"states('sensor.inverter_7') | float / 1000\" /homeassistant/templates.yaml"),
+                read, List.of()), "a script naming what it read");
+        assertNull(LocalExecutor.retyped(sideEffecting("ha_api"), Map.of("body",
+                "{\"entity_id\": \"sensor.inverter_7\", \"unique_id\": \"inverter_output_kw_7\", \"value\": 15}"),
+                read, List.of()), "an API body holding an entity id");
+    }
+
+    @Test
+    @DisplayName("a whole configuration typed out again with one line broken is refused; exactly, with an addition, it passes")
+    void aRewrittenConfigurationIsJudgedByWhatItLost() {
+        String config = config();
+        var read = List.of(step("ha_config_file", Map.of("action", "read"), config));
+        var write = sideEffecting("ha_config_file");
+        // The break the 2026-10-08 replays found in five copies of seven: a space lost before a bracket.
+        String broken = config.replace("states('sensor.inverter_12') | float", "states('sensor.inverter_12')| float");
+        assertNotEquals(config, broken);
+        String added = "\n- sensor:\n    - name: EV Charge Rank\n      unique_id: ownclaw_ev_charge_rank\n";
+        assertEquals("content", refused(LocalExecutor.retyped(write,
+                Map.of("path", "/homeassistant/templates.yaml", "content", broken + added), read, List.of())));
+        assertNull(LocalExecutor.retyped(write,
+                Map.of("path", "/homeassistant/templates.yaml", "content", config + added), read, List.of()),
+                "the whole file exactly, with a block after it: nothing of it went missing");
+    }
+
+    /** A text of exactly {@code n} characters that normalisation leaves alone, every run of it its own. */
+    static String plain(int n) {
+        var sb = new StringBuilder();
+        for (int i = 1000; sb.length() < n; i++) sb.append("item ").append(i).append(" reported at ").append(i % 97).append("; ");
+        return sb.substring(0, n);
+    }
+
+    @Test
+    @DisplayName("a text is 200 characters or more: a lossy copy of 199 passes, of 200 is refused")
+    void theTextLengthEdge() {
+        var send = sideEffecting("smtp_send_email");
+        for (int n : new int[]{199, 200}) {
+            String text = plain(n);
+            String lossy = text.substring(0, 100) + text.substring(101);
+            var r = LocalExecutor.retyped(send, Map.of("body", lossy), List.of(step("fetch", Map.of(), text)), List.of());
+            assertEquals(n >= LocalExecutor.TEXT_LENGTH ? "body" : null, refused(r), n + " characters");
+        }
+    }
+
+    @Test
+    @DisplayName("a copy covering 40% of a text is it passed on; 39% is a quote")
+    void theCoverageEdge() {
+        String text = plain(2_000);
+        var done = List.of(step("fetch", Map.of(), text));
+        var send = sideEffecting("smtp_send_email");
+        assertEquals("body", refused(LocalExecutor.retyped(send, Map.of("body", text.substring(0, 800)), done, List.of())));
+        assertNull(LocalExecutor.retyped(send, Map.of("body", text.substring(0, 780)), done, List.of()));
+    }
+
+    @Test
+    @DisplayName("half the stretch a copy spans is copied: refused; a hair under, passed")
+    void theShareEdge() {
+        String text = plain(2_000);
+        var done = List.of(step("fetch", Map.of(), text));
+        var send = sideEffecting("smtp_send_email");
+        // Two copied pieces of 500 with words of the model's own between them: 1,000 of the
+        // 2,000 characters from the first copied run to the last.
+        String atHalf = text.substring(0, 500) + "z".repeat(1_000) + text.substring(1_000, 1_500);
+        String underHalf = text.substring(0, 500) + "z".repeat(1_002) + text.substring(1_000, 1_500);
+        assertEquals("body", refused(LocalExecutor.retyped(send, Map.of("body", atHalf), done, List.of())));
+        assertNull(LocalExecutor.retyped(send, Map.of("body", underHalf), done, List.of()));
+    }
+
+    @Test
+    @DisplayName("words around a lossy copy do not dilute it: a long introduction, then the digest with lines lost")
+    void wordsAroundACopyDoNotHideIt() {
+        String digest = digest();
+        var done = List.of(step("daily_news_digest", Map.of(), digest));
+        assertEquals("body", refused(LocalExecutor.retyped(sideEffecting("smtp_send_email"),
+                Map.of("body", composed(2_000) + "\n" + everySixthLineLost(digest)), done, List.of())));
+    }
+
+    static String everySixthLineLost(String text) {
+        var sb = new StringBuilder();
+        String[] lines = text.split("\n");
+        for (int i = 0; i < lines.length; i++) if (i % 6 != 5) sb.append(lines[i]).append('\n');
+        return sb.toString();
+    }
+
+    @Test
+    @DisplayName("a copy whole but for its indentation, its line breaks or its case is no exact copy; CRLF and trailing blanks are")
+    void wholeMeansAsWritten() {
+        String config = config();
+        var done = List.of(step("ha_config_file", Map.of("action", "read"), config));
+        var write = sideEffecting("ha_config_file");
+        String added = "\n- sensor:\n    - name: EV Charge Rank\n";
+        String dedented = config.replace("      unique_id: inverter_output_kw_12\n", "  unique_id: inverter_output_kw_12\n");
+        String joined = config.replace("inverter_output_kw_12\n      state:", "inverter_output_kw_12 state:");
+        String upper = config.replace("sensor.inverter_7'", "SENSOR.INVERTER_7'");
+        for (String broken : List.of(dedented, joined, upper)) {
+            assertNotEquals(config, broken);
+            assertEquals("content", refused(LocalExecutor.retyped(write, Map.of("content", broken + added), done, List.of())));
+        }
+        String crlf = config.replace("\n", "\r\n");
+        String trailing = config.replace("\n", "  \n");
+        for (String same : List.of(crlf, trailing)) {
+            assertNull(LocalExecutor.retyped(write, Map.of("content", same + added), done, List.of()),
+                    "nothing a reader of it depends on changed");
+        }
+    }
+
+    @Test
+    @DisplayName("a JSON result's long strings are texts of their own: a lossy copy of body_text is refused and named, an exact one passes")
+    void aFieldIsATextOfItsOwn() throws Exception {
+        String digest = digest();
+        var envelope = new java.util.LinkedHashMap<String, Object>();
+        envelope.put("ok", true);
+        envelope.put("subject", "Daily News Digest");
+        envelope.put("body_text", digest);
+        envelope.put("body_html", "<html><body><p>" + digest.replace("\n", "</p><p>") + "</p></body></html>");
+        String result = new com.fasterxml.jackson.databind.ObjectMapper().writeValueAsString(envelope);
+        var done = List.of(step("daily_news_digest", Map.of(), result));
+        var send = sideEffecting("smtp_send_email");
+        var r = LocalExecutor.retyped(send, Map.of("body", everySixthLineLost(digest)), done, List.of());
+        assertEquals("body", refused(r));
+        assertEquals("body_text", r.field());
+        assertNull(LocalExecutor.retyped(send, Map.of("body", digest), done, List.of()),
+                "the field exactly: nothing lost, though the envelope around it was never typed");
+        assertEquals("body", refused(LocalExecutor.retyped(send, Map.of("body", digest.substring(0, digest.length() / 2)),
+                done, List.of())), "half of it");
+    }
+
+    @Test
+    @DisplayName("an earlier argument that held a text whole excuses none of it: the next lossy copy is still refused")
+    void aWholeCopyLaundersNothing() {
+        String digest = digest();
+        var done = List.of(step("daily_news_digest", Map.of(), digest),
+                step("smtp_send_email", Map.of("to", "petr@example.com", "body", "Hi Petr,\n\n" + digest), "Sent"));
+        assertEquals("body", refused(LocalExecutor.retyped(sideEffecting("smtp_send_email"),
+                Map.of("to", "jana@example.com", "body", digest.substring(0, digest.length() / 2)), done, List.of())));
+    }
+
+    @Test
+    @DisplayName("a log of repeated lines with one lost is a lossy copy: the copy is followed along the text")
+    void aRepetitiveTextWithALineLost() {
+        String line = "2026-11-10 12:00:00 sensor.battery_state_of_charge unavailable\n";
+        String log = line.repeat(12);
+        var done = List.of(step("journal", Map.of(), log));
+        assertEquals("body", refused(LocalExecutor.retyped(sideEffecting("smtp_send_email"),
+                Map.of("body", line.repeat(11)), done, List.of())));
+        // Longer than the log, the argument is the side read through: each repeated line is placed
+        // where the copy goes on, not all at the first line -- which would cover one line in twelve.
+        assertEquals("body", refused(LocalExecutor.retyped(sideEffecting("smtp_send_email"),
+                Map.of("body", line.repeat(11) + composed(1_000)), done, List.of())));
+    }
+
+    @Test
+    @DisplayName("a large result costs no table of its windows: a 5 MB result and a short script are judged at once")
+    void aLargeResultIsCheap() {
+        String big = plain(5_000_000);
+        var done = List.of(step("journal", Map.of(), big));
+        long start = System.nanoTime();
+        assertNull(LocalExecutor.retyped(sideEffecting("fileserver_ssh_run"),
+                Map.of("script", "grep -n '" + big.substring(1_000, 1_060) + "' /var/log/syslog"), done, List.of()));
+        assertTrue(System.nanoTime() - start < 5_000_000_000L, "well under five seconds");
+    }
+
+    @Test
+    @DisplayName("what the cloud wrote into its calls is the model's to repeat, as the rest of the plan is")
+    void theCallsTextIsGiven() {
+        String body = composed(600);
+        var echoed = List.of(step("smtp_send_email", Map.of(), "Sent:\n" + body));
+        var plan = new DelegationPlan("", List.of(), List.of(), List.of(), Map.of(),
+                List.of(new DelegationPlan.Call("smtp_send_email", Map.of("body", body))));
+        String most = body.substring(0, 500);
+        assertNull(LocalExecutor.retyped(sideEffecting("smtp_send_email"), Map.of("body", most), echoed,
+                LocalExecutor.planText(plan)));
+        assertEquals("body", refused(LocalExecutor.retyped(sideEffecting("smtp_send_email"), Map.of("body", most),
+                echoed, List.of())));
+    }
+
+    /** Block {@code i} of {@link #config()}: one sensor, the shape every block of it shares. */
+    static String block(int i) {
+        return "- sensor:\n    - name: \"inverter output " + i + " in kW\"\n"
+                + "      unique_id: inverter_output_kw_" + i + "\n"
+                + "      state: \"{{ states('sensor.inverter_" + i + "') | float / 1000 }}\"\n";
+    }
+
+    @Test
+    @DisplayName("an edit of a repetitive file is not a copy of it: a new block, a whole block replaced, a block quoted in prose")
+    void aRepetitiveFileCanBeEdited() {
+        // Round 2 of the 2026-11-11 review: with the argument the shorter side, every run the
+        // file repeats covered every place it occurs, and a brand-new block "covered" 80% of it.
+        String config = config();
+        var done = List.of(step("ha_config_file", Map.of("action", "read"), config));
+        var write = sideEffecting("ha_config_file");
+        assertNull(LocalExecutor.retyped(write, Map.of("content", block(31)), done, List.of()), "a new block appended");
+        assertNull(LocalExecutor.retyped(write, Map.of("content", block(31) + block(32)), done, List.of()), "two");
+        assertNull(LocalExecutor.retyped(write, Map.of("find", block(7), "replace",
+                block(7).replace("/ 1000 }}", "/ 1000 | round(2) }}")), done, List.of()), "a whole block replaced");
+        assertNull(LocalExecutor.retyped(sideEffecting("smtp_send_email"), Map.of("body",
+                composed(1_500) + "\n" + block(12)), done, List.of()), "a block quoted in an email");
+        var journal = new StringBuilder();
+        for (int i = 0; i < 400; i++) {
+            journal.append(String.format("2026-11-10 12:%02d:%02d homeassistant sensor.battery_state_of_charge unavailable%n",
+                    i / 60 % 60, i % 60));
+        }
+        String lines = journal.toString().lines().skip(200).limit(3).reduce("", (a, b) -> a + b + "\n");
+        assertNull(LocalExecutor.retyped(sideEffecting("smtp_send_email"), Map.of("body", composed(1_500) + "\n" + lines),
+                List.of(step("journal", Map.of(), journal.toString())), List.of()), "three lines of a long journal in an alert");
+        // Mutation: drop the once-placed rule -> each of these is refused as a copy of the file.
+    }
+
+    @Test
+    @DisplayName("a copy that loses a text's paragraph breaks is no exact copy; more blank lines between them are")
+    void paragraphBreaksCount() {
+        String text = "Dear Petr,\n\n" + plain(400) + "\n\n" + plain(300).toUpperCase() + "\n\nRegards";
+        var done = List.of(step("mail_read", Map.of(), text));
+        var send = sideEffecting("smtp_send_email");
+        assertEquals("body", refused(LocalExecutor.retyped(send, Map.of("body", text.replace("\n\n", "\n")), done, List.of())));
+        assertNull(LocalExecutor.retyped(send, Map.of("body", text.replace("\n\n", "\n\n\n")), done, List.of()));
+        // A mail turned into text from HTML separates its paragraphs with lines of no-break spaces.
+        String html = text.replace("\n\n", "\n\u00A0\n");
+        assertNull(LocalExecutor.retyped(send, Map.of("body", text), List.of(step("mail_read", Map.of(), html)), List.of()),
+                "typed with empty lines, it is still the whole mail");
+        // No-break spaces inside lines too -- "45 Kč", "tel. 777 123 456" -- typed as spaces.
+        String czech = "Dobrý den,\n\nfaktura na 45\u00A0Kč je v příloze, tel.\u00A0777\u00A0123\u00A0456.\n\n" + plain(300)
+                + "\n\nS\u00A0pozdravem";
+        assertNull(LocalExecutor.retyped(send, Map.of("body", czech.replace('\u00A0', ' ')),
+                List.of(step("mail_read", Map.of(), czech)), List.of()));
+    }
+
+    @Test
+    @DisplayName("a crafted run of combining marks normalises in linear time, for the canary and the copy rule alike")
+    void combiningMarksAreCheap() {
+        var marks = new StringBuilder("a");
+        for (int i = 0; i < 400_000; i++) marks.append(i % 2 == 0 ? '́' : '̖');
+        long start = System.nanoTime();
+        com.ownclaw.privacy.PrivateIndex.normalise(marks.toString());
+        LocalExecutor.light(marks.toString());
+        assertTrue(System.nanoTime() - start < 5_000_000_000L, "about 90 seconds each before");
+        // Marks outside the first plane, two chars each, and a halfwidth voiced-sound mark that is
+        // a letter modifier until NFKC makes it a combining mark: neither may slip the count.
+        var astral = new StringBuilder("a");
+        for (int i = 0; i < 100_000; i++) astral.appendCodePoint(i % 2 == 0 ? 0x1D185 : 0x1D17B);
+        var halfwidth = new StringBuilder("a");
+        for (int i = 0; i < 100_000; i++) halfwidth.append('\u0334').append('\uFF9E');
+        start = System.nanoTime();
+        com.ownclaw.privacy.PrivateIndex.normalise(astral.toString());
+        LocalExecutor.light(astral.toString());
+        com.ownclaw.privacy.PrivateIndex.normalise(halfwidth.toString());
+        assertTrue(System.nanoTime() - start < 5_000_000_000L, "16 and 22 seconds before");
+        assertEquals(com.ownclaw.privacy.PrivateIndex.normalise("Příliš žluťoučký kůň"),
+                com.ownclaw.privacy.PrivateIndex.normalise(java.text.Normalizer.normalize("Příliš žluťoučký kůň",
+                        java.text.Normalizer.Form.NFD)), "ordinary text normalises as before");
+    }
+
+    @Test
+    @DisplayName("a line of a hundred thousand blanks is read at once, not tried at every blank")
+    void blanksInsideALineAreCheap() {
+        String mail = plain(350) + " ".repeat(100_000) + "x\n" + plain(300);
+        long start = System.nanoTime();
+        LocalExecutor.retyped(sideEffecting("smtp_send_email"), Map.of("body", plain(350)),
+                List.of(step("mail_read", Map.of(), mail)), List.of());
+        assertTrue(System.nanoTime() - start < 3_000_000_000L, "48 seconds before");
+    }
+
+    @Test
+    @DisplayName("a message quoting a few lines of a long result is the model's own text")
+    void quotingAFewLinesIsComposing() {
+        String digest = digest();
+        String[] lines = digest.split("\n");
+        String message = "Dobré ráno! Three items worth a look today:\n" + lines[3] + "\n" + lines[17] + "\n"
+                + lines[29] + "\nThe rest is routine.";
+        assertNull(LocalExecutor.retyped(sideEffecting("smtp_send_email"), Map.of("body", message),
+                List.of(step("daily_news_digest", Map.of(), digest)), List.of()));
     }
 
     @Test
@@ -361,9 +674,9 @@ class DelegationSafetyTest {
         String digest = digest();
         var done = List.of(step("daily_news_digest", Map.of(), digest),
                 step("smtp_send_email", Map.of("to", "petr@example.com", "body", digest), "Sent"));
-        assertEquals("body", LocalExecutor.retyped(sideEffecting("smtp_send_email"),
+        assertEquals("body", refused(LocalExecutor.retyped(sideEffecting("smtp_send_email"),
                         Map.of("to", "jana@example.com", "body", digest.substring(0, digest.length() / 2)),
-                        done, List.of()),
+                        done, List.of())),
                 "half of it, after one whole copy, is still half of it");
     }
 
