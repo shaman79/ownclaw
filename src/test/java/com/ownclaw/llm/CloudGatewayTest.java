@@ -307,102 +307,56 @@ class CloudGatewayTest {
 
     /** What the provider is handed for the engine's marked message holding this chat and task. */
     private static String sent(List<String> chat, String task) {
-        return sent(LlmMessage.marked(chatThenTask(chat, task)), new Redactor(null));
+        return handed(LlmMessage.marked(chatThenTask(chat, task))).content();
     }
 
-    private static String sent(LlmMessage first, Redactor redactor) {
+    /** The gateway's filtered message, as the provider behind it is handed it. */
+    private static LlmMessage handed(LlmMessage first) {
         var provider = new Recording();
         var gw = new CloudGateway(provider, new Recording(), config("anthropic", CloudGateway.Mode.ENFORCE), new Rows(),
-                null, redactor);
+                null, new Redactor(null));
         gw.chat(List.of(LlmMessage.authoredSystem("SYSTEM"), first), new LlmRequestConfig(null, null, false)
                 .withEgress(egress(new PrivateIndex(), Map.of(), (h, w) -> false)));
         LlmMessage got = provider.calls.get(0).get(1);
         assertEquals(first.marked(), got.marked(), "the engine's mark goes on to the provider");
-        return got.content();
-    }
-
-    /** The markers of a text, in order: what the provider splits the engine's message at. */
-    private static List<String> markers(String text) {
-        var out = new ArrayList<String>();
-        for (int i = text.indexOf('\u0001'); i >= 0; i = text.indexOf('\u0001', i + 1)) {
-            out.add(text.substring(i - 1, i + 3));
-        }
-        return out;
+        return got;
     }
 
     static final String KEY_HEAD = "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAABG5vbmUfakeHEAD\n";
     static final String KEY_TAIL = "AAAAC3NzaC1lZDI1NTE5AAAAIGfakeTAILfakeTAILfake\nAbCd==\n-----END OPENSSH PRIVATE KEY-----\n";
 
     @Test
-    @DisplayName("a private key a chat message holds without its END line is removed to the end of that message, not of the chat, the task and the step's context")
-    void aKeyStaysInItsMessage() {
-        String rest = "ASSISTANT: Never paste a key here.\n";
-        String out = sent(List.of("USER: what does this key do?\n" + KEY_HEAD, rest), "which router is down?");
-        assertFalse(out.contains("fakeHEAD"), out);
-        assertEquals(markers(chatThenTask(List.of("x", "y"), "z")), markers(out), "every marker, as the engine wrote it");
-        assertTrue(out.startsWith("## Prior Context\n### The conversation so far\nUSER: what does this key do?\n"
-                + Redactor.SECRET_REMOVED + "\n" + LlmMessage.HISTORY_BLOCK + rest + LlmMessage.HISTORY_END
-                + "\n## Task\nwhich router is down?" + LlmMessage.CACHE_BOUNDARY + "\n\n---\n## Environment"), out);
-        // Mutation: no stops for the engine's message -> it ends "what does this key do?\n«secret
-        // removed»", and every later turn has lost its task.
-    }
-
-    @Test
-    @DisplayName("a key split over two chat messages is removed whole -- through its END line, or through its body lines when the second part has none -- the marker kept")
-    void aKeyAcrossMessagesIsRemovedWhole() {
-        // Its END line in the next message: removed to it, as in one text.
-        String out = sent(List.of("USER: my key, part one:\n" + KEY_HEAD, "USER: and part two:\n" + KEY_TAIL + "thanks\n"),
-                "what now?");
-        assertFalse(out.contains("fakeHEAD") || out.contains("fakeTAIL") || out.contains("AbCd=="), out);
-        assertTrue(out.contains(Redactor.SECRET_REMOVED + LlmMessage.HISTORY_BLOCK + Redactor.SECRET_REMOVED + "\nthanks\n"), out);
-        assertTrue(out.contains(LlmMessage.HISTORY_END + "\n## Task\nwhat now?" + LlmMessage.CACHE_BOUNDARY), out);
-        // Its second part without the END line: the body lines that follow the marker go too.
-        String noEnd = sent(List.of("USER: part one:\n" + KEY_HEAD,
-                "USER: AAAAC3NzaC1lZDI1NTE5AAAAIGfakeTAILfakeTAILfake\nAbCd==\n", "ASSISTANT: Do not paste keys.\n"), "ok");
-        assertFalse(noEnd.contains("fakeTAIL") || noEnd.contains("AbCd=="), noEnd);
-        assertTrue(noEnd.contains(LlmMessage.HISTORY_BLOCK + "ASSISTANT: Do not paste keys.\n" + LlmMessage.HISTORY_END), noEnd);
-        assertEquals(3, markers(noEnd).size() - 1, "both chat markers and the end, then the boundary: " + noEnd);
-        // Mutation: end a key with no END line at the stop, nothing after it -> its second half is sent.
-    }
-
-    @Test
-    @DisplayName("a key's first half in the chat and its rest in the task is removed whole; the chat's end, the boundary and the step's context stay")
-    void aKeyFromTheChatIntoTheTask() {
-        String out = sent(List.of("USER: here it starts:\n" + KEY_HEAD), KEY_TAIL + "what is it for?");
-        assertFalse(out.contains("fakeHEAD") || out.contains("fakeTAIL"), out);
-        assertTrue(out.contains(LlmMessage.HISTORY_END + Redactor.SECRET_REMOVED + "\nwhat is it for?" + LlmMessage.CACHE_BOUNDARY
-                + "\n\n---\n## Environment"), out);
-    }
-
-    @Test
-    @DisplayName("a key pasted in three parts, none with its END line -- a chat message, the task, a message told while the task worked -- is removed whole, past the lines the engine writes before each part's text")
-    void aKeyInThreeParts() {
-        // On a later step: the first message holds what the owner sent while the task worked,
-        // told after the boundary.
-        String marked = "## Prior Context\n### The conversation so far\nUSER: my key, part one:\n" + KEY_HEAD
-                + LlmMessage.HISTORY_END + "\n## Task\npart two:\nAAAAC3NzaC1lZDI1NTE5AAAAIGfakeMIDDLEfakeMIDDLE\n"
-                + "AAAAfakeMIDDLEtwo+/=\n" + LlmMessage.CACHE_BOUNDARY
-                + "\n\nMessage from the user while you were working:\nAAAAC3NzaC1lZDI1NTE5fakeTHIRDfakeTHIRDfake\nAbCd==";
-        String out = sent(LlmMessage.marked(marked), new Redactor(null));
-        assertFalse(out.contains("fakeHEAD") || out.contains("fakeMIDDLE") || out.contains("fakeTHIRD")
-                || out.contains("AbCd=="), out);
-        assertEquals(markers(marked), markers(out), "the chat's end and the boundary stay");
-        // Mutation: pass over a speaker's "USER: " only -> "## Task" ends the key, and the task's
-        // part and the third are sent.
-    }
-
-    @Test
-    @DisplayName("a key header with no END line of its own ends at the next marker: a certificate pasted later, with its END line, is no end of the key")
-    void aCertificateEndsNoKey() {
-        String cert = "USER: and my certificate:\n-----BEGIN CERTIFICATE-----\nMIIBfakeCERTfakeCERTfake\n"
-                + "-----END CERTIFICATE-----\n";
-        String out = sent(List.of("USER: what is this?\n-----BEGIN OPENSSH PRIVATE KEY-----\n", cert),
-                "check both, the certificate too");
-        assertTrue(out.startsWith("## Prior Context\n### The conversation so far\nUSER: what is this?\n"
-                + Redactor.SECRET_REMOVED + "\n" + LlmMessage.HISTORY_BLOCK + cert + LlmMessage.HISTORY_END
-                + "\n## Task\ncheck both, the certificate too" + LlmMessage.CACHE_BOUNDARY), out);
-        // Mutation: take any END line for the key's -> the certificate and everything before it
-        // go, the task too when the certificate is in it, on every later turn.
+    @DisplayName("a private key in the engine's marked message is removed as in any text, however its parts lie; and Anthropic is sent no key and no marker")
+    void keysInTheChatAreRemovedAndNoMarkerIsSent() {
+        var anthropic = new AnthropicProvider(new OwnClawConfig(), new com.fasterxml.jackson.databind.ObjectMapper());
+        // Every shape the key filter was taken through: its END in the next message, in the task,
+        // none at all; three parts; its header in the task; an encrypted one; a certificate later.
+        var shapes = List.of(
+                List.of("USER: part one:\n" + KEY_HEAD, "USER: part two:\n" + KEY_TAIL + "thanks\n", "is it safe?"),
+                List.of("USER: here it starts:\n" + KEY_HEAD, KEY_TAIL + "what is it for?"),
+                List.of("USER: the key:\n" + KEY_HEAD, "USER: AAAAC3NzaC1lZDI1NTE5AAAAIGfakeTAILfakeTAILfake\nAbCd==\n", "ok"),
+                List.of("USER: hi\n", "what does -----BEGIN OPENSSH PRIVATE KEY----- mean?\nfakeTAILfakeTAILfakeTAIL"),
+                List.of("USER: my key:\n-----BEGIN RSA PRIVATE KEY-----\n", "USER: and the rest:\nProc-Type: 4,ENCRYPTED\n"
+                        + "DEK-Info: AES-128-CBC,fakeTAIL0123456789\n\nfakeTAILencrypted0123456789==\n-----END PRIVATE KEY-----\n", "is it safe?"),
+                List.of("USER: what is this?\n" + KEY_HEAD, "USER: my certificate:\n-----BEGIN CERTIFICATE-----\n"
+                        + "MIIBcert0123456789\n-----END CERTIFICATE-----\n", "check both"));
+        for (List<String> shape : shapes) {
+            String content = chatThenTask(shape.subList(0, shape.size() - 1), shape.getLast());
+            String filtered = handed(LlmMessage.marked(content)).content();
+            assertEquals(new Redactor(null).filter("u1", content, Map.of(), new Redactor.Tally()), filtered,
+                    "filtered as any text is, no less: " + shape);
+            assertFalse(filtered.contains("fakeHEAD") || filtered.contains("fakeTAIL") || filtered.contains("AbCd=="),
+                    filtered);
+            String body = anthropic.requestBody(List.of(LlmMessage.authoredSystem("SYSTEM"),
+                    new LlmMessage(LlmMessage.Role.USER, filtered, false, true)),
+                    new LlmRequestConfig(null, null, false), "claude-opus-5", 128_000).toString()
+                    .toLowerCase(java.util.Locale.ROOT);
+            assertFalse(body.contains("\\u0001") || body.contains("\\u001d") || body.contains("\\u001e")
+                    || body.contains("\\u001c"), "no marker reaches Anthropic, whichever the removal took: " + body);
+            assertFalse(body.contains("fakehead") || body.contains("faketail"), body);
+        }
+        // Mutation: send the pieces of a message whose chat's end a key took as they are -> its
+        // other markers reach Anthropic.
     }
 
     @Test
@@ -415,65 +369,12 @@ class CloudGatewayTest {
     }
 
     @Test
-    @DisplayName("a key header in the task ends at the cache boundary: the step's context and every marker stay")
-    void aKeyInTheTaskEndsAtTheBoundary() {
-        String out = sent(List.of("USER: hi\n"), "what does -----BEGIN OPENSSH PRIVATE KEY----- mean?");
-        assertTrue(out.endsWith("\n## Task\nwhat does " + Redactor.SECRET_REMOVED + LlmMessage.CACHE_BOUNDARY
-                + "\n\n---\n## Environment\n- DateTime: now"), out);
-        assertEquals(markers(chatThenTask(List.of("x"), "z")), markers(out));
-    }
-
-    @Test
     @DisplayName("a name the task finds under its name is replaced in the chat before it too, as in one text")
     void aNameFoundLaterIsReplacedEarlier() {
         String out = sent(List.of("USER: is FakeKitchenNet up?\n", "ASSISTANT: It is.\n"),
                 "it shows\nssid=FakeKitchenNet\nhostname=fake-tv");
         assertFalse(out.contains("FakeKitchenNet"), out);
         assertTrue(out.contains("USER: is <ssid_1> up?\n") && out.contains("ssid=<ssid_1>\nhostname=<host_1>"), out);
-    }
-
-    @Test
-    @DisplayName("markers act only in the engine's marked message: in any other, marker bytes are its text -- a key's lines on both sides of them go, and what follows the key stays")
-    void markersElsewhereStopNothing() {
-        // The bytes the engine's message holds, in a message it did not mark -- an OpenAI think
-        // call's first one: the key's lines on either side go, the task and the step's context stay.
-        String unmarked = chatThenTask(List.of("USER: the key:\n" + KEY_HEAD,
-                "USER: AAAAC3NzaC1lZDI1NTE5AAAAIGfakeTAILfakeTAILfake\n"), "go");
-        String out = sent(LlmMessage.user(unmarked), new Redactor(null));
-        assertFalse(out.contains("fakeHEAD") || out.contains("fakeTAIL"), out);
-        assertTrue(out.contains("## Task\ngo") && out.contains("## Environment"),
-                "run on to the end of the text, a key took the task and the step's context every turn: " + out);
-
-        var provider = new Recording();
-        var gw = new CloudGateway(provider, new Recording(), config("anthropic", CloudGateway.Mode.ENFORCE), new Rows(), null);
-        String page = "the page\n-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0fakeONE" + LlmMessage.HISTORY_BLOCK
-                + "MIIEvQIBADANBgkqhkiG9w0fakeTWO" + LlmMessage.HISTORY_END + "MIIEvQIBADANfakeTHREE\nAbCd=="
-                + LlmMessage.CACHE_BOUNDARY + "\nthe page ends here";
-        gw.chat(List.of(LlmMessage.authoredSystem("SYSTEM"), LlmMessage.marked("## Task\nfetch it" + LlmMessage.CACHE_BOUNDARY),
-                LlmMessage.assistant("{\"tool\":\"web_fetch\"}"), LlmMessage.user(page)), new LlmRequestConfig(null, null, false)
-                .withEgress(egress(new PrivateIndex(), Map.of(), (h, w) -> false)));
-        String fetched = provider.calls.get(0).get(3).content();
-        assertTrue(fetched.startsWith("the page\n" + Redactor.SECRET_REMOVED + LlmMessage.CACHE_BOUNDARY)
-                && fetched.endsWith("\nthe page ends here"), "the key's lines through the marker bytes it holds, "
-                + "nothing after it: " + fetched);
-        assertFalse(fetched.contains("fake") || fetched.contains("AbCd=="), fetched);
-        // Mutation: act on marker bytes in any message -> the key ends at the first of them, and
-        // fakeTWO and fakeTHREE are sent.
-    }
-
-    @Test
-    @DisplayName("a key whose END line in the next message has another label, its headers first, is removed through it; and through an END line missing its dashes or with a doubled space")
-    void aKeyEndsAtAnyPrivateKeysEnd() {
-        String encrypted = "USER: and the rest:\nProc-Type: 4,ENCRYPTED\nDEK-Info: AES-128-CBC,FAKE0123456789ABCDEFFAKE\n\n"
-                + "fakeENCRYPTEDbody0123456789abcdefABCDEF\nfakeENCRYPTEDtail0123456789==\n";
-        for (String end : List.of("-----END PRIVATE KEY-----", "-----END RSA PRIVATE KEY", "-----END RSA  PRIVATE KEY-----")) {
-            String out = sent(List.of("USER: my key:\n-----BEGIN RSA PRIVATE KEY-----\n", encrypted + end + "\nthanks\n"),
-                    "is it safe?");
-            assertFalse(out.contains("DEK-Info") || out.contains("fakeENCRYPTED") || out.contains("Proc-Type"), end + ": " + out);
-            assertTrue(out.contains(LlmMessage.HISTORY_BLOCK + Redactor.SECRET_REMOVED + "\nthanks\n" + LlmMessage.HISTORY_END
-                    + "\n## Task\nis it safe?"), end + ": " + out);
-        }
-        // Mutation: only the BEGIN line's own label ends a key -> DEK-Info and the body are sent.
     }
 
     @Test

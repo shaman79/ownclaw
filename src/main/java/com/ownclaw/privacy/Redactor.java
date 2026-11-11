@@ -163,30 +163,12 @@ public final class Redactor {
      * Counted into {@code tally}.
      */
     public String filter(String userId, String text, Map<String, String> vault, Tally tally) {
-        return filter(userId, text, vault, tally, List.of());
-    }
-
-    /**
-     * {@link #filter}, for a text whose writer marked where its parts end ({@code stops}): a think
-     * call's first message, the chat a task came from a message at a time, then the task, then
-     * the step's context (LlmMessage#MARKERS). Filtered as one text, as every text is -- a key whose
-     * END line is in a later part is removed to it, a UCI section's name holds in the next part,
-     * a name found in one part is looked for in all of them -- but a private key whose BEGIN line
-     * has no END line after it anywhere ends at the next stop, and goes on past it only through
-     * the lines of the key's body that follow ({@link #pemBlocks}); and nothing removed takes a
-     * stop with it. Run on to the end of the text, one such key in a chat message removed the rest
-     * of the chat, the task, the cache boundary and the step's context on every later turn.
-     * <p>
-     * The caller vouches that every stop in the text is the writer's own: text a user, a tool or a
-     * page wrote that held one could end a key's removal where it chose.
-     */
-    public String filter(String userId, String text, Map<String, String> vault, Tally tally, List<String> stops) {
         if (text == null || text.isEmpty()) return text;
         Scrubbed scrubbed = scrubVault(text, vault);
         tally.secrets += scrubbed.count();
         String s = scrubbed.text();
         Table table = table(userId);
-        List<Finding> found = find(s, table.named(), stopsIn(s, stops));
+        List<Finding> found = find(s, table.named());
         if (found.isEmpty()) return s;
         var sb = new StringBuilder(s.length());
         int from = 0;
@@ -913,14 +895,9 @@ public final class Redactor {
      * this text names.
      */
     static List<Finding> find(String s, Map<Kind, java.util.Set<String>> known) {
-        return find(s, known, List.of());
-    }
-
-    /** {@link #find}, in a text with the writer's {@code stops} ({@link #filter(String, String, Map, Tally, List)}). */
-    private static List<Finding> find(String s, Map<Kind, java.util.Set<String>> known, List<int[]> stops) {
         var secrets = new ArrayList<Finding>();
         var ids = new ArrayList<Finding>();
-        pemBlocks(s, secrets, stops);
+        pemBlocks(s, secrets);
         sshKeys(s, ids);
         passwordHashes(s, secrets);
         tokens(s, secrets);
@@ -1021,14 +998,10 @@ public final class Redactor {
         return Character.isLetterOrDigit(c) || c == '_';
     }
 
-    // PEM private keys: from -----BEGIN ...PRIVATE KEY----- to the next END line of a private key
-    // (privateEnd) -- or, when there is none after it, through its lines: what was cut off (keyEnd).
-    // In a text with stops (filter with stops) a key is removed around every stop it crosses, the
-    // stop kept.
-    private static void pemBlocks(String s, List<Finding> out, List<int[]> stops) {
+    // PEM private keys: from -----BEGIN ...PRIVATE KEY----- to its -----END ...-----, or to the
+    // end of the text when it was cut off -- half a key is still a key.
+    private static void pemBlocks(String s, List<Finding> out) {
         int from = 0, at;
-        java.util.regex.Matcher ends = PRIVATE_END.matcher(s);
-        int endAt = -1, endTo = -1;   // the next private key's END line found so far; -2: none left
         while ((at = s.indexOf("-----BEGIN ", from)) >= 0) {
             int label = at + "-----BEGIN ".length();
             int close = label;
@@ -1038,150 +1011,17 @@ public final class Redactor {
                 from = label;
                 continue;
             }
-            // One search forward through the text, whatever the number of keys in it.
-            if (endAt != -2 && endAt < close + 5) {
-                if (ends.find(close + 5)) {
-                    endAt = ends.start();
-                    endTo = ends.end();
-                } else {
-                    endAt = -2;
-                }
-            }
-            int stop = endAt >= 0 ? endTo : keyEnd(s, lineEnd(s, close + 5), stops);
-            int cut = at;
-            for (int[] st : stops) {
-                if (st[1] <= cut || st[0] >= stop) continue;
-                if (st[0] > cut) out.add(new Finding(cut, st[0], null));
-                cut = st[1];
-            }
-            if (cut < stop) out.add(new Finding(cut, stop, null));
-            from = Math.max(stop, at + 1);
-        }
-    }
-
-    /**
-     * A private key's END line, any of them: "-----END ", a label holding PRIVATE KEY -- its own or
-     * another key's, as a key pasted from two files has -- and the closing dashes, its defects
-     * forgiven: dashes missing or short, a doubled space. Never a certificate's or a signature's:
-     * a lone key header in one message and a certificate pasted later removed everything between.
-     */
-    private static final java.util.regex.Pattern PRIVATE_END = java.util.regex.Pattern.compile(
-            "-{3,}[ \\t]*END[ \\t]+(?:[A-Za-z0-9]+[ \\t]+)*PRIVATE[ \\t]+KEY(?:[ \\t]+[A-Za-z0-9]+)*[ \\t]*-*",
-            java.util.regex.Pattern.CASE_INSENSITIVE);
-
-    /** Where the line holding {@code at} ends: its line break, or the end of the text. */
-    private static int lineEnd(String s, int at) {
-        int nl = s.indexOf('\n', at);
-        return nl < 0 ? s.length() : nl;
-    }
-
-    /** A line of a key's body: base64, nothing else. */
-    private static final java.util.regex.Pattern KEY_BODY = java.util.regex.Pattern.compile("[A-Za-z0-9+/]+=*");
-
-    /** What a speaker's line starts with in a chat: "USER: ", "ASSISTANT: ". */
-    private static final java.util.regex.Pattern SPEAKER = java.util.regex.Pattern.compile("^[A-Z][A-Za-z]*: ");
-
-    /** A PEM header line of an encrypted key: "Proc-Type: 4,ENCRYPTED", "DEK-Info: AES-128-CBC,...". */
-    private static final java.util.regex.Pattern PEM_HEADER = java.util.regex.Pattern.compile("[A-Za-z][A-Za-z0-9-]*: .*");
-
-    /**
-     * Where a private key with no END line after it ends, its BEGIN line ending at
-     * {@code beginLineEnd}: through the lines that are the key's -- its body, lines of nothing but
-     * base64, a short one only straight after a full one, as a key's last line is -- however they
-     * are led into: past the lines between them that only lead on to more of it, a speaker's
-     * "USER: " opening a message, a header line of an encrypted key, a blank line, a heading
-     * ("## Task"), a rule, a line ending with a colon ("Message from the user while you were
-     * working:"), a stop. The first other line ends the key, and what follows is not removed: run
-     * on to the end of the text, a key cut off in one chat message took the rest of the chat, the
-     * task and the step's context with it on every later turn, and a key in a tool's output the
-     * rest of that output. A key pasted in parts -- the next in the next message, in the task,
-     * told while the task worked -- is removed whole.
-     */
-    private static int keyEnd(String s, int beginLineEnd, List<int[]> stops) {
-        int end = beginLineEnd;   // the BEGIN line, whole: an escaped key's body is on it
-        if (beginLineEnd >= s.length()) return end;
-        boolean afterBody = true;    // a short line straight under the BEGIN line is the key's too
-        boolean ownHeaders = true;   // straight under the BEGIN line: the key's own header lines
-        int p = beginLineEnd + 1;
-        // The BEGIN line's own break may be a stop's: the key's message ends with that line.
-        int[] first = stopAt(stops, beginLineEnd);
-        if (first != null) {
-            p = first[1];
-            ownHeaders = false;
-        }
-        while (p < s.length()) {
-            int[] here = stopAt(stops, p);
-            if (here != null) {
-                p = here[1];
-                afterBody = false;   // a short line opening the next part is no key's last line
-                ownHeaders = false;
-                continue;
-            }
-            int le = lineEnd(s, p);
-            String line = s.substring(p, le);
-            var speaker = SPEAKER.matcher(line);
-            if (speaker.find()) {
-                line = line.substring(speaker.end());
-                afterBody = false;   // nor is a short line opening a message
-            }
-            String t = line.strip();
-            if (KEY_BODY.matcher(t).matches() && (t.length() >= 16 || afterBody)) {
-                end = le;
-                afterBody = true;
-                ownHeaders = false;
-            } else if (ownHeaders && PEM_HEADER.matcher(t).matches()) {
-                end = le;   // its cipher and salt: the key's own, removed with it
-            } else if (leadsOn(t)) {
-                afterBody = false;
-                ownHeaders = ownHeaders && t.isEmpty();
+            int end = s.indexOf("-----END ", close + 5);
+            int stop;
+            if (end < 0) {
+                stop = s.length();
             } else {
-                break;
+                int tail = s.indexOf("-----", end + "-----END ".length());
+                stop = tail < 0 ? s.length() : tail + 5;
             }
-            if (le >= s.length()) break;
-            int[] next = stopAt(stops, le);
-            p = next != null ? next[1] : le + 1;
-            if (next != null) {
-                afterBody = false;
-                ownHeaders = false;
-            }
+            out.add(new Finding(at, stop, null));
+            from = stop;
         }
-        return end;
-    }
-
-    /**
-     * A line between a key's lines that only leads on to more of it: blank, a header of an
-     * encrypted key, a heading, a rule, a line ending with a colon, or control characters alone.
-     */
-    private static boolean leadsOn(String t) {
-        return t.isEmpty() || t.startsWith("#") || t.equals("---") || t.endsWith(":")
-                || PEM_HEADER.matcher(t).matches() || t.chars().allMatch(c -> c < 0x20);
-    }
-
-    /** The stop that starts at {@code at}, or null. */
-    private static int[] stopAt(List<int[]> stops, int at) {
-        for (int[] st : stops) {
-            if (st[0] == at) return st;
-            if (st[0] > at) break;
-        }
-        return null;
-    }
-
-    /** Where each of {@code stops} stands in {@code s}, in order, as {start, end}; none overlapping. */
-    private static List<int[]> stopsIn(String s, List<String> stops) {
-        if (stops == null || stops.isEmpty()) return List.of();
-        var out = new ArrayList<int[]>();
-        for (String stop : stops) {
-            if (stop == null || stop.isEmpty()) continue;
-            for (int at = s.indexOf(stop); at >= 0; at = s.indexOf(stop, at + stop.length())) {
-                out.add(new int[] {at, at + stop.length()});
-            }
-        }
-        out.sort(Comparator.comparingInt((int[] a) -> a[0]));
-        var kept = new ArrayList<int[]>();
-        for (int[] st : out) {
-            if (kept.isEmpty() || st[0] >= kept.getLast()[1]) kept.add(st);
-        }
-        return kept;
     }
 
     /** The key types whose SSH key blob {@link #sshKeys} removes; each blob begins with "AAAA". */

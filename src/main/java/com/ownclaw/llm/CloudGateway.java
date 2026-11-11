@@ -136,14 +136,10 @@ public final class CloudGateway implements LlmProvider {
                 filteredMessages.add(m);
                 continue;
             }
-            // The engine's marked message is filtered as one text like any other, but a private
-            // key with no END line in it ends at the next of the engine's markers (Redactor#filter
-            // with stops): one in a chat message removed the rest of the chat, the task, the cache
-            // boundary and the step's context on every later turn. Only there, where the engine
-            // vouches for every marker (LlmMessage#marked): elsewhere marker-like bytes are text,
-            // and a stop they made would end a key's removal where that text chose.
+            // The engine's marked message is filtered as one text like any other -- its markers
+            // are only where the provider splits it (LlmMessage#marked), and nothing the filter
+            // removes is let off because a marker stands in it -- and goes on marked.
             String content = m.authored() ? Redactor.filterAuthored(m.content(), vault, tally)
-                    : m.marked() ? redactor.filter(user, m.content(), vault, tally, LlmMessage.MARKERS)
                     : redactor.filter(user, m.content(), vault, tally);
             filteredMessages.add(new LlmMessage(m.role(), content, m.authored(), m.marked()));
         }

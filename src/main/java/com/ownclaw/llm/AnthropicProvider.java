@@ -565,18 +565,19 @@ class AnthropicProvider implements LlmProvider {
                         for (String message : task.substring(0, chatEnd).split(
                                 java.util.regex.Pattern.quote(LlmMessage.HISTORY_BLOCK), -1)) {
                             // The API refuses a block of nothing but blanks; no message is one.
-                            if (!message.isBlank()) last = textBlock(blocks, message);
+                            if (!message.isBlank()) last = textBlock(blocks, read(message));
                         }
                         if (last != null) last.set("cache_control", cacheControl(true));
                         task = task.substring(chatEnd + LlmMessage.HISTORY_END.length());
                     }
-                    if (!task.isBlank()) textBlock(blocks, task).set("cache_control", cacheControl(true));
+                    if (!task.isBlank()) textBlock(blocks, read(task)).set("cache_control", cacheControl(true));
                     String rest = content.substring(cut + LlmMessage.CACHE_BOUNDARY.length());
-                    if (!rest.isBlank()) textBlock(blocks, rest);
+                    if (!rest.isBlank()) textBlock(blocks, read(rest));
                 } else {
-                    // A marked message with its boundary gone -- the filter never takes one, but
-                    // nothing of a marker is ever sent -- goes as the text the model reads.
-                    m.put("content", msg.marked() ? LlmMessage.asRead(content) : content);
+                    // A marked message with its boundary gone -- a private key with no END line
+                    // removes to the end of the text, the markers in it too -- goes as the text the
+                    // model reads: that chat loses its blocks for the turn, and no marker is sent.
+                    m.put("content", msg.marked() ? read(content) : content);
                 }
             }
         }
@@ -655,6 +656,17 @@ class AnthropicProvider implements LlmProvider {
         // "respond with valid JSON"). Assistant prefill is NOT used because some
         // Claude models reject it with HTTP 400.
         return body;
+    }
+
+    /**
+     * A piece of the engine's marked message as it is sent: no marker in it, and no marker's
+     * control character either. What the filter removed can have taken some of the markers with
+     * it -- the chat's end, say, and not the boundary -- and the text left between those still
+     * standing holds the rest; the engine put the character in nothing else
+     * (LlmMessage#unmarked), so nothing else of the text goes with it.
+     */
+    private static String read(String piece) {
+        return LlmMessage.unmarked(LlmMessage.asRead(piece));
     }
 
     /** A text block of {@code text}, added to {@code blocks}. */

@@ -194,8 +194,8 @@ class AnthropicCacheTest {
             assertTrue(json.split("cache_control", -1).length - 1 <= 4, turns + " turns: " + json);
         }
         var chatHasMark = body(List.of(LlmMessage.marked("chat" + MARK + "history" + MARK + "dyn")), true);
-        assertEquals("chat" + MARK + "history", chatHasMark.path("messages").get(0).path("content").get(0).path("text").asText(),
-                "split at the engine's marker, the last one, so the cached block is the whole task");
+        assertEquals("chathistory", chatHasMark.path("messages").get(0).path("content").get(0).path("text").asText(),
+                "split at the last boundary, so the cached block is the whole task -- and no marker is sent");
         var endsWithMark = body(List.of(LlmMessage.marked("task" + MARK)), true);
         var content = endsWithMark.path("messages").get(0).path("content");
         assertEquals(1, content.size(), "no empty second block: " + content);
@@ -212,6 +212,14 @@ class AnthropicCacheTest {
         JsonNode content = sent.path("messages").get(0).path("content");
         assertEquals("## Prior Context\n### The conversation so far\nUSER: a\nASSISTANT: b\n\n## Task\nc", content.asText());
         assertFalse(sent.toString().contains("\\u0001"), sent.toString());
+        // The chat's end taken with a key, the boundary and a marker of the chat still standing.
+        var taken = body(List.of(LlmMessage.marked("## Prior Context\nUSER: a\n" + LlmMessage.HISTORY_BLOCK
+                + "ASSISTANT: b«secret removed»" + MARK + "dyn")), true);
+        JsonNode blocks = taken.path("messages").get(0).path("content");
+        assertEquals("## Prior Context\nUSER: a\nASSISTANT: b«secret removed»", blocks.get(0).path("text").asText(),
+                "one block for chat and task alike, the marker left in it taken out");
+        assertFalse(taken.toString().toLowerCase(java.util.Locale.ROOT).matches("(?s).*\\\\u00(01|1c|1d|1e).*"),
+                taken.toString());
         // Mutation: send it as it is -> the chat's markers reach Anthropic.
     }
 

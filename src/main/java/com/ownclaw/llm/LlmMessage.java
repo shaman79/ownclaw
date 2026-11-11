@@ -12,12 +12,11 @@ package com.ownclaw.llm;
  *                 cached prompt had to be written again.
  * @param marked   a think call's first message as the engine wrote it for Anthropic: every marker
  *                 in it ({@link #MARKERS}) is the engine's, and the engine took the markers'
- *                 control character out of every text it put there ({@link #unmarked}). Only in such
- *                 a message are the markers acted on -- by the provider, which splits the message
- *                 at them into the blocks it caches, and by the gateway, whose filter ends a
- *                 private key with no END line at the next one. Anywhere else marker-like bytes are
- *                 text a user, a tool or a page wrote, and acting on them would let that text decide
- *                 where a key's removal ends.
+ *                 control character out of every text it put there ({@link #unmarked}). Only such a
+ *                 message is split at its markers, by the provider, into the blocks it caches, and
+ *                 sent with none of them; anywhere else marker-like bytes are text a user, a tool or
+ *                 a page wrote. The gateway filters it as one text like any other: a marker
+ *                 changes nothing the filter removes.
  */
 public record LlmMessage(Role role, String content, boolean authored, boolean marked) {
 
@@ -36,8 +35,7 @@ public record LlmMessage(Role role, String content, boolean authored, boolean ma
      * on every step. Anthropic's provider splits there and caches everything before it -- the
      * tools, the system prompt and the task -- for an hour, so the task's later steps read it from
      * the cache while it is unchanged. A line of its own and control characters, like the chat's
-     * markers, so no text in the message can be taken for it: a private key's header in the task
-     * ends there, and the step's context after it survives. Never sent.
+     * markers, so no text in the message can be taken for it. Never sent.
      */
     public static final String CACHE_BOUNDARY = "\n\u0001\u001c\n";
 
