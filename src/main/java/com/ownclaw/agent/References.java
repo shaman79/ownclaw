@@ -112,7 +112,7 @@ final class References {
                                 : inner.field() == null ? a.output() : field(a.output(), inner);
                         // A template's number expression -- {{ 3.6 * states('x') }} -- that cannot
                         // be filled is text, as on a call the cloud wrote (resolveExactly).
-                        if (value == null && ArtifactRef.numberExpression(m.group())) continue;
+                        if (value == null && templateText(m.group(), namespace.size())) continue;
                         if (!a.succeeded()) {
                             return refuse(written, e.getKey(), inner + " in it is a FAILED result — its "
                                     + "output is an error message, not something to pass on.");
@@ -138,7 +138,7 @@ final class References {
                                 + "writing a reference, and it would have gone out as literal text. "
                                 + "Write " + legacy + " instead.");
                     }
-                    if (ArtifactRef.looksLikeReference(s)) {
+                    if (ArtifactRef.looksLikeReference(s, t -> templateText(t, namespace.size()))) {
                         return refuse(written, e.getKey(), "'" + s.strip() + "' looks like a "
                                 + "reference but is not a valid one. Write exactly {{N}} or "
                                 + "{{N.field}} as the whole value, with N a result you have.");
@@ -150,7 +150,7 @@ final class References {
                 Artifact whole = ref.handle() > namespace.size() ? null : namespace.get(ref.handle() - 1);
                 String filled = whole == null || !whole.succeeded() ? null
                         : ref.field() == null ? whole.output() : field(whole.output(), ref);
-                if (filled == null && ArtifactRef.numberExpression(s)) continue;
+                if (filled == null && templateText(s, namespace.size())) continue;
                 if (ref.handle() > namespace.size()) {
                     return refuse(written, e.getKey(), ref + " refers to a result that does not "
                             + "exist.");
@@ -168,7 +168,7 @@ final class References {
                 e.setValue(value);
                 if (!used.contains(a)) used.add(a);
             } else if (v instanceof Map<?, ?> || v instanceof Collection<?>) {
-                String nested = nestedReference(v);
+                String nested = nestedReference(v, namespace.size());
                 if (nested != null) {
                     return refuse(written, e.getKey(), "'" + nested + "' is inside a list or an "
                             + "object. A reference only works as the whole value of a top-level "
@@ -215,7 +215,8 @@ final class References {
             var out = new LinkedHashMap<Object, Object>();
             for (var e : map.entrySet()) {
                 // A key is not filled in: one written as a reference would go out as braces.
-                String inKey = ArtifactRef.nearReferenceIn(String.valueOf(e.getKey()));
+                String inKey = ArtifactRef.nearReferenceIn(String.valueOf(e.getKey()),
+                        t -> templateText(t, namespace.size()));
                 if (inKey != null || LocalExecutor.CALL_REF.matcher(String.valueOf(e.getKey())).find()) {
                     why[0] = "'" + e.getKey() + "' is a key written as a reference, and a key is not filled in. "
                             + "Put the reference in a value.";
@@ -241,10 +242,7 @@ final class References {
             if (value != null) return value;
             // A template written as the whole value -- {{ 3.6 * states('x') }} for a value_template
             // -- is text, as the same inside a longer string is.
-            if (ArtifactRef.numberExpression(s)) {
-                why[0] = null;
-                return v;
-            }
+            if (templateText(s, namespace.size())) why[0] = null;
             return v;
         }
         if (ArtifactRef.LEGACY.matcher(ArtifactRef.trim(s)).matches() && legacyReference(s, namespace) != null) {
@@ -271,7 +269,7 @@ final class References {
                 replacement = text == null ? m.group() : text;   // no such text: a template's own
             } else {
                 ArtifactRef inner = ArtifactRef.parse(m.group());
-                if (inner == null && ArtifactRef.numberExpression(m.group())) {
+                if (inner == null && templateText(m.group(), namespace.size())) {
                     m.appendReplacement(sb, java.util.regex.Matcher.quoteReplacement(m.group()));
                     continue;   // a template's expression, {{ 2.4 * x }}: text
                 }
@@ -284,7 +282,7 @@ final class References {
                 if (replacement == null) {
                     // What cannot be filled, written as a template's number expression, is one:
                     // {{ 3.6 * states('x') }} is result 3's field "6 * states(...)" to the grammar.
-                    if (!ArtifactRef.numberExpression(m.group())) return v;
+                    if (!templateText(m.group(), namespace.size())) return v;
                     why[0] = null;
                     replacement = m.group();
                 }
@@ -312,13 +310,36 @@ final class References {
         rest.append(s, last, s.length());
         // What is left once every well-formed one is taken out: a reference written wrong
         // ({{1.}}, {{ 1 }}x}) would otherwise go out as literal text.
-        if (ArtifactRef.nearReferenceIn(rest.toString()) != null) {
-            why[0] = "'" + ArtifactRef.nearReferenceIn(rest.toString()) + "' looks like a reference but is not "
+        String near = ArtifactRef.nearReferenceIn(rest.toString(), t -> templateText(t, namespace.size()));
+        if (near != null) {
+            why[0] = "'" + near + "' looks like a reference but is not "
                     + "a valid one. Write {{N}} or {{N.field}}, with N one of the task's results.";
             return v;
         }
         m.appendTail(sb);
         return sb.toString();
+    }
+
+    /**
+     * Whether braces that are not filled in are a template's own text, to go out as written --
+     * asked once filling them has failed, or where nothing is filled in: a nested value, a key, a
+     * text. A number expression ({@link ArtifactRef#numberExpression}) is one --
+     * {{ 3.6 * states('x') }}, {{ 1.5 if on else 1.0 }}, {{ 2.4 }} -- unless it is a number and
+     * nothing else, no blank and no operator, naming one of the {@code results} there are
+     * ({@link ArtifactRef#bareNumber}): {{2.0}} on a list is an index tried and {{3.5}} on a
+     * failed result a field of it, each refused as the reference it is. Taken for text, both went
+     * out as braces (review, 2026-11-11). Every path asks this, so none can read the same braces
+     * differently from another.
+     */
+    static boolean templateText(String token, int results) {
+        if (!ArtifactRef.numberExpression(token)) return false;
+        int handle = ArtifactRef.bareNumber(token);
+        return handle < 1 || handle > results;
+    }
+
+    /** Whether {@code ref} is filled in from {@code namespace}, as {@link #resolveExactly} fills one. */
+    static boolean fills(ArtifactRef ref, List<Artifact> namespace) {
+        return ref != null && filled(ref, namespace, new ArrayList<>(), new String[1]) != null;
     }
 
     /** Whether a result is JSON, an object or a list: a field written after its braces is no field of it. */
@@ -515,16 +536,18 @@ final class References {
     }
 
     /** The first reference-shaped string anywhere inside a list or an object, or null. */
-    private static String nestedReference(Object v) {
-        if (v instanceof String s) return ArtifactRef.looksLikeReference(s) ? s.strip() : null;
+    private static String nestedReference(Object v, int results) {
+        if (v instanceof String s) {
+            return ArtifactRef.looksLikeReference(s, t -> templateText(t, results)) ? s.strip() : null;
+        }
         if (v instanceof Map<?, ?> m) {
             for (Object x : m.values()) {
-                String r = nestedReference(x);
+                String r = nestedReference(x, results);
                 if (r != null) return r;
             }
         } else if (v instanceof Collection<?> c) {
             for (Object x : c) {
-                String r = nestedReference(x);
+                String r = nestedReference(x, results);
                 if (r != null) return r;
             }
         }

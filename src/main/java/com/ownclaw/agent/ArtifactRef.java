@@ -112,14 +112,15 @@ public record ArtifactRef(int handle, String field) {
 
     /**
      * The first thing in {@code text} written as a reference, well-formed or not -- braces around
-     * digits, a field after them -- or null. For a call the cloud wrote, where what is meant as a
-     * reference is filled in or refused, never sent as literal text (References#resolveExactly).
+     * digits, a field after them -- that {@code templateText} does not take for a template's own
+     * text (References#templateText), or null. For a call the cloud wrote, where what is meant as
+     * a reference is filled in or refused, never sent as literal text (References#resolveExactly).
      */
-    static String nearReferenceIn(String text) {
+    static String nearReferenceIn(String text, java.util.function.Predicate<String> templateText) {
         if (text == null) return null;
         var m = NEAR.matcher(text);
         while (m.find()) {
-            if (!numberExpression(m.group())) return m.group().strip();
+            if (!templateText.test(m.group())) return m.group().strip();
         }
         return null;
     }
@@ -128,10 +129,11 @@ public record ArtifactRef(int handle, String field) {
      * Whether braces around a number hold a template's expression -- {{ 3.6 * states('x') }},
      * {{ 1.5 if is_on else 1.0 }}, {{ 2.4 }} -- rather than a reference: a run of digits right
      * after the dot, then a blank, an operator or the end. A reference's field never looks so:
-     * {{1.2026-11-11}} goes on with a dash and {{1.2fa_code}} with a letter. Asked only of what
-     * would otherwise be refused as a reference that cannot be filled in (References#resolveExactly)
-     * or where there is no result to ask (a text): a field a result really has is filled in,
-     * whatever it is called. One pass over the characters, so a run of blanks costs one look each.
+     * {{1.2026-11-11}} goes on with a dash and {{1.2fa_code}} with a letter. The shape only:
+     * whether such braces are a template's text is decided with the results there are, by
+     * References#templateText, and only of what was not filled in -- a field a result really has
+     * is filled in, whatever it is called. One pass over the characters, so a run of blanks costs
+     * one look each.
      */
     static boolean numberExpression(String token) {
         int open = token.indexOf("{{");
@@ -161,11 +163,35 @@ public record ArtifactRef(int handle, String field) {
         return Character.isWhitespace(c) || Character.isSpaceChar(c) || c == '\u200B' || c == '\uFEFF';
     }
 
-    /** Whether a model plausibly meant this whole value as a reference. */
-    public static boolean looksLikeReference(String value) {
+    /** Braces holding a number and nothing else: no blank, no operator, at most a {@code $}. */
+    private static final Pattern BARE = Pattern.compile("\\$?([0-9]{1," + MAX_HANDLE_DIGITS + "})\\.[0-9]+");
+
+    /**
+     * The result named by braces that hold a number and nothing else -- 2 for {{2.0}} or
+     * {{$2.0}} -- or 0 when they hold more than that ({{ 2.4 }}, {{ 3.6 * x }}) or name no result
+     * there could be. A template has no use for a number alone in braces; a model trying an index
+     * into a list writes exactly that (References#templateText).
+     */
+    static int bareNumber(String token) {
+        int open = token.indexOf("{{");
+        int close = token.lastIndexOf("}}");
+        if (open < 0 || close < open + 2) return 0;
+        var m = BARE.matcher(token.substring(open + 2, close));
+        return m.matches() ? Integer.parseInt(m.group(1)) : 0;
+    }
+
+    /**
+     * Whether a model plausibly meant this whole value as a reference: it holds braces round a
+     * number that {@code templateText} does not take for a template's own text
+     * (References#templateText), and nothing with a word of its own.
+     */
+    public static boolean looksLikeReference(String value, java.util.function.Predicate<String> templateText) {
         if (value == null) return false;
         String s = trim(value);
-        if (!NEAR.matcher(s).find()) return false;
+        var near = NEAR.matcher(s);
+        boolean meant = false;
+        while (!meant && near.find()) meant = !templateText.test(near.group());
+        if (!meant) return false;
         // A value made of nothing but references -- plus braces, punctuation and space -- is an
         // attempt at one: {{{1}}}, {{1}}., {{1}}{{2}}, {{1}}.body_text, **{{1}}**. Anything with
         // a word of its own around the braces is text: an f-string, a LaTeX fraction, a C array,

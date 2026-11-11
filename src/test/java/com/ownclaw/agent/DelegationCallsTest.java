@@ -615,6 +615,114 @@ class DelegationCallsTest {
         assertEquals(List.of(wind, gust), ha.calls.stream().map(c -> c.get("value_template")).toList());
     }
 
+    static Artifact.Decision open() {
+        return new Artifact.Decision(com.ownclaw.privacy.Label.PUBLIC, List.of());
+    }
+
+    @Test
+    @DisplayName("a field named by digits that code filled is shown as the task's mark, never as the model's own result")
+    void digitFieldsAreShownAsFilled() {
+        // Round 7's probes: the weather is the local model's own result 1, and it has a field "5" too.
+        var weather = new FakeTool("weather", false, List.of(),
+                p -> ToolResult.success("{\"ok\":true,\"5\":\"rain\",\"text\":\"Rain, 7 C\"}"));
+        var smtp = new FakeTool("smtp_send_email", true, List.of(), p -> ToolResult.success("Sent"));
+        var ctx = task();
+        ctx.addArtifact("energy", Map.of(), Map.of(), "{\"2025\":\"4,210 kWh\",\"2026\":\"3,980 kWh\",\"5\":\"five\"}",
+                true, open());
+        var llm = new Scripted(
+                call("smtp_send_email", Map.of("to", "jana@example.com", "body", "This year: ⟦task result 1.2026⟧")),
+                call("smtp_send_email", Map.of("to", "jana@example.com", "body", "This year: {{1.2026}}")),
+                call("smtp_send_email", Map.of("to", "jana@example.com", "body", "{{1.5}}")),
+                done("stopped"));
+        executor(llm, new Usage(), weather, smtp).execute(calls("Send Jana the same figures.",
+                c("weather", Map.of()),
+                c("smtp_send_email", Map.of("to", "petr@example.com", "body", "This year: {{1.2026}}, five: {{1.5}}"))),
+                ctx, UNCOUNTED);
+        assertEquals("This year: 3,980 kWh, five: five", smtp.calls.get(0).get("body"), "Petr got the task's figures");
+        String shown = llm.calls.get(0).get(2).content();
+        assertTrue(shown.contains("This year: ⟦task result 1.2026⟧, five: ⟦task result 1.5⟧"), shown);
+        assertFalse(shown.contains("{{1.2026}}") || shown.contains("{{1.5}}"), "its own {{1}} is the weather: " + shown);
+        assertTrue(llm.allSeen().contains("stands for a result of the task"), "the copied mark is refused: " + llm.allSeen());
+        // Its own {{1.2026}} names a field its result 1 lacks: refused, not sent as braces. Its own
+        // {{1.5}} is the weather's field 5 -- what it writes in its own numbering is its own.
+        assertTrue(llm.allSeen().contains("{{1.2026}} in it names a field that result does not have"), llm.allSeen());
+        assertEquals(List.of("This year: 3,980 kWh, five: five", "rain"),
+                smtp.calls.stream().map(c -> c.get("body")).toList());
+        // Mutation: decide by the token's shape alone, as before -> {{1.2026}} is shown as written.
+    }
+
+    @Test
+    @DisplayName("each call is shown as it was filled: against the results it saw when it ran, not the ones after it")
+    void eachCallIsShownAsItRan() {
+        var ha = new FakeTool("ha_config_file", true, List.of(),
+                p -> ToolResult.success("{\"ok\":true,\"5\":\"later\"}"));
+        var ctx = task();
+        ctx.addArtifact("note", Map.of(), Map.of(), "{\"ok\":true}", true, open());
+        // {{2.5}} names no result when the call runs (the task has one): a template's text, sent as
+        // written. The call's own result is the task's 2 afterwards, and it has a field "5".
+        var llm = new Scripted(done("checked"));
+        var outcome = executor(llm, new Usage(), ha).execute(calls("Check it.",
+                c("ha_config_file", Map.of("value_template", "{{2.5}}"))), ctx, UNCOUNTED);
+        assertTrue(outcome.ok(), outcome.text());
+        assertEquals("{{2.5}}", ha.calls.get(0).get("value_template"));
+        String shown = llm.calls.get(0).get(2).content();
+        assertTrue(shown.contains("\"value_template\":\"{{2.5}}\""), shown);
+        assertFalse(shown.contains("⟦task result"), shown);
+    }
+
+    @Test
+    @DisplayName("a number alone in braces naming a result there is, is a reference tried: refused on every path")
+    void aBareNumberIsAReferenceTried() {
+        var ctx = task();
+        ctx.addArtifact("list_mail", Map.of(), Map.of(), "[{\"body_text\":\"hi\"},{\"body_text\":\"ho\"}]", true, open());
+        ctx.addArtifact("fetch", Map.of(), Map.of(), "{\"ok\":true}", true, open());
+        ctx.addArtifact("fetch", Map.of(), Map.of(), "Connection refused", false, open());
+        var results = ctx.artifacts();
+        // An index into a list, a field an object lacks, a field of a failed result.
+        for (String bare : List.of("{{1.0}}", "{{1.1}}", "{{$1.0}}", "{{2.5}}", "{{3.0}}", "Index: {{1.0}}", "`{{3.0}}`")) {
+            var mine = References.resolveInText(Map.of("message", bare), results);
+            assertFalse(mine.ok(), bare + " went out as " + mine.params());
+            var cloud = References.resolveExactly(Map.of("message", bare), results, Map.of());
+            assertFalse(cloud.ok(), bare + " went out as " + cloud.params());
+            var nestedInCloud = References.resolveExactly(Map.of("data", Map.of("message", bare)), results, Map.of());
+            assertFalse(nestedInCloud.ok(), bare + " nested went out as " + nestedInCloud.params());
+        }
+        assertTrue(References.resolveInText(Map.of("message", "{{3.0}}"), results).reason().contains("FAILED"));
+        assertFalse(References.resolveInText(Map.of("data", Map.of("message", "{{1.0}}")), results).ok(),
+                "a whole nested value is refused, as {{1}} there is");
+        assertFalse(References.resolveExactly(Map.of("data", Map.of("{{1.0}}", "x")), results, Map.of()).ok(),
+                "a key written as one");
+        var text = assertThrows(IllegalArgumentException.class,
+                () -> LocalExecutor.parsePlan(Map.of("texts", Map.of("figure", "This year: {{1.0}}"))));
+        assertTrue(text.getMessage().contains("holds a reference ({{1.0}})"), text.getMessage());
+
+        // A template's text: a blank or an operator in the braces, a handle past the last result, or 0.
+        for (String template : List.of("{{ 2.4 }}", "{{1.5*x}}", "{{ 3.6 * states('sensor.x')|float }}", "{{9.5}}",
+                "{{0.5}}", "{{ 0.5 * states('sensor.x')|float }}", "Firmware {{ 1.0 }} or later")) {
+            var mine = References.resolveInText(Map.of("message", template), results);
+            assertTrue(mine.ok(), template + ": " + mine.reason());
+            assertEquals(template, mine.params().get("message"));
+            var nested = References.resolveInText(Map.of("data", Map.of("message", template)), results);
+            assertTrue(nested.ok(), template + " nested: " + nested.reason());
+            var cloud = References.resolveExactly(Map.of("data", List.of(template)), results, Map.of());
+            assertTrue(cloud.ok(), template + ": " + cloud.reason());
+            assertEquals(Map.of("data", List.of(template)), cloud.params());
+            if (!template.equals("{{9.5}}")) {
+                assertEquals(template, LocalExecutor.parsePlan(Map.of("texts", Map.of("t", template))).texts().get("t"));
+            }
+        }
+        // A text has no results to ask, and goes in as written: a number alone in braces is taken
+        // there as the reference it would be wherever a result has that handle.
+        assertThrows(IllegalArgumentException.class,
+                () -> LocalExecutor.parsePlan(Map.of("texts", Map.of("t", "{{9.5}}"))));
+        assertEquals(2, ArtifactRef.bareNumber("{{2.0}}"));
+        assertEquals(1, ArtifactRef.bareNumber("\"{{$1.25}}\""));
+        for (String more : List.of("{{ 2.4 }}", "{{2.4 }}", "{{1.5*x}}", "{{2}}", "{{1234567890.5}}", "{{2.}}", "plain")) {
+            assertEquals(0, ArtifactRef.bareNumber(more), more);
+        }
+        // Mutation: templateText true for every number expression -> {{1.0}} on the list goes out as braces.
+    }
+
     @Test
     @DisplayName("prose that mentions a task result is not the mark: only a result the model was shown as one is refused")
     void proseIsNotTheMark() {
