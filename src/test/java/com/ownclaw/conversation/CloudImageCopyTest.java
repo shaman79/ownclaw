@@ -292,7 +292,23 @@ class CloudImageCopyTest {
             assertTrue(peak < 400L << 20, crafted[0] + " took " + (peak >> 20) + " MB of heap");
             assertNotNull(result[0], crafted[0] + ": an answer");
         }
-        // Mutation: read the full resolution (no subsampling) -> gigabytes; no time limit -> minutes.
+        // Mutation: no time limit -> minutes.
+    }
+
+    @Test
+    @DisplayName("a picture far larger than its copy is read at a fraction of its pixels: the heap it takes is its copy's order, not its own")
+    void aLargePictureIsReadAtAFraction(@TempDir Path dir) throws Exception {
+        // Sixteen thousand rows of sixteen thousand grey pixels: 256 MB read whole, a gigabyte as RGB.
+        Path f = file(dir, "large.png", TestImages.uniformGreyPng(16000, 16000));
+        var result = new CloudImageCopy.Made[1];
+        long peak = heapPeak(() -> result[0] = CloudImageCopy.of(f, Duration.ofSeconds(25)));
+        var copy = result[0].copy();
+        assertNotNull(copy, result[0].privateBecause());
+        assertEquals(16000, copy.originalWidth());
+        assertEquals(copy.width(), copy.height());
+        assertTrue(copy.width() <= CloudImageCopy.MAX_EDGE, "within the tier: " + copy.width());
+        assertTrue(peak < 200L << 20, "read at a fraction of its pixels, not whole: " + (peak >> 20) + " MB of heap");
+        // Mutation: read every pixel (no subsampling) -> over a gigabyte before the copy is begun.
     }
 
     @Test
