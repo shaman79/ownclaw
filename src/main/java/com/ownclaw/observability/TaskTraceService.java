@@ -96,7 +96,7 @@ public class TaskTraceService {
         var pending = new ArrayList<Map<String, Object>>();
         var decisions = new LinkedHashMap<String, Integer>();
         long bytesOut = 0, prompt = 0, completion = 0, cacheRead = 0, cacheWrite = 0;
-        int scrubs = 0, identifiers = 0;
+        int scrubs = 0, identifiers = 0, imagesSent = 0;
         double cost = 0;
         boolean costIsFloor = false;
         long prevCloud = 0, prevLocal = 0, localAfterEnd = 0;
@@ -128,6 +128,7 @@ public class TaskTraceService {
                     scrubs += d.path("scrubs").asInt();
                     identifiers += d.path("identifiers").asInt();
                     cost += d.path("costUsd").asDouble();
+                    imagesSent += d.path("images").size();
                     // A failed call is recorded with at most what its stream had reported when
                     // it ended, so a total over it is a lower bound.
                     if (isError(c)) costIsFloor = true;
@@ -276,6 +277,8 @@ public class TaskTraceService {
         totals.put("cacheWriteTokens", cacheWrite);
         totals.put("scrubs", scrubs);
         totals.put("identifiers", identifiers);
+        // Images that left with a request: a refused one carries none (CloudGateway).
+        totals.put("images", imagesSent);
         totals.put("costUsd", cost);
         totals.put("costIsFloor", costIsFloor);
         totals.put("decisions", decisions);
@@ -342,6 +345,28 @@ public class TaskTraceService {
         c.put("stopReason", d.hasNonNull("stopReason") ? d.path("stopReason").asText() : null);
         c.put("messages", Map.of("count", msgCount, "chars", msgChars));
         c.put("tools", Map.of("count", toolCount, "chars", toolChars));
+        // The images it carried -- an image the owner pasted, which the filter does not read -- each
+        // by its file, type, pixel size, bytes and hash; and those it placed that were kept back.
+        var images = new ArrayList<Map<String, Object>>();
+        for (JsonNode i : d.path("images")) {
+            var image = new LinkedHashMap<String, Object>();
+            image.put("fileId", i.path("fileId").asText(null));
+            image.put("mediaType", i.path("mediaType").asText(null));
+            image.put("width", i.path("width").asInt());
+            image.put("height", i.path("height").asInt());
+            image.put("bytes", i.path("bytes").asLong());
+            image.put("sha256_16", i.path("sha256_16").asText(null));
+            images.add(image);
+        }
+        c.put("images", images);
+        var withheld = new ArrayList<Map<String, Object>>();
+        for (JsonNode w : d.path("withheld")) {
+            var one = new LinkedHashMap<String, Object>();
+            one.put("fileId", w.path("fileId").asText(null));
+            one.put("why", w.path("why").asText(null));
+            withheld.add(one);
+        }
+        c.put("withheld", withheld);
         return c;
     }
 
@@ -385,6 +410,18 @@ public class TaskTraceService {
         // Only an attachment's row has one: which file it is. Absent on rows from before it was
         // recorded.
         a.put("fileId", d.hasNonNull("fileId") ? d.path("fileId").asText() : null);
+        // An attachment's kind: a private file, or an image the owner pasted that the cloud model
+        // is shown, with the size it was pasted at and the size it is shown at. Absent on rows from
+        // before images were shown: every one of those is a private file.
+        if (d.hasNonNull("kind")) a.put("kind", d.path("kind").asText());
+        if (d.path("shownToCloud").asBoolean(false)) {
+            a.put("shownToCloud", true);
+            a.put("mediaType", d.path("mediaType").asText(null));
+            a.put("width", d.path("width").asInt());
+            a.put("height", d.path("height").asInt());
+            a.put("imageWidth", d.path("imageWidth").asInt());
+            a.put("imageHeight", d.path("imageHeight").asInt());
+        }
         return a;
     }
 

@@ -1645,6 +1645,14 @@ public class LocalExecutor {
             sb.append("  as the whole value or inside it -- and the exact text is put there when the\n");
             sb.append("  call runs. Never type a text out yourself.\n");
         }
+        if (!context.pasted().isEmpty()) {
+            // The cloud model is shown the images the owner pasted; this model is not, and would
+            // otherwise take the goal's "the screenshot" for something it can look at.
+            sb.append("- The image").append(context.pasted().size() == 1 ? " the user pasted is" : "s the user pasted are")
+              .append(" given to every tool you call (as _attached_files);\n");
+            sb.append("  you cannot see images yourself: only a tool reads ").append(context.pasted().size() == 1 ? "it" : "them")
+              .append(".\n");
+        }
         if (fileTask) {
             // The rule below is false here: a file task's results are withheld from the cloud,
             // so nothing is passed on underneath the summary, and the summary is what the user

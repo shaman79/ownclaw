@@ -543,41 +543,38 @@ class AnthropicProvider implements LlmProvider {
                 // Only in the message the engine marked (LlmMessage#marked), whose markers are all
                 // its own: marker-like bytes anywhere else are text, sent as they are -- split at,
                 // they would earn a fifth cache mark, and the API refuses a request with more than
-                // four. At the last boundary, which is the engine's.
-                int cut = msg.marked() && content != null ? content.lastIndexOf(LlmMessage.CACHE_BOUNDARY) : -1;
-                if (cut > 0) {
+                // four. At the last boundary, which is the engine's: LlmMessage#layout, the reading
+                // the gateway decided this message's images by.
+                LlmMessage.Layout layout = msg.marked() ? LlmMessage.layout(content) : null;
+                if (layout != null) {
                     // The task, then -- on the first step -- what changes on every step, as two
                     // blocks with the cache mark on the first. On every later step the task is
                     // the same bytes, so it is read from the cache instead of paid for again --
                     // as one block it was re-sent in full, and then written to the cache as well.
                     stable = true;
                     ArrayNode blocks = m.putArray("content");
-                    String task = content.substring(0, cut);
                     // Before it, the chat the task came from, a block for each of its messages and
                     // the hour mark on the last: on the chat's next turn they are the same bytes a
                     // block apart, and the request reads them back -- the API looks back twenty
                     // blocks from a mark for what an earlier request cached, and a turn adds two
-                    // messages. The engine marks the chat (ThinkingEngine#anthropicTask) and takes
-                    // every marker out of the text it puts there, so the first end marker is its own.
-                    int chatEnd = task.indexOf(LlmMessage.HISTORY_END);
-                    if (chatEnd >= 0) {
-                        ObjectNode last = null;
-                        for (String message : task.substring(0, chatEnd).split(
-                                java.util.regex.Pattern.quote(LlmMessage.HISTORY_BLOCK), -1)) {
-                            // The API refuses a block of nothing but blanks; no message is one.
-                            if (!message.isBlank()) last = textBlock(blocks, read(message));
-                        }
-                        if (last != null) last.set("cache_control", cacheControl(true));
-                        task = task.substring(chatEnd + LlmMessage.HISTORY_END.length());
+                    // messages. An image pasted with a message is an image block before its text,
+                    // among that message's blocks: no mark of its own, and the same bytes on every
+                    // turn, read from the same copy.
+                    ObjectNode last = null;
+                    for (var message : layout.chat()) {
+                        ObjectNode b = blocks(blocks, message, msg.images());
+                        if (b != null) last = b;
                     }
-                    if (!task.isBlank()) textBlock(blocks, read(task)).set("cache_control", cacheControl(true));
-                    String rest = content.substring(cut + LlmMessage.CACHE_BOUNDARY.length());
-                    if (!rest.isBlank()) textBlock(blocks, read(rest));
+                    if (last != null) last.set("cache_control", cacheControl(true));
+                    ObjectNode task = blocks(blocks, layout.task(), msg.images());
+                    if (task != null) task.set("cache_control", cacheControl(true));
+                    if (!layout.rest().isBlank()) textBlock(blocks, layout.rest());
                 } else {
                     // A marked message with its boundary gone -- a private key with no END line
                     // removes to the end of the text, the markers in it too -- goes as the text the
-                    // model reads: that chat loses its blocks for the turn, and no marker is sent.
-                    m.put("content", msg.marked() ? read(content) : content);
+                    // model reads: that chat loses its blocks for the turn, and no marker is sent,
+                    // nor any image (the gateway sent it none: CloudGateway#images).
+                    m.put("content", msg.marked() ? LlmMessage.plain(content) : content);
                 }
             }
         }
@@ -659,14 +656,41 @@ class AnthropicProvider implements LlmProvider {
     }
 
     /**
-     * A piece of the engine's marked message as it is sent: no marker in it, and no marker's
-     * control character either. What the filter removed can have taken some of the markers with
-     * it -- the chat's end, say, and not the boundary -- and the text left between those still
-     * standing holds the rest; the engine put the character in nothing else
-     * (LlmMessage#unmarked), so nothing else of the text goes with it.
+     * What the model reads where an image stands that the gateway sent no bytes for -- it withheld
+     * it (CloudGateway#images): the task's text says an image is shown there, and the model is not
+     * left to think it is looking at one.
      */
-    private static String read(String piece) {
-        return LlmMessage.unmarked(LlmMessage.asRead(piece));
+    static final String IMAGE_NOT_SENT = "[An image was pasted here. It was not sent with this request.]";
+
+    /**
+     * A block's pieces added to {@code blocks} ({@link LlmMessage#pieces}): each text as a text
+     * block, and each image the gateway attached bytes to as an image block, where it stands --
+     * the bytes base64-encoded, in Anthropic's form. An image with none -- one the gateway withheld
+     * -- is a line saying so instead ({@link #IMAGE_NOT_SENT}). Returns the last block added, which
+     * a cache mark goes on, or null for none.
+     */
+    private static ObjectNode blocks(ArrayNode blocks, List<LlmMessage.Piece> pieces, List<LlmMessage.Image> images) {
+        ObjectNode last = null;
+        for (LlmMessage.Piece piece : pieces) {
+            if (piece instanceof LlmMessage.Text text) {
+                last = textBlock(blocks, text.text());
+            } else if (piece instanceof LlmMessage.Picture picture) {
+                int i = picture.index();
+                LlmMessage.Sent sent = i < images.size() ? images.get(i).sent() : null;
+                if (sent == null) {
+                    last = textBlock(blocks, IMAGE_NOT_SENT);
+                    continue;
+                }
+                ObjectNode block = blocks.addObject();
+                block.put("type", "image");
+                ObjectNode source = block.putObject("source");
+                source.put("type", "base64");
+                source.put("media_type", sent.mediaType());
+                source.put("data", sent.base64());
+                last = block;
+            }
+        }
+        return last;
     }
 
     /** A text block of {@code text}, added to {@code blocks}. */
@@ -802,4 +826,12 @@ class AnthropicProvider implements LlmProvider {
 
     @Override
     public String model() { return config.getAnthropicModel(); }
+
+    /** The configured model's window, once the Models API has described it to this process. */
+    @Override
+    public Integer knownContextWindow() {
+        String model = config.getAnthropicModel();
+        ModelLimits known = model == null ? null : limits.get(model);
+        return known == null ? null : known.contextWindow();
+    }
 }

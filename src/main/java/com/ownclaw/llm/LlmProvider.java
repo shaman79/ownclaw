@@ -50,4 +50,12 @@ public interface LlmProvider {
      * than guessed.
      */
     default String model() { return null; }
+
+    /**
+     * The configured model's context window in tokens, when this provider already knows it without
+     * asking anyone -- Anthropic's from the Models API answer it keeps -- or null. Read to tell
+     * which per-request image count the API takes (100 on a 200k window, 600 on a larger one), so
+     * it never makes a call of its own.
+     */
+    default Integer knownContextWindow() { return null; }
 }

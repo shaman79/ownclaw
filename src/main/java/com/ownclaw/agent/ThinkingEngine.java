@@ -64,6 +64,18 @@ public class ThinkingEngine {
         StepMode mode = stepMode(context, provider);
         boolean nativeTools = mode.nativeTools();
 
+        // A request takes so many images, and so many bytes of them, at most: past that the chat's
+        // oldest are shown by their lines alone (AgentContext#fitImages), before the request is
+        // written -- the count by the model's window, as far as the provider knows it already.
+        if ("anthropic".equals(provider.name())) {
+            int folded = context.fitImages(LlmMessage.imagesPerRequest(provider.knownContextWindow()),
+                    LlmMessage.IMAGE_BYTES_PER_REQUEST);
+            if (folded > 0) {
+                log.info("Task {}: {} of the chat's oldest images are shown by their lines alone, to keep the "
+                        + "request within the API's image limits", context.taskId(), folded);
+                context.chat().imagesFolded(folded);
+            }
+        }
         List<LlmMessage> messages = buildMessages(context, provider.name(), mode);
 
         LlmRequestConfig requestConfig = new LlmRequestConfig(
@@ -93,7 +105,8 @@ public class ThinkingEngine {
         }
         // Measured before it is sent: a request too long for the model's window is folded by
         // this measure (AgentContext#fitToWindow).
-        context.requestSize(requestChars(messages, requestConfig.tools()), provider.name() + "/" + provider.model());
+        context.requestSize(requestChars(messages, requestConfig.tools()), provider.name() + "/" + provider.model(),
+                messages.stream().anyMatch(m -> !m.images().isEmpty()));
 
         // The task's progress hook keeps its stall watchdog from taking a long call for silence,
         // and lets its Stop end it; the call's own keeps what the owner is shown of it while it
@@ -281,6 +294,8 @@ public class ThinkingEngine {
         var offered = new java.util.HashSet<String>();
         for (LlmMessage m : messages) {
             n += m.content() == null ? 0 : m.content().length();
+            // An image as the model reads it: its visual tokens, in characters as ContextFit weighs them.
+            for (LlmMessage.Image image : m.images()) n += (long) Math.ceil(image.tokens() * ContextFit.CHARS_PER_TOKEN);
             offered.addAll(m.addedTools());
         }
         if (tools != null) {
@@ -321,7 +336,7 @@ public class ThinkingEngine {
             // Every other provider: the task, then every step in one history message. Where the
             // TOOLS messages sit does not matter to these providers, only their order
             // (ToolSpec#offered): after the task.
-            String task = buildUserMessage(context);
+            String task = buildUserMessage(context, mode.local() ? Vision.LOCAL : Vision.NOT_SENT);
             String step = "\n\n---\n" + buildDynamicContext(context, mode);
             AgentTrajectory trajectory = context.trajectory();
             if (trajectory.isEmpty()) {
@@ -391,7 +406,8 @@ public class ThinkingEngine {
         var added = toolsAdded(context, mode);
         int next = 0;
         int steps = 0;
-        var user = new StringBuilder(anthropicTask(context)).append(CACHE_BOUNDARY_MARKER);
+        AnthropicTask task = anthropicTask(context);
+        var user = new StringBuilder(task.text()).append(CACHE_BOUNDARY_MARKER);
         // The first message is the engine's marked one (LlmMessage#marked): every marker in it is
         // the engine's, so every text put after the boundary goes in unmarked too.
         boolean first = true;
@@ -404,7 +420,7 @@ public class ThinkingEngine {
                 steps++;
                 continue;
             }
-            messages.add(first ? LlmMessage.marked(user.toString()) : LlmMessage.user(user.toString()));
+            messages.add(first ? LlmMessage.marked(user.toString(), task.images()) : LlmMessage.user(user.toString()));
             first = false;
             next = withToolsAdded(messages, added, next, steps);
             messages.add(LlmMessage.assistant(turn.actionText(!context.earlierWordsWithheld())));
@@ -413,7 +429,7 @@ public class ThinkingEngine {
         }
         String step = buildDynamicContext(context, mode);
         user.append("\n\n---\n").append(first ? LlmMessage.unmarked(step) : step);
-        messages.add(first ? LlmMessage.marked(user.toString()) : LlmMessage.user(user.toString()));
+        messages.add(first ? LlmMessage.marked(user.toString(), task.images()) : LlmMessage.user(user.toString()));
         withToolsAdded(messages, added, next, Integer.MAX_VALUE);
     }
 
@@ -1027,7 +1043,7 @@ public class ThinkingEngine {
     /**
      * Build the user message containing the original request and conversation context.
      */
-    private String buildUserMessage(AgentContext context) {
+    private String buildUserMessage(AgentContext context, Vision vision) {
         var sb = new StringBuilder();
 
         // Conversation summary for context
@@ -1043,6 +1059,8 @@ public class ThinkingEngine {
 
         String files = filesSection(context);
         if (!files.isEmpty()) sb.append("\n\n").append(files);
+        String images = imagesSection(context, vision, 0);
+        if (!images.isEmpty()) sb.append("\n\n").append(images);
 
         return sb.toString();
     }
@@ -1062,15 +1080,24 @@ public class ThinkingEngine {
      * chat's and the task's text go in through {@link LlmMessage#unmarked}, so that nothing a user,
      * a tool or a page wrote is taken for a marker.
      */
-    String anthropicTask(AgentContext context) {
+    AnthropicTask anthropicTask(AgentContext context) {
         var sb = new StringBuilder();
+        var images = new ArrayList<LlmMessage.Image>();
         List<String> chat = context.conversationShownMessages();
         String shown = context.conversationShown();
+        int chatImages = 0;
         // The chat's messages where the chat is shown at all: what buildUserMessage shows, no more.
         if (shown != null && !shown.isBlank() && !chat.isEmpty()) {
             sb.append("## Prior Context\n").append(AgentContext.CONVERSATION_HEADER);
             for (int i = 0; i < chat.size(); i++) {
                 if (i > 0) sb.append(LlmMessage.HISTORY_BLOCK);
+                // The images pasted with it, before its text: the same marker for the same image on
+                // the chat's every turn, so its blocks are the same bytes.
+                for (var image : context.conversationImagesShown(i)) {
+                    sb.append(LlmMessage.image(images.size()));
+                    images.add(placed(image));
+                    chatImages++;
+                }
                 sb.append(LlmMessage.unmarked(chat.get(i)));
             }
             // A blank line before the task, as buildUserMessage writes: a message ends its line.
@@ -1081,9 +1108,94 @@ public class ThinkingEngine {
         }
         sb.append(LlmMessage.unmarked(preferences(context)));
         sb.append("## Task\n");
+        // The images pasted with this message, before its text.
+        for (var p : context.pasted()) {
+            sb.append(LlmMessage.image(images.size()));
+            images.add(placed(p.image()));
+        }
         sb.append(LlmMessage.unmarked(context.originalMessage()));
         String files = filesSection(context);
         if (!files.isEmpty()) sb.append("\n\n").append(LlmMessage.unmarked(files));
+        String imagesSection = imagesSection(context, Vision.SHOWN, chatImages);
+        if (!imagesSection.isEmpty()) sb.append("\n\n").append(LlmMessage.unmarked(imagesSection));
+        return new AnthropicTask(sb.toString(), images);
+    }
+
+    /**
+     * The task as {@link #anthropicTask} writes it, and the images it places: by index, as its image
+     * markers name them ({@link LlmMessage#image}).
+     */
+    record AnthropicTask(String text, List<LlmMessage.Image> images) {}
+
+    /** An image as a request places it: by its file, with its copy's size. The gateway reads the bytes. */
+    private static LlmMessage.Image placed(com.ownclaw.conversation.FileStorageService.PastedImage image) {
+        return new LlmMessage.Image(image.fileId(), image.width(), image.height(), image.bytes());
+    }
+
+    /** Whether the model a request goes to is shown images, and if not, why not. */
+    enum Vision {
+        /** Anthropic: each image, before the text it came with. */
+        SHOWN,
+        /** The local model, which cannot see images. */
+        LOCAL,
+        /** Another cloud provider: it is sent none. */
+        NOT_SENT
+    }
+
+    /**
+     * The images pasted with this message, as the model may know them -- a handle, the type, the
+     * pasted size and, where it is shown them, the size it is shown at -- and those pasted earlier in
+     * the chat: shown or not, and why. Never a name. Facts, as {@link #filesSection} is: what to plan
+     * for. Empty when the message and its chat hold no image.
+     *
+     * @param chatShown how many of the chat's images the request shows, on {@link Vision#SHOWN}
+     */
+    static String imagesSection(AgentContext context, Vision vision, int chatShown) {
+        var pasted = context.pasted();
+        int chatTotal = context.conversationImageCount();
+        if (pasted.isEmpty() && chatTotal == 0) return "";
+        var sb = new StringBuilder();
+        if (!pasted.isEmpty()) {
+            sb.append("## Images pasted with this message\n");
+            for (var p : pasted) {
+                var image = p.image();
+                sb.append("- ").append(p.artifact().handle()).append(": ").append(image.contentType()).append(", ")
+                  .append(image.originalWidth()).append('x').append(image.originalHeight()).append(" px");
+                if (vision == Vision.SHOWN) {
+                    sb.append(", shown to you above the message");
+                    if (image.width() != image.originalWidth() || image.height() != image.originalHeight()) {
+                        sb.append(" at ").append(image.width()).append('x').append(image.height()).append(" px");
+                    }
+                }
+                sb.append('\n');
+            }
+            sb.append(switch (vision) {
+                case SHOWN -> "";
+                case LOCAL -> "You cannot see images, so it is not shown to you. ";
+                case NOT_SENT -> "Images are not sent to this model, so it is not shown to you. ";
+            });
+            sb.append("Every skill run in this task is given each whole, at its own size, in params._attached_files, ")
+              .append("a list of {id, name, content_type, path, container_path}.");
+            if (vision == Vision.SHOWN) {
+                sb.append(" The local model cannot see images: a delegation is not shown one, so put what it needs ")
+                  .append("from an image in its goal, or name a skill that reads the file.");
+            }
+            sb.append('\n');
+        }
+        if (chatTotal > 0) {
+            if (!pasted.isEmpty()) sb.append('\n');
+            sb.append(switch (vision) {
+                case SHOWN -> chatShown == chatTotal
+                        ? "Each image pasted earlier in this chat is shown to you above the message it was pasted with."
+                        : chatShown + " of the " + chatTotal + " images pasted earlier in this chat are shown to you, "
+                                + "each above the message it was pasted with; the oldest " + (chatTotal - chatShown)
+                                + " are not, to keep this request within what the model takes -- each message still "
+                                + "says an image was pasted with it.";
+                case LOCAL -> "You cannot see images: none pasted earlier in this chat is shown to you.";
+                case NOT_SENT -> "Images are not sent to this model: none pasted earlier in this chat is shown to you.";
+            });
+            sb.append(" Skills are given only the images and files sent with this message.\n");
+        }
         return sb.toString();
     }
 

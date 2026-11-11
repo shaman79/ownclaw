@@ -32,6 +32,10 @@ import java.util.concurrent.TimeUnit;
 @Component
 public class OllamaProvider implements LlmProvider {
 
+    /** Why the local model is shown no image: in its own words, wherever one would stand. */
+    public static final String CANNOT_SEE_IMAGES = "the local model cannot see images";
+
+
     private static final Logger log = LoggerFactory.getLogger(OllamaProvider.class);
     private static final MediaType JSON = MediaType.get("application/json");
 
@@ -294,7 +298,9 @@ public class OllamaProvider implements LlmProvider {
             }
             ObjectNode m = msgs.addObject();
             m.put("role", msg.role().apiValue());
-            m.put("content", msg.content());
+            // The local model cannot see images, and is sent none: a marked message -- which the
+            // engine writes only for Anthropic -- goes with no marker, each image a line saying so.
+            m.put("content", msg.marked() ? LlmMessage.textOnly(msg.content(), CANNOT_SEE_IMAGES) : msg.content());
         }
         if (!described) {
             msgs.addObject().put("role", "system").put("content", TextToolCalls.system(offered, null));

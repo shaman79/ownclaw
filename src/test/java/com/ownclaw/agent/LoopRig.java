@@ -187,8 +187,9 @@ final class LoopRig {
         files = new FileStorageService(jdbc, config);
         chat = new ConversationService(jdbc);
         var redactor = new Redactor(jdbc);
+        // The real image store behind the door, as Spring wires it: a pasted image is read from its file.
         var gateway = new CloudGateway(cloud, cloud, config, new EventEgressLedger(events, new ObjectMapper()), null,
-                redactor);
+                redactor, files);
         var router = new LlmRouter(local, gateway, config, null);
         var registry = new ToolRegistry(tools);
         vault = new CredentialVault(jdbc);
@@ -207,8 +208,13 @@ final class LoopRig {
 
     /** A chat turn, saved the way the web chat saves one; the session is created on first use. */
     AgentResult turn(String session, String text) {
-        String row = chat.saveMessage("u1", session, "user", text);
-        AgentResult r = loop.executeFull("u1", text, false, row, List.of(), TaskChat.Channel.WEB);
+        return turn(session, text, List.<String>of());
+    }
+
+    /** A chat turn sent with these files, saved with them the way the web chat saves one. */
+    AgentResult turn(String session, String text, List<String> attachmentIds) {
+        String row = chat.saveMessage("u1", session, "user", text, attachmentIds);
+        AgentResult r = loop.executeFull("u1", text, false, row, attachmentIds, TaskChat.Channel.WEB);
         chat.saveMessage("u1", session, "assistant", r.response(), List.of(), r.taskId(), r.ownerText());
         return r;
     }
@@ -219,8 +225,14 @@ final class LoopRig {
      * on what the message was sent with; its answer saved.
      */
     AgentResult turn(String session, String text, com.ownclaw.conversation.ChatOptions sentWith) {
-        String row = chat.saveMessage("u1", session, "user", text);
-        return queue.runChat(new com.ownclaw.core.UserMessage("u1", session, row, text, List.of(),
+        return turn(session, text, sentWith, List.of());
+    }
+
+    /** {@link #turn(String, String, com.ownclaw.conversation.ChatOptions)}, sent with these files. */
+    AgentResult turn(String session, String text, com.ownclaw.conversation.ChatOptions sentWith,
+                     List<String> attachmentIds) {
+        String row = chat.saveMessage("u1", session, "user", text, attachmentIds);
+        return queue.runChat(new com.ownclaw.core.UserMessage("u1", session, row, text, attachmentIds,
                 TaskChat.Channel.WEB, sentWith, r -> chat.saveAnswer("u1", session, r)));
     }
 

@@ -90,10 +90,20 @@ public class AgentContext {
     private String callsNotRun;
 
     /**
-     * The files sent with this message, as registered: each one this user's, each a PRIVATE
-     * artifact. See {@link #addFile}.
+     * The files sent with this message, as registered, in the order they came, each one this
+     * user's: a private file ({@link #addFile}), a PRIVATE artifact that makes every result of the
+     * task PRIVATE ({@link #decide}); or an image the owner pasted, which the cloud model is shown
+     * ({@link #addPastedImage}), a PUBLIC artifact that does not. Skills are handed both
+     * ({@link #attachmentIds}). One list, so what a skill is given and what is labelled by cannot
+     * drift apart: {@link #files} and {@link #pasted} are views of it.
      */
-    private final List<Artifact> files = new java.util.ArrayList<>();
+    private final List<Pasted> attachments = new java.util.ArrayList<>();
+
+    /**
+     * A file sent with this message, as registered: its artifact, and -- for an image the owner
+     * pasted, shown to the cloud model -- the image; null for a private file.
+     */
+    public record Pasted(Artifact artifact, com.ownclaw.conversation.FileStorageService.PastedImage image) {}
 
     // ── the task's results, and what may be said about them ──
 
@@ -334,7 +344,92 @@ public class AgentContext {
     private final Map<Integer, ContextFit.ChatFold> chatFolded = new HashMap<>();
 
     public synchronized void setConversation(List<String> messages) {
+        setConversation(messages, Map.of());
+    }
+
+    /**
+     * The chat's messages, and the images pasted with each, by the message's index: images the
+     * cloud model is shown, each before the text of the message it came with
+     * ({@code ThinkingEngine#anthropicTask}) -- the message's text says one was pasted there either way.
+     */
+    public synchronized void setConversation(List<String> messages,
+                                             Map<Integer, List<com.ownclaw.conversation.FileStorageService.PastedImage>> images) {
         conversation = List.copyOf(messages);
+        var flat = new java.util.ArrayList<ChatImage>();
+        for (int i = 0; i < conversation.size(); i++) {
+            for (var image : images.getOrDefault(i, List.of())) flat.add(new ChatImage(i, image));
+        }
+        chatImages = List.copyOf(flat);
+        chatImagesFolded = 0;
+    }
+
+    /** An image pasted with message {@code message} of the chat. */
+    private record ChatImage(int message, com.ownclaw.conversation.FileStorageService.PastedImage image) {}
+
+    /** The chat's images, oldest first. */
+    private List<ChatImage> chatImages = List.of();
+
+    /**
+     * How many of the chat's images, from the oldest, are shown by their lines alone, to keep a
+     * request within what the API takes ({@link #fitImages}): a run from the oldest, so a number.
+     */
+    private int chatImagesFolded;
+
+    /** Every image pasted with message {@code message} of the chat, shown or not. */
+    public synchronized List<com.ownclaw.conversation.FileStorageService.PastedImage> conversationImages(int message) {
+        return chatImages.stream().filter(c -> c.message() == message).map(ChatImage::image).toList();
+    }
+
+    /**
+     * The images of message {@code message} of the chat a request shows the cloud model, before its
+     * text: none once the message is folded to a line ({@link #fit}), and none of the oldest that
+     * the API's limits leave no room for ({@link #fitImages}).
+     */
+    public synchronized List<com.ownclaw.conversation.FileStorageService.PastedImage> conversationImagesShown(int message) {
+        ContextFit.ChatFold fold = chatFolded.get(message);
+        if (fold != null && fold.line()) return List.of();
+        var out = new java.util.ArrayList<com.ownclaw.conversation.FileStorageService.PastedImage>();
+        for (int k = chatImagesFolded; k < chatImages.size(); k++) {
+            if (chatImages.get(k).message() == message) out.add(chatImages.get(k).image());
+        }
+        return out;
+    }
+
+    /** How many images the chat holds. */
+    public synchronized int conversationImageCount() {
+        return chatImages.size();
+    }
+
+    /**
+     * Fold the chat's oldest images to their lines -- each message still says an image was pasted
+     * with it -- until a request's images are within what the Messages API takes: {@code maxImages}
+     * images and {@code maxBytes} of them base64-encoded, this message's own counted first. Those
+     * are never folded. Folded, an image stays so for the rest of the task, so its requests stay the
+     * same bytes. Returns how many were folded now.
+     */
+    public synchronized int fitImages(int maxImages, long maxBytes) {
+        int count = 0;
+        long bytes = 0;
+        for (Pasted p : pasted()) {
+            count++;
+            bytes += com.ownclaw.llm.LlmMessage.Image.base64Bytes(p.image().bytes());
+        }
+        var shown = new java.util.ArrayList<Integer>();
+        for (int k = chatImagesFolded; k < chatImages.size(); k++) {
+            ContextFit.ChatFold fold = chatFolded.get(chatImages.get(k).message());
+            if (fold != null && fold.line()) continue;
+            shown.add(k);
+            count++;
+            bytes += com.ownclaw.llm.LlmMessage.Image.base64Bytes(chatImages.get(k).image().bytes());
+        }
+        int before = chatImagesFolded;
+        for (int k : shown) {
+            if (count <= maxImages && bytes <= maxBytes) break;
+            count--;
+            bytes -= com.ownclaw.llm.LlmMessage.Image.base64Bytes(chatImages.get(k).image().bytes());
+            chatImagesFolded = k + 1;
+        }
+        return chatImagesFolded - before;
     }
 
     /** The chat's messages, whole, in order. */
@@ -624,24 +719,47 @@ public class AgentContext {
         Artifact a = addArtifact("attachment", Map.of("fileId", fileId), Map.of("fileId", fileId),
                 text == null ? "" : text, true,
                 new Artifact.Decision(com.ownclaw.privacy.Label.PRIVATE, why));
-        files.add(a);
+        attachments.add(new Pasted(a, null));
         return a;
     }
 
-    /** The files registered for this task, in order — a read-only view. */
-    public List<Artifact> files() {
-        return java.util.Collections.unmodifiableList(files);
+    /**
+     * Register an image the owner pasted into the web chat box, which the cloud model is shown --
+     * its file marked so when it was uploaded (FileStorageService): a PUBLIC artifact, with no text.
+     * Every skill is handed it as it is handed a file ({@link #attachmentIds}), and it makes no
+     * result private: the cloud model sees the picture itself, so what a skill reads from it is
+     * nothing the cloud has not been shown. A private file sent with it still makes every result
+     * private ({@link #decide}).
+     */
+    public synchronized Artifact addPastedImage(com.ownclaw.conversation.FileStorageService.PastedImage image,
+                                                List<String> why) {
+        Artifact a = addArtifact("attachment", Map.of("fileId", image.fileId()), Map.of("fileId", image.fileId()),
+                "", true, new Artifact.Decision(com.ownclaw.privacy.Label.PUBLIC, why));
+        attachments.add(new Pasted(a, image));
+        return a;
+    }
+
+    /** The private files registered for this task, in order: what makes every result of it PRIVATE. */
+    public synchronized List<Artifact> files() {
+        return attachments.stream().filter(p -> p.image() == null).map(Pasted::artifact).toList();
+    }
+
+    /** The images pasted with this message, shown to the cloud model, in order. */
+    public synchronized List<Pasted> pasted() {
+        return attachments.stream().filter(p -> p.image() != null).toList();
     }
 
     /**
-     * The ids of the registered files: what every skill is handed as {@code _attached_files}.
+     * The ids of the registered files, private ones and pasted images, in the order they came:
+     * what every skill is handed as {@code _attached_files}.
      * <p>
-     * Derived from {@link #files()} rather than set beside it, so the list a skill is given and
-     * the list {@link #decide} labels by are one list and cannot drift apart. An id that was
-     * not registered -- missing, or another user's file -- is never handed to a skill.
+     * Derived from the one list {@link #files()} and {@link #pasted()} are views of, rather than
+     * set beside it, so the list a skill is given and the list {@link #decide} labels by cannot
+     * drift apart. An id that was not registered -- missing, or another user's file -- is never
+     * handed to a skill.
      */
-    public List<String> attachmentIds() {
-        return files.stream().map(f -> String.valueOf(f.written().get("fileId"))).toList();
+    public synchronized List<String> attachmentIds() {
+        return attachments.stream().map(p -> String.valueOf(p.artifact().written().get("fileId"))).toList();
     }
 
     /**
@@ -659,6 +777,16 @@ public class AgentContext {
                     shown.onProgress(message, percent);
                 },
                 attachmentIds());
+    }
+
+    /** Whether the chat has been told the pasted images are not seen on the local model ({@code AgentLoop#imagesNotSeen}). */
+    private boolean imagesNotSeenTold;
+
+    /** True the first time only: the chat is told once. */
+    synchronized boolean imagesNotSeenTold() {
+        if (imagesNotSeenTold) return false;
+        imagesNotSeenTold = true;
+        return true;
     }
 
     // ── artifacts ──
@@ -691,8 +819,9 @@ public class AgentContext {
      * what it read. Such a result is not indexed for the canary, and neither is one that is
      * PRIVATE only because it pulled in such a result: its bytes are the same public page one hop
      * on, and indexing them is what made the cloud's own later fetch of that page trip the
-     * canary. In a task holding a file every result is PRIVATE and unindexed -- so the cloud sees
-     * each as a handle, a kind and a size.
+     * canary. In a task holding a private file every result is PRIVATE and unindexed -- so the
+     * cloud sees each as a handle, a kind and a size. An image the owner pasted is no such file: the
+     * cloud model is shown it ({@link #addPastedImage}).
      * <p>
      * Last, the bytes themselves: a result its own facts call PUBLIC whose {@code output} repeats
      * a PRIVATE one ({@link #firstLeakIn}) is PRIVATE -- "repeats {{N}}" -- and unindexed, like
@@ -724,9 +853,10 @@ public class AgentContext {
             // Every skill run in a task holding a file is handed it, and can reach it without a
             // reference -- through _attached_files, or by opening the uploads directory itself --
             // so what it returns is the file's as far as anyone can tell.
+            List<Artifact> files = files();
             if (!files.isEmpty()) {
                 return new Artifact.Decision(com.ownclaw.privacy.Label.PRIVATE,
-                        List.of(givenTheFiles()), false);
+                        List.of(givenTheFiles(files)), false);
             }
             com.ownclaw.privacy.PrivateIndex.Hit repeated = firstLeakIn(output);
             if (repeated != null) {
@@ -741,13 +871,13 @@ public class AgentContext {
         // file's data. References still resolve; the cloud forwards the whole {{N}} instead of a
         // field. (What the local model writes after reading such a result is checked against it
         // all the same: LocalExecutor.recordAnswer.)
-        boolean unindexed = !files.isEmpty() || (!personal && used != null
+        boolean unindexed = !files().isEmpty() || (!personal && used != null
                 && used.stream().filter(Artifact::isPrivate).noneMatch(Artifact::indexed));
         return unindexed ? new Artifact.Decision(own.label(), own.why(), false) : own;
     }
 
     /** "given the file {{1}}" -- the reason, by handle, never by name. */
-    private String givenTheFiles() {
+    private static String givenTheFiles(List<Artifact> files) {
         return (files.size() == 1 ? "given the file " : "given the files ")
                 + String.join(", ", files.stream().map(Artifact::handle).toList());
     }
@@ -857,6 +987,15 @@ public class AgentContext {
      * window's worth read on the local model overflows it ({@link #readChunk}).
      */
     public synchronized void requestSize(long chars, String model) {
+        requestSize(chars, model, false);
+    }
+
+    /**
+     * {@link #requestSize(long, String)} of a request that carried images, or did not: a fold then
+     * counts what folding a chat message frees of its images only where they were sent.
+     */
+    public synchronized void requestSize(long chars, String model, boolean images) {
+        lastRequestImages = images;
         lastRequestChars = chars;
         if (fitModel != null && !fitModel.equals(model)) {
             fitBudget = 0;
@@ -867,8 +1006,11 @@ public class AgentContext {
 
     /** {@link #requestSize(long, String)} to the model of the last request. */
     public void requestSize(long chars) {
-        requestSize(chars, lastModel);
+        requestSize(chars, lastModel, lastRequestImages);
     }
+
+    /** Whether the last request carried images ({@link #requestSize(long, String, boolean)}). */
+    private boolean lastRequestImages;
 
     private String lastModel;
 
@@ -932,8 +1074,14 @@ public class AgentContext {
      * ({@link ContextFit#planChat}). Returns what was folded; nothing when nothing is left to fold.
      */
     public synchronized ContextFit.Folded fit(Integer window) {
+        // A chat message's images count towards it, as the model reads them; a message folded to a
+        // line shows them no longer (conversationImagesShown).
         var plan = ContextFit.plan(trajectory.turns(), folded, conversation, chatFolded, lastRequestChars,
-                window, fitRounds, this::readable);
+                window, fitRounds, this::readable,
+                i -> !lastRequestImages ? 0L : (long) Math.ceil(conversationImagesShown(i).stream()
+                        .mapToLong(im -> com.ownclaw.llm.LlmMessage.Image.tokens(im.width(), im.height())).sum()
+                        * ContextFit.CHARS_PER_TOKEN),
+                i -> conversationImages(i).size());
         if (plan.isEmpty()) return plan;
         fitBudget = window != null && window > 0 ? (long) (window * ContextFit.CHARS_PER_TOKEN)
                 : ContextFit.target(lastRequestChars, null, fitRounds);

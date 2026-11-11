@@ -55,11 +55,24 @@ public class TaskTraceController {
      */
     @SuppressWarnings("unchecked")
     private Map<String, Object> withFileNames(Map<String, Object> trace, String userId) {
-        for (Map<String, Object> a : (List<Map<String, Object>>) trace.get("artifacts")) {
-            Object id = a.get("fileId");
-            Map<String, Object> file = id == null ? null : files.getFileInfo(String.valueOf(id));
-            if (file != null && userId.equals(file.get("user_id"))) a.put("name", file.get("original_name"));
+        for (Map<String, Object> a : (List<Map<String, Object>>) trace.get("artifacts")) named(a, userId);
+        // And each image a request carried, or kept back: which of the owner's pasted images it was.
+        if (trace.get("calls") instanceof List<?> calls) {
+            for (Object c : calls) {
+                for (String list : List.of("images", "withheld")) {
+                    if (((Map<String, Object>) c).get(list) instanceof List<?> items) {
+                        for (Object item : items) named((Map<String, Object>) item, userId);
+                    }
+                }
+            }
         }
         return trace;
+    }
+
+    /** {@code item} with the name of the file its {@code fileId} names, when that is this user's file. */
+    private void named(Map<String, Object> item, String userId) {
+        Object id = item.get("fileId");
+        Map<String, Object> file = id == null ? null : files.getFileInfo(String.valueOf(id));
+        if (file != null && userId.equals(file.get("user_id"))) item.put("name", file.get("original_name"));
     }
 }

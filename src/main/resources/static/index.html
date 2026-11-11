@@ -1114,6 +1114,15 @@
         .file-chip-remove:hover { color: var(--red); background: var(--red-dim) }
         .file-chip-remove svg { width: 10px; height: 10px; fill: currentColor }
 
+        /* A pasted image's chip says who sees it: the cloud model, nobody (Free), or it stays private. */
+        .file-chip.pasted { max-width: 360px }
+        .file-chip-seen {
+            white-space: nowrap;
+            flex-shrink: 0;
+            font-size: 11px;
+            color: var(--text-3);
+        }
+
         .file-chip.uploading {
             opacity: .6;
         }
@@ -2823,7 +2832,7 @@
             </select>
         </label>
     </div>
-    <div class="input-hint"><span id="hint-keys">Enter to send &nbsp;&middot;&nbsp; Shift+Enter for new line</span> &nbsp;&middot;&nbsp; Drag &amp; drop, paste or 📎 to attach files — they stay private &nbsp;&middot;&nbsp; <strong>/help</strong> for commands</div>
+    <div class="input-hint"><span id="hint-keys">Enter to send &nbsp;&middot;&nbsp; Shift+Enter for new line</span> &nbsp;&middot;&nbsp; Files you attach with 📎 or drag &amp; drop stay private &nbsp;&middot;&nbsp; Images you paste are shown to the cloud model as they are — the privacy filter reads text, not pictures &nbsp;&middot;&nbsp; <strong>/help</strong> for commands</div>
 </div>
 
     </div><!-- end #chat-main -->
@@ -3637,6 +3646,12 @@
             if (dec.REFUSED) head += ' ' + tdCount(dec.REFUSED, 'request was', 'requests were') + ' stopped before sending.';
             if (dec.unparsed) head += ' ' + tdCount(dec.unparsed, 'record', 'records') + ' could not be read.';
             panel.appendChild(node('div', 'task-trace-headline', head));
+            // Images the owner pasted went as they are: the filter reads text, not pictures.
+            if (totals.images) {
+                panel.appendChild(node('div', 'task-trace-line', tdCount(totals.images, 'image', 'images')
+                        + ' you pasted went with these requests, each at the size the model reads it -- not filtered: '
+                        + 'the privacy filter reads text, not pictures. Each request below names its images.'));
+            }
             if (dec.OBSERVED_LEAK) {
                 panel.appendChild(node('div', 'task-trace-line bad', tdCount(dec.OBSERVED_LEAK, 'request', 'requests')
                         + ' went out containing private text: the check was only observing, so it did not stop '
@@ -3653,7 +3668,8 @@
                     : 'No request to the cloud model was recorded for this task. Requests are recorded from 24 Sep 2026.'));
         }
         panel.appendChild(node('div', 'task-trace-note', 'For each request OwnClaw keeps its size, what kind of '
-                + 'parts it had, tokens and cost — not the text, by design.'));
+                + 'parts it had, tokens and cost — not the text, by design. Of each image it carried: which of '
+                + 'your pasted images it was, its type, size and a hash — not the picture.'));
         calls.forEach(function(c) { panel.appendChild(buildTaskCallElement(c)); });
 
         var arts = t.artifacts || [];
@@ -3713,6 +3729,18 @@
         if (!rest.length) panel.appendChild(node('div', 'task-trace-note', 'No other result was recorded for this task.'));
         rest.forEach(function(a) {
             var item = node('div', 'task-trace-item');
+            // An image the owner pasted: the cloud model is shown it, at the size it reads.
+            if (a.kind === 'pasted image') {
+                item.appendChild(node('div', 'task-trace-line', a.handle + ' your pasted image'
+                        + (a.name != null ? ' "' + a.name + '"' : '') + ' · ' + (a.mediaType || 'image') + ', '
+                        + a.imageWidth + '×' + a.imageHeight + ' px'));
+                item.appendChild(node('div', 'task-trace-line muted', 'Shown to the cloud model'
+                        + (a.width !== a.imageWidth || a.height !== a.imageHeight ? ' at ' + a.width + '×' + a.height + ' px,'
+                            + ' the size it reads' : '') + ', as it is: the privacy filter reads text, not pictures. '
+                        + 'Skills were given the file as you pasted it.'));
+                panel.appendChild(item);
+                return;
+            }
             item.appendChild(node('div', 'task-trace-line', a.handle + ' ' + a.tool + ' · ' + tdChars(a.chars)
                     + (a.label === 'PUBLIC' ? '' : ' · label not recorded')));
             // Before files became private an attachment was PUBLIC and named 'attachment:<name>'.
@@ -3753,6 +3781,15 @@
         d.appendChild(tdRow('Contents', tdCount(c.messages.count, 'message part', 'message parts')
                 + ' (' + tdChars(c.messages.chars) + '), ' + tdCount(c.tools.count, 'tool definition', 'tool definitions')
                 + ' (' + tdChars(c.tools.chars) + ')'));
+        // The images it carried, each the copy of one you pasted, by name, type, size and hash.
+        (c.images || []).forEach(function(im) {
+            d.appendChild(tdRow('Image', (im.name != null ? '"' + im.name + '" · ' : '') + im.mediaType + ', '
+                    + im.width + '×' + im.height + ' px, ' + formatBytes(im.bytes) + ' · sha256 ' + im.sha256_16
+                    + (c.decision === 'REFUSED' ? ' · not sent' : '')));
+        });
+        (c.withheld || []).forEach(function(w) {
+            d.appendChild(tdRow('Image withheld', (w.name != null ? '"' + w.name + '": ' : '') + w.why, 'error'));
+        });
         // A failed call with tokens on record has what the provider had reported when it failed:
         // the input it read, and little of the output, which is counted at the end.
         var failed = c.decision === 'ERROR';
@@ -7055,7 +7092,10 @@
     });
 
     // Paste: files on the clipboard -- a screenshot, "Copy image" in a browser, files copied in a
-    // file manager -- are attached as files picked with 📎 are, private like every attachment.
+    // file manager -- are attached as files picked with 📎 are. An image the clipboard holds as
+    // image data, which this page names itself, is shown to the cloud model (the owner's decision of
+    // 2026-11-11): it is uploaded with the claim, and the server shows it only when its bytes decode
+    // as an image. A file copied in a file manager is a file, and stays private like every other.
     // Text pastes as it always did: a copy from a spreadsheet or a document carries its text and
     // a picture of it too, and the text is what was meant. (Chrome hides the text of a file
     // manager's copy -- the files' paths -- so there the files are what is attached.)
@@ -7064,8 +7104,18 @@
         if (!files.length) return;
         if ((e.clipboardData.getData('text/plain') || '').trim()) return;
         e.preventDefault();
-        uploadFiles(files);
+        var images = files.filter(function(f) { return clipboardImages.has(f); });
+        var others = files.filter(function(f) { return !clipboardImages.has(f); });
+        if (images.length) uploadFiles(images, true);
+        if (others.length) uploadFiles(others, false);
     });
+
+    /**
+     * The files pastedFiles made of image data on a clipboard -- a screenshot, a copied picture:
+     * those the page names itself, with no file of the file system behind them. Only these are
+     * uploaded as pasted images.
+     */
+    var clipboardImages = new WeakSet();
 
     /** The second the last pasted image was named in, and how many were named in it. */
     var pasteSecond = '', pastedInSecond = 0;
@@ -7080,18 +7130,19 @@
     function pastedFiles(data) {
         if (!data) return [];
         var found = [];
+        var onDisk = [];   // whether each has a file system entry: a file manager's copy has one
         var items = data.items || [];
         for (var i = 0; i < items.length; i++) {
             if (items[i].kind !== 'file') continue;
             var entry = items[i].webkitGetAsEntry ? items[i].webkitGetAsEntry() : null;
             if (entry ? entry.isDirectory : !items[i].type) continue;
             var f = items[i].getAsFile();
-            if (f) found.push(f);
+            if (f) { found.push(f); onDisk.push(!!entry); }
         }
         // A browser that lists the clipboard's files but not its items.
         if (!found.length && data.files) {
             for (var j = 0; j < data.files.length; j++) {
-                if (data.files[j].type) found.push(data.files[j]);
+                if (data.files[j].type) { found.push(data.files[j]); onDisk.push(false); }
             }
         }
         // The time of day: short enough to show whole in a chip, and the message has its date.
@@ -7099,22 +7150,33 @@
         function two(n) { return (n < 10 ? '0' : '') + n; }
         var stamp = two(d.getHours()) + two(d.getMinutes()) + two(d.getSeconds());
         if (stamp !== pasteSecond) { pasteSecond = stamp; pastedInSecond = 0; }
-        return found.map(function(f) {
+        return found.map(function(f, k) {
             if (f.name && !/^image\.\w+$/i.test(f.name)) return f;
             var ext = (f.type.split('/')[1] || '').replace(/\+.*$/, '').replace('jpeg', 'jpg').replace(/[^A-Za-z0-9]/g, '');
             pastedInSecond++;
             var name = 'pasted-' + (/^image\//.test(f.type) ? 'image-' : 'file-') + stamp
                 + (pastedInSecond > 1 ? '-' + pastedInSecond : '') + (ext ? '.' + ext : '');
+            // Image data the clipboard holds, not a file of the file system: a pasted image.
+            var image = /^image\//.test(f.type) && !onDisk[k];
+            var named;
             try {
-                return new File([f], name, { type: f.type });
+                named = new File([f], name, { type: f.type });
             } catch (err) {
-                return f;   // no File constructor: the clipboard's own name
+                named = f;   // no File constructor: the clipboard's own name
             }
+            if (image) clipboardImages.add(named);
+            return named;
         });
     }
 
-    function uploadFiles(files) {
+    /**
+     * Upload files and put their chips above the box. {@code pasted}: they are image data from the
+     * clipboard this page named itself (pastedFiles), which the server shows the cloud model if
+     * their bytes decode as an image -- each chip then says who sees it (seenLine).
+     */
+    function uploadFiles(files, pasted) {
         var formData = new FormData();
+        if (pasted) formData.append('pasted', 'true');
         var chips = [];
         for (var i = 0; i < files.length; i++) {
             // The server skips an empty file, and its answer would then be one short of the chips.
@@ -7152,6 +7214,7 @@
                 }
                 chips[i].classList.remove('uploading');
                 chips[i].dataset.fileId = uploaded[i].id;
+                if (pasted) markSeen(chips[i], uploaded[i]);
                 pendingFiles.push({ id: uploaded[i].id, name: uploaded[i].original_name, chip: chips[i] });
             }
         })
@@ -7245,6 +7308,53 @@
 
     /** The chip pictures still to draw, in turn ({@link chipPicture}). */
     var pictureQueue = Promise.resolve();
+
+    /**
+     * A pasted image's chip, once the server has said what it is: shown to the cloud model -- its
+     * bytes decoded as an image -- or kept private, and why. Its line says who sees it (seenLine).
+     */
+    function markSeen(chip, uploaded) {
+        chip.classList.add('pasted');
+        chip.dataset.shown = uploaded.shown_to_cloud ? '1' : '';
+        chip.dataset.privateBecause = uploaded.shown_to_cloud ? '' : String(uploaded.private_because || '');
+        var seen = node('span', 'file-chip-seen');
+        chip.insertBefore(seen, chip.querySelector('.file-chip-remove'));
+        seenLine(chip);
+    }
+
+    /** Whether a message sent now runs on the local model only: Free, chosen next to Send or the default. */
+    function chatRunsFree() {
+        return (costSel.value || defaultCostMode) === 'free';
+    }
+
+    /**
+     * What a pasted image's chip says of who sees it, as text, never markup: the cloud model, as the
+     * image is -- the filter reads text; in a Free chat, nobody, for the local model cannot see
+     * images; or nobody, the image kept private as a file is.
+     */
+    function seenLine(chip) {
+        var seen = chip.querySelector('.file-chip-seen');
+        if (!seen) return;
+        if (chip.dataset.shown !== '1') {
+            seen.textContent = '🔒 private';
+            seen.title = 'Kept private, like an attached file: ' + (chip.dataset.privateBecause
+                    || 'it is not an image the cloud model can be shown') + '.';
+        } else if (chatRunsFree()) {
+            seen.textContent = '🏠 not seen: local only';
+            seen.title = 'This chat runs on the local model only (Free), and the local model cannot see images. '
+                    + 'Skills are still given it as a file.';
+        } else {
+            seen.textContent = '☁️ the cloud model sees it';
+            seen.title = 'The cloud model is shown this image as it is: the privacy filter reads text, not pictures. '
+                    + 'Skills are given it as a file too.';
+        }
+    }
+
+    /** Every pasted image's line again: the chat's choice next to Send, or the default, changed. */
+    function refreshSeen() {
+        var chips = fileChips.querySelectorAll('.file-chip.pasted');
+        for (var i = 0; i < chips.length; i++) seenLine(chips[i]);
+    }
 
     //  Send 
     /**
@@ -7646,6 +7756,7 @@
     sendBtn.addEventListener('click', function() { send(false); });
     queueBtn.addEventListener('click', function() { send(true); });
     costSel.addEventListener('change', updateComposer);
+    costSel.addEventListener('change', refreshSeen);
     effortSel.addEventListener('change', updateComposer);
 
     /** The options' names, as the settings page says them. */
@@ -7667,7 +7778,12 @@
     function nameDefaults(defaults) {
         costSel.options[0].textContent = 'Default: ' + COST_NAMES[defaults.costMode];
         effortSel.options[0].textContent = 'Default: ' + EFFORT_NAMES[defaults.effort];
+        defaultCostMode = defaults.costMode;
+        refreshSeen();
     }
+
+    /** The default time vs cost on the settings page, which a chat that chose nothing runs on. */
+    var defaultCostMode;
 
     /** What is chosen next to Send: null where it follows the default. */
     function chosenOptions() {

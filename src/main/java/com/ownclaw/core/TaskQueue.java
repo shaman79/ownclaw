@@ -436,7 +436,8 @@ public class TaskQueue {
             var said = new ArrayList<String>();
             said.add(message.text());
             for (UserMessage read : inbox.read()) said.add(read.text());
-            agentLoop.turnEnded(message.userId(), message.sessionId(), said, result, message.channel());
+            agentLoop.turnEnded(message.userId(), message.sessionId(), said, message.attachmentIds(), result,
+                    message.channel());
         } catch (RuntimeException e) {
             log.warn("The facts of a turn of {} were not read: {}", message.userId(), e.getClass().getSimpleName());
         }

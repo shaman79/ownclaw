@@ -43,13 +43,23 @@ public class FileUploadController {
     /**
      * Upload one or more files.
      * POST /api/files/upload (multipart/form-data, field name "files")
+     * <p>
+     * With {@code pasted=true}: the page says these are images on the clipboard that it named
+     * itself -- a screenshot pasted into the chat box -- and each that decodes as an image is shown
+     * to the cloud model ({@link FileStorageService#store(String, String, String, java.io.InputStream,
+     * boolean)}). Every other file, and one sent so that is no image, stays private. The page sends a
+     * file copied in a file manager and pasted without it: that is a file, and private.
      *
-     * @return list of uploaded file metadata (id, original_name, size_bytes, content_type)
+     * @return list of uploaded file metadata (id, original_name, size_bytes, content_type) -- and,
+     *         for a pasted one, whether it is shown to the cloud model: the copy's pixel size, or why
+     *         it stays private
      */
     @PostMapping("/upload")
     public ResponseEntity<?> upload(HttpServletRequest request,
-                                    @RequestParam("files") List<MultipartFile> files) {
+                                    @RequestParam("files") List<MultipartFile> files,
+                                    @RequestParam(value = "pasted", required = false) String pasted) {
         String userId = (String) request.getAttribute("userId");
+        boolean pastedImages = "true".equals(pasted);
 
         var results = new java.util.ArrayList<Map<String, Object>>();
         for (MultipartFile file : files) {
@@ -60,16 +70,26 @@ public class FileUploadController {
                                 + " (" + file.getSize() + " bytes, max " + MAX_FILE_SIZE + ")"));
             }
             try {
-                String id = fileStorage.store(userId,
-                        file.getOriginalFilename() != null ? file.getOriginalFilename() : "upload",
-                        file.getContentType() != null ? file.getContentType() : "application/octet-stream",
-                        file.getInputStream());
-                results.add(Map.of(
-                        "id", id,
-                        "original_name", file.getOriginalFilename() != null ? file.getOriginalFilename() : "upload",
-                        "size_bytes", file.getSize(),
-                        "content_type", file.getContentType() != null ? file.getContentType() : "application/octet-stream"
-                ));
+                String name = file.getOriginalFilename() != null ? file.getOriginalFilename() : "upload";
+                String type = file.getContentType() != null ? file.getContentType() : "application/octet-stream";
+                var stored = fileStorage.store(userId, name, type, file.getInputStream(), pastedImages);
+                var result = new java.util.LinkedHashMap<String, Object>();
+                result.put("id", stored.id());
+                result.put("original_name", name);
+                result.put("size_bytes", file.getSize());
+                result.put("content_type", type);
+                if (pastedImages) {
+                    result.put("shown_to_cloud", stored.shownToCloud());
+                    if (stored.copy() != null) {
+                        result.put("cloud_width", stored.copy().width());
+                        result.put("cloud_height", stored.copy().height());
+                        result.put("image_width", stored.copy().originalWidth());
+                        result.put("image_height", stored.copy().originalHeight());
+                    } else {
+                        result.put("private_because", stored.privateBecause());
+                    }
+                }
+                results.add(result);
             } catch (Exception e) {
                 log.error("File upload failed: {}", e.getMessage(), e);
                 return ResponseEntity.internalServerError().body(Map.of(
