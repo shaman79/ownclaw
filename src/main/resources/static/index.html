@@ -6979,18 +6979,20 @@
     /**
      * The files on a clipboard. One the browser named itself -- "image.png", for every image it
      * holds -- is named for when it was pasted, so two screenshots are two names; a file copied
-     * in a file manager keeps its own. An entry with no type is left out: a copied folder comes
-     * as one, and reading it fails the whole upload.
+     * in a file manager keeps its own. A copied folder is left out: reading it fails the whole
+     * upload. It has no type, but neither has a README or a Makefile, so the file system entry
+     * says which is which where there is one, and the type only where there is not.
      */
     function pastedFiles(data) {
         if (!data) return [];
         var found = [];
         var items = data.items || [];
         for (var i = 0; i < items.length; i++) {
-            if (items[i].kind === 'file' && items[i].type) {
-                var f = items[i].getAsFile();
-                if (f) found.push(f);
-            }
+            if (items[i].kind !== 'file') continue;
+            var entry = items[i].webkitGetAsEntry ? items[i].webkitGetAsEntry() : null;
+            if (entry ? entry.isDirectory : !items[i].type) continue;
+            var f = items[i].getAsFile();
+            if (f) found.push(f);
         }
         // A browser that lists the clipboard's files but not its items.
         if (!found.length && data.files) {
@@ -7022,7 +7024,10 @@
         var chips = [];
         for (var i = 0; i < files.length; i++) {
             // The server skips an empty file, and its answer would then be one short of the chips.
-            if (!files[i].size) continue;
+            if (!files[i].size) {
+                addMsg('system', files[i].name + ' is empty, so it was not attached.');
+                continue;
+            }
             formData.append('files', files[i]);
             var chip = createFileChip(files[i].name, null, files[i]);
             chips.push(chip);
@@ -7074,7 +7079,7 @@
             thumb.alt = '';
             thumb.onerror = function() { thumb.remove(); };
             chip.appendChild(thumb);
-            chipPicture(file, function(url) {
+            chipPicture(file, chip, function(url) {
                 if (url) thumb.src = url;
                 else thumb.remove();
             });
@@ -7106,17 +7111,37 @@
      * browser cannot draw (a TIFF, a HEIC), which shows no picture rather than a broken one. Drawn
      * small: read whole, a 31 MB PNG stayed on its chip as a 41 MB URL.
      */
-    function chipPicture(file, done) {
+    function chipPicture(file, chip, done) {
         if (!window.createImageBitmap) { done(null); return; }
-        createImageBitmap(file, { resizeHeight: 44, resizeQuality: 'medium' }).then(function(bitmap) {
-            var canvas = document.createElement('canvas');
-            canvas.width = bitmap.width;
-            canvas.height = bitmap.height;
-            canvas.getContext('2d').drawImage(bitmap, 0, 0);
-            if (bitmap.close) bitmap.close();
-            done(canvas.toDataURL('image/png'));
-        }, function() { done(null); });
+        // One at a time: the browser decodes the whole image before it shrinks it, and a dozen
+        // camera photos picked at once, decoded together, took a gigabyte.
+        pictureQueue = pictureQueue.then(function() {
+            if (!chip.isConnected) { done(null); return; }
+            try {
+                return createImageBitmap(file, { resizeHeight: 44, resizeQuality: 'medium' }).then(function(bitmap) {
+                    try {
+                        var canvas = document.createElement('canvas');
+                        // A long strip is cut, not drawn 44,000 pixels wide: the chip shows its start.
+                        canvas.width = Math.min(bitmap.width, 176);
+                        canvas.height = bitmap.height;
+                        var context = canvas.getContext('2d');
+                        if (!context) { done(null); return; }
+                        context.drawImage(bitmap, 0, 0);
+                        done(canvas.toDataURL('image/png'));
+                    } catch (err) {
+                        done(null);
+                    } finally {
+                        if (bitmap.close) bitmap.close();
+                    }
+                }, function() { done(null); });
+            } catch (err) {
+                done(null);
+            }
+        }).catch(function() {});
     }
+
+    /** The chip pictures still to draw, in turn ({@link chipPicture}). */
+    var pictureQueue = Promise.resolve();
 
     //  Send 
     /**

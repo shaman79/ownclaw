@@ -59,7 +59,8 @@ class ChatPastePageTest {
     @DisplayName("every typed file is taken, a folder's empty type is not; only the browser's own 'image.png' is renamed, distinct within a second")
     void pastedFilesAreNamed() {
         String f = between("function pastedFiles(data) {", "function uploadFiles(");
-        assertTrue(f.contains("if (items[i].kind === 'file' && items[i].type) {"), f);
+        assertTrue(f.contains("var entry = items[i].webkitGetAsEntry ? items[i].webkitGetAsEntry() : null; "
+                + "if (entry ? entry.isDirectory : !items[i].type) continue;"), "a folder out, a README in: " + f);
         assertTrue(f.contains("if (f.name && !/^image\\.\\w+$/i.test(f.name)) return f;"),
                 "a file copied in a file manager keeps its name: " + f);
         assertTrue(f.contains("if (stamp !== pasteSecond) { pasteSecond = stamp; pastedInSecond = 0; }"), f);
@@ -75,7 +76,8 @@ class ChatPastePageTest {
                 + "{ method: 'DELETE',"), u);
         assertTrue(u.indexOf("if (!chips[i].isConnected)") < u.indexOf("pendingFiles.push("),
                 "checked before it joins what the next message carries: " + u);
-        assertTrue(u.contains("if (!files[i].size) continue;"), "an empty file would shift the answer against the chips");
+        assertTrue(u.contains("if (!files[i].size) { addMsg('system', files[i].name + ' is empty, so it was not attached.'); continue; }"),
+                "an empty file would shift the answer against the chips, and is said, not dropped in silence");
     }
 
     @Test
@@ -84,8 +86,11 @@ class ChatPastePageTest {
         assertTrue(page.contains("var chip = createFileChip(files[i].name, null, files[i]);"));
         String chip = between("function createFileChip(name, fileId, file) {", "fileChips.appendChild(chip);");
         assertTrue(chip.contains("thumb.onerror = function() { thumb.remove(); };"), chip);
-        assertTrue(chip.contains("if (url) thumb.src = url; else thumb.remove();"), chip);
-        String picture = between("function chipPicture(file, done) {", "// Send");
+        assertTrue(chip.contains("chipPicture(file, chip, function(url) { if (url) thumb.src = url; else thumb.remove(); });"), chip);
+        String picture = between("function chipPicture(file, chip, done) {", "// Send");
+        assertTrue(picture.contains("pictureQueue = pictureQueue.then(function() { if (!chip.isConnected) { done(null); return; }"),
+                "one picture at a time, none for a chip already gone: " + picture);
+        assertTrue(picture.contains("}).catch(function() {});"), "a failed picture does not stop the ones after it");
         assertTrue(picture.contains("createImageBitmap(file, { resizeHeight: 44, resizeQuality: 'medium' })"), picture);
         assertTrue(picture.contains("done(canvas.toDataURL('image/png'));"), picture);
         assertFalse((chip + picture).contains("createObjectURL"),
