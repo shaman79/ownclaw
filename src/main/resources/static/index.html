@@ -7758,8 +7758,9 @@
     sendBtn.addEventListener('click', function() { send(false); });
     queueBtn.addEventListener('click', function() { send(true); });
     costSel.addEventListener('change', updateComposer);
-    costSel.addEventListener('change', refreshSeen);
     effortSel.addEventListener('change', updateComposer);
+    // A pasted image's chip says whether a Free chat leaves it unseen (seenLine).
+    costSel.addEventListener('change', refreshSeen);
 
     /** The options' names, as the settings page says them. */
     var COST_NAMES = { fast: 'Fastest', cheaper: 'Cheaper', free: 'Free' };
