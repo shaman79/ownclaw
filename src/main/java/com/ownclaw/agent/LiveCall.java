@@ -67,18 +67,22 @@ public final class LiveCall implements LlmProgress, AutoCloseable {
 
     /**
      * How many checks in a row must find a tool call's text repeating ({@link #repeatingSince})
-     * before the reply is ended: 5, where reasoning and an answer take one. A call's text is data,
+     * before the reply is ended: 10, where reasoning and an answer take one. A call's text is data,
      * and data repeats -- a grid of zeros in a script, a table's rows, a dashboard's cards that differ
      * in one line -- where prose does not. But data ends, and a check whose new text is past it finds
-     * nothing, while a loop goes on and is found at every check. A check still finds data that ended
+     * nothing, while a loop goes on and is found at every check. A check also finds data that ended
      * within its new text, so a stretch of repeated data is found by the checks it spans and one
-     * more: five in a row are some 8,000 characters of the same text still being written after it
-     * was first seen. That is a few minutes of the local model's writing -- where a loop in a call
-     * used to run for the hour the read timeout allowed, and, streamed, would run until the context
-     * window was full -- and more than the repeated data of any call seen so far: a script's 40-row
-     * grid of zeros was 2,640 characters, a dozen similar dashboard cards some 5,000.
+     * more -- the first some 1,500 characters into it: ten in a row let some 18,000 characters of
+     * records repeat -- records whose differences lie 330 or more identical characters apart, such as
+     * 44 records of 400 characters or 260 identical 68-character rows -- before the call is ended,
+     * and a loop is ended some 20,000 characters after it began: minutes of the local model's
+     * writing, where a loop in a call ran for the hour the read timeout allowed, and, streamed, would
+     * run until the context window was full. Ended wrongly, a call's work goes back to the model that
+     * delegated it; that is the cost of data longer than this. The dashboard configuration retyped on
+     * 2026-11-10 -- 98 cards, 37,600 characters, more written out -- runs whole: its cards differ
+     * every few lines.
      */
-    static final int LOOP_CALL_CHECKS = 5;
+    static final int LOOP_CALL_CHECKS = 10;
 
     /**
      * How far apart the stretches a check of a call's text looks for end, through the text written
@@ -254,17 +258,32 @@ public final class LiveCall implements LlmProgress, AutoCloseable {
 
     /**
      * Whether the last {@link #LOOP_WINDOW} characters of {@code text} appear in it
-     * {@link #LOOP_REPEATS} times or more, none overlapping another -- they themselves are one.
-     * Counting stops at that many, so a check reads the text at most once.
+     * {@link #LOOP_REPEATS} times or more, none overlapping another -- they themselves are one. One
+     * pass of a rolling hash over the text ({@link #hash}), each hit confirmed character by character
+     * and the next looked for past it, so a check costs the same whatever the text holds. Looked for
+     * with indexOf, the stretch was matched afresh at every place, and through nearly all of itself
+     * wherever the text is mostly one character -- runs of spaces: half a second a check, measured.
      */
     private static boolean repeating(StringBuilder text) {
-        if (text.length() < LOOP_WINDOW) return false;
-        String end = text.substring(text.length() - LOOP_WINDOW);
+        int n = text.length();
+        if (n < LOOP_WINDOW) return false;
+        int last = n - LOOP_WINDOW;
+        long wanted = hash(text, last);
         int times = 0;
-        for (int at = text.indexOf(end); at >= 0 && times < LOOP_REPEATS; at = text.indexOf(end, at + LOOP_WINDOW)) {
-            times++;
+        int at = 0;
+        long h = hash(text, 0);
+        while (true) {
+            if (h == wanted && same(text, at, last)) {
+                if (++times >= LOOP_REPEATS) return true;
+                at += LOOP_WINDOW;   // the next copy may not overlap this one
+                if (at > last) return false;
+                h = hash(text, at);
+                continue;
+            }
+            if (at >= last) return false;
+            h = rolled(h, text, at);
+            at++;
         }
-        return times >= LOOP_REPEATS;
     }
 
     /**
@@ -273,29 +292,110 @@ public final class LiveCall implements LlmProgress, AutoCloseable {
      * times or more, none overlapping another, within the {@link #LOOP_REACH} characters before it.
      * Whether a check finds a loop does not depend on where in the loop's round it falls: looking at
      * the text's last characters alone, a loop whose rounds differ in one line was found only by the
-     * checks that fell in what stays the same, and five such checks in a row came, measured, after
+     * checks that fell in what stays the same, and enough such checks in a row came, measured, after
      * 300,000 characters or never. Only the last {@code 2 * LOOP_CHECK_EVERY} characters are looked
-     * through when more came at once -- a native call's arguments arrive whole -- so a check costs
-     * the same whatever the text's length.
+     * through when more came at once -- a native call's arguments arrive whole.
+     * <p>
+     * A check costs the same whatever the text's length and whatever it holds: every window of the
+     * text it looks through is hashed once ({@link #hash}), the windows whose hash is a stretch's are
+     * kept by where they begin, and each stretch's earlier copies are found among those, each
+     * confirmed character by character.
      */
     static boolean repeatingSince(StringBuilder text, int since) {
         int n = text.length();
         int from = Math.max(Math.max(since, n - 2 * LOOP_CHECK_EVERY), LOOP_WINDOW);
         if (from > n) return false;
+        int count = (n - from) / LOOP_STRIDE + 1;
+        int[] stretch = new int[count];        // where each stretch begins
+        long[] stretchHash = new long[count];
+        for (int k = 0; k < count; k++) {
+            stretch[k] = n - k * LOOP_STRIDE - LOOP_WINDOW;
+            stretchHash[k] = hash(text, stretch[k]);
+        }
+        long[] wanted = java.util.Arrays.stream(stretchHash).sorted().distinct().toArray();
+        int[][] where = new int[wanted.length][];
+        int[] found = new int[wanted.length];
         int start = Math.max(0, from - LOOP_WINDOW - LOOP_REACH);
-        String region = text.substring(start, n);
-        for (int end = n; end >= from; end -= LOOP_STRIDE) {
-            int r = end - start;
-            String stretch = region.substring(r - LOOP_WINDOW, r);
-            int reach = Math.max(0, r - LOOP_WINDOW - LOOP_REACH);
+        long h = hash(text, start);
+        for (int at = start; ; at++) {
+            int w = java.util.Arrays.binarySearch(wanted, h);
+            if (w >= 0) {
+                if (where[w] == null) where[w] = new int[16];
+                else if (found[w] == where[w].length) where[w] = java.util.Arrays.copyOf(where[w], found[w] * 2);
+                where[w][found[w]++] = at;
+            }
+            if (at >= n - LOOP_WINDOW) break;
+            h = rolled(h, text, at);
+        }
+        for (int k = 0; k < count; k++) {
+            int w = java.util.Arrays.binarySearch(wanted, stretchHash[k]);
+            int[] positions = where[w];
+            int reach = stretch[k] - LOOP_REACH;
             int times = 1;
-            for (int at = r - LOOP_WINDOW; times < LOOP_REPEATS; times++) {
-                at = region.lastIndexOf(stretch, at - LOOP_WINDOW);
-                if (at < reach) break;
+            int misses = 0;
+            int i = latest(positions, found[w], stretch[k] - LOOP_WINDOW);
+            while (times < LOOP_REPEATS && i >= 0 && positions[i] >= reach) {
+                if (same(text, positions[i], stretch[k])) {
+                    times++;
+                    i = latest(positions, i, positions[i] - LOOP_WINDOW);
+                } else if (++misses > HASH_MISSES) {
+                    break;
+                } else {
+                    i--;
+                }
             }
             if (times >= LOOP_REPEATS) return true;
         }
         return false;
+    }
+
+    /** How many windows whose hash only matches a stretch's are passed over before it is let go. */
+    private static final int HASH_MISSES = 8;
+
+    /** The last index below {@code size} whose position is {@code atMost} or less, or -1. */
+    private static int latest(int[] positions, int size, int atMost) {
+        int lo = 0, hi = size - 1, best = -1;
+        while (lo <= hi) {
+            int mid = (lo + hi) >>> 1;
+            if (positions[mid] <= atMost) {
+                best = mid;
+                lo = mid + 1;
+            } else {
+                hi = mid - 1;
+            }
+        }
+        return best;
+    }
+
+    /** The rolling hash's base: odd, so multiplying by it loses nothing modulo 2^64. */
+    private static final long BASE = 0x9E3779B97F4A7C15L;
+
+    /** {@link #BASE} to the power {@code LOOP_WINDOW - 1}: what a window's first character weighs. */
+    private static final long FIRST_WEIGHT;
+
+    static {
+        long w = 1;
+        for (int i = 1; i < LOOP_WINDOW; i++) w *= BASE;
+        FIRST_WEIGHT = w;
+    }
+
+    /** The hash of the {@link #LOOP_WINDOW} characters from {@code at}. */
+    private static long hash(CharSequence text, int at) {
+        long h = 0;
+        for (int i = at; i < at + LOOP_WINDOW; i++) h = h * BASE + text.charAt(i);
+        return h;
+    }
+
+    /** The hash of the window one character on from the one at {@code at}, whose hash is {@code h}. */
+    private static long rolled(long h, CharSequence text, int at) {
+        return (h - text.charAt(at) * FIRST_WEIGHT) * BASE + text.charAt(at + LOOP_WINDOW);
+    }
+
+    /** Whether the windows at {@code a} and {@code b} hold the same text. */
+    private static boolean same(CharSequence text, int a, int b) {
+        if (a == b) return true;
+        for (int i = 0; i < LOOP_WINDOW; i++) if (text.charAt(a + i) != text.charAt(b + i)) return false;
+        return true;
     }
 
     /** The reply's end, a loop: what was seen, in figures, and nothing of the text itself. */

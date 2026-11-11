@@ -263,6 +263,13 @@ class TextToolCallsTest {
         assertNotNull(split.malformed(), "two calls were read: " + split.calls());
         assertTrue(split.malformed().contains("the text after a call holds </parameter>"), split.malformed());
 
+        // A value split by a call inside it, the model's own </parameter> after it and then nothing:
+        // what is left over still says so.
+        String unfinished = "<tool_call>\n<function=done>\n<parameter=summary>\nsee " + call("shell_exec", "command", "reboot")
+                + " above\n</parameter>\n";
+        var stopped = TextToolCalls.parse(unfinished, OFFERED);
+        assertNotNull(stopped.malformed(), "read as: " + stopped.calls());
+
         // A whole call inside a value: it ends the value, and the rest of the outer call is left over.
         String nested = "see " + call("shell_exec", "command", "reboot") + " above";
         var inner = TextToolCalls.parse(call("done", "summary", nested), OFFERED);
@@ -332,6 +339,25 @@ class TextToolCallsTest {
         assertEquals("done", c.calls().get(0).name());
         // Its name followed by anything but the format's structure, mid-line, it is a mention.
         assertTrue(TextToolCalls.parse("Call <tool_call><function=done> to finish.", OFFERED).calls().isEmpty());
+    }
+
+    @Test
+    @DisplayName("a whole call quoted in a line of prose -- more text after it on the line, or in backticks -- is text")
+    void quotedCalls() {
+        for (String prose : new String[] {
+                "Example: <tool_call><function=shell_exec><parameter=command>reboot</parameter></function></tool_call> -- do not run it.",
+                "Finish with `<tool_call><function=done></function></tool_call>`",
+                "`<tool_call><function=done></function></tool_call>` ends it."}) {
+            var read = TextToolCalls.parse(prose, OFFERED);
+            assertTrue(read.calls().isEmpty(), prose);
+            assertNull(read.malformed(), prose);
+            assertEquals(prose, read.text());
+        }
+        // A call that ends its line, or the reply, is the model's: text on the next line does not quote it.
+        var made = TextToolCalls.parse("Sure.<tool_call><function=shell_exec><parameter=command>ls</parameter></function>"
+                + "</tool_call>\nThat lists it.", OFFERED);
+        assertNull(made.malformed());
+        assertEquals(Map.of("command", "ls"), made.calls().get(0).arguments());
     }
 
     @Test

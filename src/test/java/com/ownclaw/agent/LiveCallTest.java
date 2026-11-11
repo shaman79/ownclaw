@@ -365,15 +365,15 @@ class LiveCallTest {
         // Measured on the reviewer's shapes before the checks looked through all of the new text:
         // the card whose entity line changes ran 300,000 characters, to the window's end.
         int card = asACall(rounds(HEAD, LiveCallTest::card, 300_000));
-        assertTrue(card > 0 && card <= 12_000, "a card repeated with only its entity changing: " + card);
+        assertTrue(card > 0 && card <= 24_000, "a card repeated with only its entity changing: " + card);
         String same600 = "the same six hundred characters of a script, again and again; ".repeat(10).substring(0, 600);
         int varied = asACall(rounds(HEAD, i -> same600 + String.format(java.util.Locale.ROOT, "# round %31d\n", i), 300_000));
-        assertTrue(varied > 0 && varied <= 14_000, "600 the same, then 40 that differ, round after round: " + varied);
+        assertTrue(varied > 0 && varied <= 26_000, "600 the same, then 40 that differ, round after round: " + varied);
         String same380 = "echo 'checking the router configuration once more before deciding' && ".repeat(6).substring(0, 380);
         int counted = asACall(rounds(HEAD, i -> same380 + "\n# count " + i + "\n", 300_000));
-        assertTrue(counted > 0 && counted <= 12_000, "380 the same and a line that counts: " + counted);
+        assertTrue(counted > 0 && counted <= 24_000, "380 the same and a line that counts: " + counted);
         int same = asACall(rounds(HEAD, i -> LOOP, 300_000));
-        assertTrue(same > 0 && same <= 12_000, "the same paragraph again and again: " + same);
+        assertTrue(same > 0 && same <= 24_000, "the same paragraph again and again: " + same);
         // Not on the first checks that see it: those are data's too.
         assertTrue(Math.min(Math.min(card, varied), Math.min(counted, same))
                 >= (LiveCall.LOOP_CALL_CHECKS - 1) * LiveCall.LOOP_CHECK_EVERY, "ended only after checks in a row");
@@ -391,11 +391,18 @@ class LiveCallTest {
         var cards = new StringBuilder(HEAD);
         for (int i = 0; i < 12; i++) cards.append(card(i));
         assertEquals(-1, asACall(cards + unique(200)), "a dashboard of a dozen similar cards");
+        // Records whose differences lie 380 characters apart, some 17,500 characters of them.
+        String body = "status: ok, checked by the nightly job, nothing to report; ".repeat(7).substring(0, 380);
+        var records = new StringBuilder(HEAD);
+        for (int i = 0; records.length() < 17_500; i++) records.append(String.format(java.util.Locale.ROOT, "id %05d: ", i)).append(body).append('\n');
+        assertEquals(-1, asACall(records + unique(200)), "17,500 characters of records alike but for their ids");
+        // Past what ten checks in a row allow, records are taken for a loop: the price of ending loops.
+        assertTrue(asACall(records.toString() + records.substring(HEAD.length()) + unique(200)) > 0, "35,000 characters of them");
         // As an answer, the grid is ended at the first check that finds it: the rule for prose.
         var ctx = task(1);
         LiveCall answer = ctx.call(OLLAMA, true, ctx.atStep(null));
         assertThrows(RepeatedOutput.class, () -> stream(answer, Part.ANSWER, grid.toString(), 40));
-        // Mutation: LOOP_CALL_CHECKS 3 -> the dozen cards are ended.
+        // Mutation: LOOP_CALL_CHECKS 5 -> the records are ended; 3 -> the dozen cards are too.
     }
 
     @Test
@@ -425,5 +432,23 @@ class LiveCallTest {
         int nearAt = near.length();
         near.append(paragraph);
         assertTrue(LiveCall.repeatingSince(near, nearAt));
+    }
+
+    @Test
+    @DisplayName("a check costs the same whatever the text holds: a million characters of runs of spaces stream in seconds")
+    void aCheckCostsTheSameWhateverTheTextHolds() {
+        // Runs of 290 to 296 spaces, each after a marker that differs from every other: nearly all of
+        // every window the same character. Looked for with indexOf, each check read most of each
+        // window at every place -- 258 seconds for this text, half a second a check.
+        var text = new StringBuilder(HEAD);
+        for (int i = 0; text.length() < 1_000_000; i++) {
+            text.append(" ".repeat(290 + i % 7)).append(new StringBuilder(String.format(java.util.Locale.ROOT, "%07d", i)).reverse())
+                    .append('\n');
+        }
+        long t0 = System.nanoTime();
+        int ended = asACall(text.toString());
+        long ms = (System.nanoTime() - t0) / 1_000_000;
+        assertEquals(-1, ended, "no stretch of it repeats, so it runs whole");
+        assertTrue(ms < 30_000, "streamed in " + ms + " ms");
     }
 }

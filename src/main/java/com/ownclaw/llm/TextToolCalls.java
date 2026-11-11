@@ -399,14 +399,15 @@ final class TextToolCalls {
     /**
      * Whether text after a call holds what a value split by the format's own tags leaves behind: the
      * outer value's own {@code </parameter>}, with its function's end, its call's end or another
-     * parameter after it, past whitespace. A split always leaves that much, and nothing a reply says
-     * about the format does: a {@code </tool_call>} quoted or written twice, a {@code </parameter>}
-     * named in a sentence.
+     * parameter after it, past whitespace -- or nothing but whitespace, the model having stopped
+     * there. A split always leaves that much, and nothing a reply says about the format does: a
+     * {@code </tool_call>} quoted or written twice, a {@code </parameter>} named in a sentence.
      */
     static boolean leftOver(String text) {
         for (int at = text.indexOf(PARAMETER_END); at >= 0; at = text.indexOf(PARAMETER_END, at + 1)) {
             int next = skipSpace(text, at + PARAMETER_END.length());
-            if (text.startsWith(FUNCTION_END, next) || text.startsWith(CLOSE, next) || text.startsWith(PARAMETER, next)) {
+            if (next >= text.length() || text.startsWith(FUNCTION_END, next) || text.startsWith(CLOSE, next)
+                    || text.startsWith(PARAMETER, next)) {
                 return true;
             }
         }
@@ -420,12 +421,39 @@ final class TextToolCalls {
      */
     private static final Pattern NAME = Pattern.compile("[^\\s<>/]+");
 
-    /** Where the next call begins at or after {@code from} ({@link #opens}), or -1. */
+    /**
+     * Where the next call begins at or after {@code from} ({@link #opens}), or -1. A whole call
+     * written compactly in the middle of a line is quoted when it stands in backticks or more text
+     * follows it on its line -- "Example: <tool_call>...</tool_call> -- do not run it." -- and is
+     * text: a call the model makes ends its reply.
+     */
     static int callStart(String content, int from) {
         for (int at = content.indexOf(OPEN, from); at >= 0; at = content.indexOf(OPEN, at + 1)) {
-            if (Boolean.TRUE.equals(opens(content, at, true))) return at;
+            if (!Boolean.TRUE.equals(opens(content, at, true))) continue;
+            if (whereCallsAre(content, at) || !quoted(content, at)) return at;
         }
         return -1;
+    }
+
+    /**
+     * Whether the {@code <tool_call>} at {@code at} stands where the model writes its calls: at the
+     * start of a line, or with a line break between it and its function.
+     */
+    private static boolean whereCallsAre(CharSequence text, int at) {
+        if (atLineStart(text, at)) return true;
+        for (int p = at + OPEN.length(); p < text.length() && Character.isWhitespace(text.charAt(p)); p++) {
+            if (text.charAt(p) == '\n') return true;
+        }
+        return false;
+    }
+
+    /** Whether the call at {@code at} stands in backticks, or more text follows its end on its line. */
+    private static boolean quoted(String content, int at) {
+        if (at > 0 && content.charAt(at - 1) == '`') return true;
+        for (int i = readCall(content, at, Map.of()).end(); i < content.length() && content.charAt(i) != '\n'; i++) {
+            if (!Character.isWhitespace(content.charAt(i))) return true;
+        }
+        return false;
     }
 
     /**

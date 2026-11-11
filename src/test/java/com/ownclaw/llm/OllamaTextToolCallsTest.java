@@ -118,7 +118,7 @@ class OllamaTextToolCallsTest {
     @DisplayName("a call whose argument has become a loop is ended by the loop guard while it is written")
     void aLoopingArgumentIsEnded() throws Exception {
         var looping = new StringBuilder("#!/bin/sh\n");
-        for (int i = 0; i < 200; i++) {
+        for (int i = 0; i < 400; i++) {
             looping.append("echo 'checking the configuration of the second router again, because the first answer "
                     + "did not show the route to 192.0.2.254 and I need it before I decide which command to run next'\n");
         }
@@ -193,7 +193,7 @@ class OllamaTextToolCallsTest {
         var e = assertThrows(RepeatedOutput.class, () -> OllamaStreamingTest.provider(OllamaStreamingTest.config(), http)
                 .chat(ASK, withTools(List.of(TextToolCallsTest.HA)).withProgress(live)));
         int seen = (int) live.shown().data().get("answerChars");
-        assertTrue(seen <= 12_000, "ended within a few checks of the loop beginning: " + seen + " -- " + e.getMessage());
+        assertTrue(seen <= 24_000, "ended within the checks in a row of the loop beginning: " + seen + " -- " + e.getMessage());
         live.close();
     }
 
