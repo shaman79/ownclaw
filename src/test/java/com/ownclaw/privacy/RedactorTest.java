@@ -361,6 +361,67 @@ class RedactorTest {
     }
 
     @Test
+    @DisplayName("a sentinel or a name every machine has, where an SSID or a host's name is written, names no device: left as it is, and not learned")
+    void sentinelsNameNoDevice() {
+        var redactor = new Redactor(null);
+        String states = "{\"ssid\": \"unavailable\", \"state\": \"on\"}\n{\"essid\": \"Unknown\"}\n"
+                + "hostname=host\nhostname: localhost\n\toption ssid 'off/any'";
+        var tally = new Redactor.Tally();
+        assertEquals(states, redactor.filter("u1", states, Map.of(), tally));
+        assertEquals(0, tally.identifiersReplaced());
+        String prompt = "NEVER say a package is unavailable. Work that stays on the host is free.";
+        assertEquals(prompt, redactor.filter("u1", prompt, Map.of(), new Redactor.Tally()),
+                "and none of them is looked for afterwards, in the system prompt or anywhere else");
+        // Real names beside them are found as before, and looked for everywhere.
+        assertEquals("{\"ssid\": \"<ssid_1>\"}\nhostname=<host_1>",
+                redactor.filter("u1", "{\"ssid\": \"Fake_t33p_IoT\"}\nhostname=fake-ntb", Map.of(), new Redactor.Tally()));
+        assertEquals("<ssid_1> and <host_1> again",
+                redactor.filter("u1", "Fake_t33p_IoT and fake-ntb again", Map.of(), new Redactor.Tally()));
+        // Mutation: drop the sentinel check -> "unavailable" becomes <ssid_n> in the second text too.
+    }
+
+    @Test
+    @DisplayName("a value too long for an SSID, or holding a quoted string's escapes, is replaced where it was found and looked for nowhere else")
+    void overLongValuesStayWhereFound() {
+        var redactor = new Redactor(null);
+        // hostapd's configuration inside a JSON string, read on from a name ending in "ssid".
+        String hostapd = "{\"stdout\": \"ignore_broadcast_ssid=0\\nuapsd_advertisement_enabled=1\\nbridge=br-lan\"}";
+        String filtered = redactor.filter("u1", hostapd, Map.of(), new Redactor.Tally());
+        assertEquals("{\"stdout\": \"ignore_broadcast_ssid=<ssid_1>\"}", filtered,
+                "replaced where it was found, as before: whatever it covers stays hidden");
+        String quotedLong = "{\"ssid\": \"Fake network with a description far longer than any SSID\"}";
+        assertEquals("{\"ssid\": \"<ssid_2>\"}", redactor.filter("u1", quotedLong, Map.of(), new Redactor.Tally()));
+        String elsewhere = "0\\nuapsd_advertisement_enabled=1\\nbridge=br-lan and "
+                + "Fake network with a description far longer than any SSID";
+        assertEquals(elsewhere, redactor.filter("u1", elsewhere, Map.of(), new Redactor.Tally()),
+                "neither is looked for where it stands without its name");
+        assertFalse(Redactor.lookedForEverywhere(Redactor.Kind.SSID, "a".repeat(33)));
+        assertTrue(Redactor.lookedForEverywhere(Redactor.Kind.SSID, "a".repeat(32)), "32 octets is an SSID");
+        assertFalse(Redactor.lookedForEverywhere(Redactor.Kind.SSID, "\u00e1".repeat(17)), "34 octets is not");
+        assertTrue(Redactor.lookedForEverywhere(Redactor.Kind.HOST, "WORKGROUP\\pc1"), "a backslash of the name");
+        assertFalse(Redactor.lookedForEverywhere(Redactor.Kind.HOST, "fake\\u0041pc"), "an escape is not");
+    }
+
+    @Test
+    @DisplayName("a row learned before the rule keeps its number, and is put back where a reply names it, but is looked for nowhere")
+    void oldRowsAreKeptButNotLookedFor(@TempDir Path tmp) throws Exception {
+        var db = MigratedDatabase.at(tmp.resolve("t.db"));
+        String config = "0\\nuapsd_advertisement_enabled=1\\nbridge=br-lan";
+        db.update("INSERT INTO privacy_placeholders (user_id, kind, n, value) VALUES ('u1', 'host', 16, 'host'), "
+                + "('u1', 'ssid', 28, 'unavailable'), ('u1', 'ssid', 26, ?), ('u1', 'ssid', 4, 'Fake_t33p_IoT')", config);
+        var redactor = new Redactor(db);
+        String prompt = "NEVER say a package is unavailable. It stays on the host. " + config;
+        assertEquals(prompt, redactor.filter("u1", prompt, Map.of(), new Redactor.Tally()));
+        assertEquals("on <ssid_4>", redactor.filter("u1", "on Fake_t33p_IoT", Map.of(), new Redactor.Tally()),
+                "a real name learned then is looked for as before");
+        assertEquals("the sensor is unavailable on host", redactor.restore("u1", "the sensor is <ssid_28> on <host_16>"));
+        assertEquals("ssid=<ssid_29>", redactor.filter("u1", "ssid=Fake New Net", Map.of(), new Redactor.Tally()),
+                "a new value takes the next number, never one of theirs");
+        assertEquals(5, db.queryForObject("SELECT COUNT(*) FROM privacy_placeholders WHERE user_id = 'u1'", Integer.class),
+                "the rows are kept, not deleted");
+    }
+
+    @Test
     @DisplayName("counting what the filter would take adds nothing to the table")
     void countingAddsNothing(@TempDir Path tmp) throws Exception {
         var db = MigratedDatabase.at(tmp.resolve("t.db"));

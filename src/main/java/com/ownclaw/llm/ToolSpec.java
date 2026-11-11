@@ -13,15 +13,30 @@ import java.util.Map;
  * @param inputSchema a JSON Schema object, normally {@code {"type":"object","properties":{…}}}
  * @param deferred    offered only from a {@link LlmMessage.Role#TOOLS} message naming it: sent with
  *                    the request, but not part of what the model reads until then
+ * @param authored    its description and schema are this application's code, holding nothing a
+ *                    user, a tool or a model wrote -- the special actions: the cloud gateway removes
+ *                    the vault's values from them and replaces no identifier
+ *                    ({@link LlmMessage#authored}). A skill's text is written by a model and can
+ *                    name the owner's hosts; it is filtered whole.
  */
-public record ToolSpec(String name, String description, Map<String, Object> inputSchema, boolean deferred) {
+public record ToolSpec(String name, String description, Map<String, Object> inputSchema, boolean deferred,
+                       boolean authored) {
 
     public ToolSpec(String name, String description, Map<String, Object> inputSchema) {
-        this(name, description, inputSchema, false);
+        this(name, description, inputSchema, false, false);
+    }
+
+    public ToolSpec(String name, String description, Map<String, Object> inputSchema, boolean deferred) {
+        this(name, description, inputSchema, deferred, false);
     }
 
     public ToolSpec asDeferred() {
-        return new ToolSpec(name, description, inputSchema, true);
+        return new ToolSpec(name, description, inputSchema, true, authored);
+    }
+
+    /** This spec as the code's own text: see {@link #authored}. */
+    public ToolSpec asAuthored() {
+        return new ToolSpec(name, description, inputSchema, deferred, true);
     }
 
     /**
@@ -40,7 +55,8 @@ public record ToolSpec(String name, String description, Map<String, Object> inpu
         for (LlmMessage m : messages) {
             for (String name : m.addedTools()) {
                 ToolSpec t = deferred.remove(name);
-                if (t != null) out.add(new ToolSpec(t.name(), t.description(), t.inputSchema()));   // offered now
+                if (t != null) out.add(new ToolSpec(t.name(), t.description(), t.inputSchema(), false,
+                        t.authored()));   // offered now
             }
         }
         return out;

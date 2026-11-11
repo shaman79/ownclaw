@@ -238,10 +238,17 @@ final class LoopRig {
         return ticks::shutdownNow;
     }
 
-    /** Every user message the model was sent, in order. */
+    /**
+     * Every user message the model was sent, in order -- the chat as it reads it: Anthropic's
+     * provider splits the chat into blocks where the engine marked it, and sends no marker.
+     */
     static List<String> userParts(Call call) {
         var out = new ArrayList<String>();
-        for (LlmMessage m : call.messages()) if (m.role() == LlmMessage.Role.USER) out.add(m.content());
+        for (LlmMessage m : call.messages()) {
+            if (m.role() == LlmMessage.Role.USER) {
+                out.add(m.content().replace(LlmMessage.HISTORY_BLOCK, "").replace(LlmMessage.HISTORY_END, ""));
+            }
+        }
         return out;
     }
 }

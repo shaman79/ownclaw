@@ -51,7 +51,7 @@ class DeferredToolsTest {
     }
 
     @Test
-    @DisplayName("Anthropic: deferred tools carry defer_loading and no cache mark; each TOOLS message is a tool addition of deferred tools, each once")
+    @DisplayName("Anthropic: deferred tools carry defer_loading, no tool a cache mark; each TOOLS message is a tool addition of deferred tools, each once")
     void anthropic() {
         var provider = new AnthropicProvider(new OwnClawConfig(), new ObjectMapper());
         JsonNode body = provider.requestBody(conversation(), new LlmRequestConfig(null, null, false, TOOLS),
@@ -61,9 +61,9 @@ class DeferredToolsTest {
         assertEquals(5, tools.size(), "every tool is sent: the API expands a reference from the array");
         assertTrue(tools.get(3).path("defer_loading").asBoolean() && tools.get(4).path("defer_loading").asBoolean());
         assertTrue(tools.get(2).path("defer_loading").isMissingNode());
-        assertTrue(tools.get(2).has("cache_control"), "the cache mark is on the last tool not deferred");
         for (int i = 0; i < tools.size(); i++) {
-            if (i != 2) assertFalse(tools.get(i).has("cache_control"), tools.get(i).toString());
+            assertFalse(tools.get(i).has("cache_control"),
+                    "no tool carries a mark: the system prompt's, right after them, caches them: " + tools.get(i));
         }
 
         var additions = new ArrayList<List<String>>();

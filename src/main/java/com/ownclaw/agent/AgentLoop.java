@@ -548,7 +548,7 @@ public class AgentLoop {
 
             String conversationContext = sb.toString().strip();
             if (!conversationContext.isEmpty()) {
-                context.setConversationSummary("### The conversation so far\n" + conversationContext);
+                context.setConversationSummary(AgentContext.CONVERSATION_HEADER + conversationContext);
                 context.setConversation(entries);
                 log.debug("Loaded conversation context for user {}: {} chars",
                         userId, conversationContext.length());
@@ -3083,7 +3083,7 @@ public class AgentLoop {
         var promptParts = new ArrayList<String>();
         for (var msg : result.promptMessages()) {
             if (msg.role() == LlmMessage.Role.SYSTEM) continue;
-            promptParts.add("[" + msg.role().apiValue() + "] " + msg.content());
+            promptParts.add("[" + msg.role().apiValue() + "] " + LlmMessage.asRead(msg.content()));
         }
         detail.put("prompt", String.join("\n---\n", promptParts));
 

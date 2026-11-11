@@ -108,8 +108,8 @@ class CachedPrefixTest {
         // ── the cache marks, where they were ──
         for (int i = 0; i < sent.size(); i++) {
             JsonNode body = sent.get(i);
-            var expected = new ArrayList<>(List.of("/tools/" + lastNotDeferred(body) + " 1h", "/system/0 1h",
-                    "/messages/0/content/0 1h"));
+            // The tools have no mark of their own: the system prompt's, right after them, caches both.
+            var expected = new ArrayList<>(List.of("/system/0 1h", "/messages/0/content/0 1h"));
             int newest = newestUserTurn(body);
             if (newest > 0) {
                 assertEquals("assistant", body.path("messages").get(newest - 1).path("role").asText());
@@ -155,14 +155,6 @@ class CachedPrefixTest {
         ArrayNode out = JSON.createArrayNode();
         body.path("tools").forEach(t -> { if (!t.path("defer_loading").asBoolean()) out.add(t); });
         return out;
-    }
-
-    static int lastNotDeferred(JsonNode body) {
-        int last = -1;
-        for (int i = 0; i < body.path("tools").size(); i++) {
-            if (!body.path("tools").get(i).path("defer_loading").asBoolean()) last = i;
-        }
-        return last;
     }
 
     static JsonNode withoutMessages(JsonNode body) {

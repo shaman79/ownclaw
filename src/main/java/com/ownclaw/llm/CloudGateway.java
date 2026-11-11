@@ -26,7 +26,9 @@ import java.util.Map;
  * identifiers replaced by placeholders), check the canary, send, record, put the values back in
  * the reply, then hand back only a reply that is complete — so privacy is a property of the code
  * path. The filter applies to every part, assistant turns and the tools' descriptions and
- * schemas included, and this is the only code that writes or reads a placeholder: what comes
+ * schemas included -- to text the code wrote itself only as far as the vault's values
+ * ({@link LlmMessage#authored}, {@link ToolSpec#authored}) -- and this is the only code that
+ * writes or reads a placeholder: what comes
  * back holds the real values again, and every caller sees those. A prompt builder can be wrong
  * about what it rendered and the call is still refused -- in every message part but an
  * assistant turn. Two kinds of part are not scanned by the canary (see the canary loop): an
@@ -118,7 +120,11 @@ public final class CloudGateway implements LlmProvider {
 
         // (b) The filter, on every part: a vault value or a secret found by code never leaves,
         // and an identifier leaves as its placeholder (Redactor). The tools' descriptions and
-        // schemas too: the registry's text is trusted by the canary, not by the filter.
+        // schemas too: the registry's text is trusted by the canary, not by the filter. Text the
+        // code wrote itself -- the think call's system prompt, the special actions -- holds no
+        // identifier of the user's: the vault's values are removed from it, and no word of it is
+        // replaced, so a word the user's table holds by coincidence no longer rewrites the
+        // instructions, and the front of every cached prompt, the moment it is learned.
         String user = egress.userId();
         Map<String, String> vault = egress.secretValues();
         var tally = new Redactor.Tally();
@@ -127,7 +133,9 @@ public final class CloudGateway implements LlmProvider {
             // A TOOLS message is the registry's own tool names, not data: filtered, a name that
             // looked like an identifier would no longer name its tool.
             filteredMessages.add(m.role() == LlmMessage.Role.TOOLS ? m
-                    : new LlmMessage(m.role(), redactor.filter(user, m.content(), vault, tally)));
+                    : new LlmMessage(m.role(), m.authored()
+                            ? Redactor.filterAuthored(m.content(), vault, tally)
+                            : redactor.filter(user, m.content(), vault, tally), m.authored()));
         }
         List<ToolSpec> tools = cfg.tools();
         List<ToolSpec> filteredTools = null;
@@ -135,10 +143,13 @@ public final class CloudGateway implements LlmProvider {
             filteredTools = new ArrayList<>(tools.size());
             for (ToolSpec t : tools) {
                 @SuppressWarnings("unchecked")
-                Map<String, Object> schema = (Map<String, Object>) redactor.filterTree(user,
-                        t.inputSchema(), vault, tally);
-                filteredTools.add(new ToolSpec(t.name(), redactor.filter(user, t.description(), vault, tally),
-                        schema, t.deferred()));
+                Map<String, Object> schema = (Map<String, Object>) (t.authored()
+                        ? Redactor.filterAuthoredTree(t.inputSchema(), vault, tally)
+                        : redactor.filterTree(user, t.inputSchema(), vault, tally));
+                filteredTools.add(new ToolSpec(t.name(), t.authored()
+                        ? Redactor.filterAuthored(t.description(), vault, tally)
+                        : redactor.filter(user, t.description(), vault, tally),
+                        schema, t.deferred(), t.authored()));
             }
         }
 

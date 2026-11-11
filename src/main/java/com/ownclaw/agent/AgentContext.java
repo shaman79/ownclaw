@@ -342,6 +342,9 @@ public class AgentContext {
         return conversation;
     }
 
+    /** The line the chat starts with under Prior Context. */
+    public static final String CONVERSATION_HEADER = "### The conversation so far\n";
+
     /**
      * The chat as the prompt shows it under Prior Context: {@link #conversationSummary} itself,
      * the same bytes, until a message of it is folded ({@link #fitToWindow}); then each folded
@@ -349,12 +352,22 @@ public class AgentContext {
      */
     public synchronized String conversationShown() {
         if (chatFolded.isEmpty() || conversation.isEmpty()) return conversationSummary;
-        var sb = new StringBuilder();
+        return CONVERSATION_HEADER + String.join("", conversationShownMessages()).strip();
+    }
+
+    /**
+     * {@link #conversationShown}'s messages one by one, each as the chat holds it -- folded, once
+     * it has been, else whole -- with nothing taken from its end: what Anthropic's request sends as
+     * a block of its own, the same bytes on every later turn of the chat
+     * ({@code ThinkingEngine#anthropicTask}). Empty for a task that came from no chat.
+     */
+    public synchronized List<String> conversationShownMessages() {
+        var out = new java.util.ArrayList<String>(conversation.size());
         for (int i = 0; i < conversation.size(); i++) {
             ContextFit.ChatFold f = chatFolded.get(i);
-            sb.append(f != null ? f.shown() : conversation.get(i));
+            out.add(f != null ? f.shown() : conversation.get(i));
         }
-        return "### The conversation so far\n" + sb.toString().strip();
+        return out;
     }
 
     public String userPreferences() { return userPreferences; }

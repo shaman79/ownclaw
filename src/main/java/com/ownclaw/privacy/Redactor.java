@@ -78,6 +78,78 @@ public final class Redactor {
     static final int MIN_KNOWN_LENGTH = 4;
 
     /**
+     * What programs print where an SSID or a host's name would stand when there is none: the name
+     * of no device. Compared ignoring case.
+     */
+    private static final Set<String> SENTINELS = Set.of("unavailable", "unknown", "none", "null", "nil",
+            "undefined", "n/a", "na", "on", "off", "true", "false", "off/any", "any", "-", "*", "?",
+            "(none)", "<none>", "(null)", "(unknown)", "<unknown>", "<hidden>", "(hidden)");
+
+    /** Host names every machine has, which name none of them. Compared ignoring case. */
+    private static final Set<String> GENERIC_HOSTS = Set.of("host", "localhost", "localdomain",
+            "localhost.localdomain", "ip6-localhost", "ip6-loopback", "broadcasthost");
+
+    /** The most an SSID can be: 32 octets (IEEE 802.11). */
+    static final int MAX_SSID_BYTES = 32;
+
+    /** The most a host's name can be: 253 characters (RFC 1035). */
+    static final int MAX_HOST_LENGTH = 253;
+
+    /**
+     * Whether a value found where an SSID or a host's name is written names no device: a sentinel a
+     * program prints in a name's place, or a name every machine has. It is no identifier, and is
+     * neither replaced nor learned. Production's table held "unavailable" -- a Home Assistant
+     * WiFi sensor's state, read as an SSID -- and "host", and replaced each wherever it stood as a
+     * word: in the owner's chats, in every tool description that held it, and in the system prompt
+     * ("NEVER say a package is <ssid_28>"), which changed the front of every cached prompt at once.
+     */
+    static boolean namesNoDevice(Kind kind, String value) {
+        if (kind != Kind.SSID && kind != Kind.HOST || value == null) return false;
+        String lower = value.strip().toLowerCase(Locale.ROOT);
+        return lower.isEmpty() || SENTINELS.contains(lower) || kind == Kind.HOST && GENERIC_HOSTS.contains(lower);
+    }
+
+    /**
+     * Whether an SSID or a host's name, once found under its name, is also looked for wherever it
+     * stands as a word, in this text and in every later request: one that can be a name -- at least
+     * {@link #MIN_KNOWN_LENGTH} characters, no longer than the kind allows, no control character,
+     * no escape sequence of a quoted string -- and not one that {@link #namesNoDevice}.
+     * <p>
+     * What fails is still replaced where it was found under its name, as before: the rule only
+     * stops it being looked for elsewhere. Production's table held "SSIDs" of 43 to 484
+     * characters: hostapd's configuration inside a JSON string, its newlines written as escapes,
+     * read on from {@code ignore_broadcast_ssid=0} to the string's end. Replaced where they were
+     * found they still hide whatever they cover; looked for everywhere they never named anything.
+     */
+    static boolean lookedForEverywhere(Kind kind, String value) {
+        if (kind != Kind.SSID && kind != Kind.HOST || value == null) return false;
+        String t = value.strip();
+        if (t.length() < MIN_KNOWN_LENGTH || namesNoDevice(kind, t)) return false;
+        for (int i = 0; i < t.length(); i++) {
+            char c = t.charAt(i);
+            if (c < 0x20 || c == 0x7f) return false;
+            if (c == '\\' && i + 1 < t.length() && escapeAt(t, i + 1)) return false;
+        }
+        return kind == Kind.SSID ? t.getBytes(java.nio.charset.StandardCharsets.UTF_8).length <= MAX_SSID_BYTES
+                : t.length() <= MAX_HOST_LENGTH;
+    }
+
+    /**
+     * Whether what follows a backslash at {@code i} makes it an escape of a quoted string -- a
+     * line break, a tab, a quote, a backslash, a u and four hex digits -- rather than a backslash
+     * of the name: {@code WORKGROUP\pc1} is a name.
+     */
+    private static boolean escapeAt(String t, int i) {
+        char c = t.charAt(i);
+        if ("nrt\"\\".indexOf(c) >= 0) return true;
+        if (c != 'u') return false;
+        for (int k = i + 1; k <= i + 4; k++) {
+            if (k >= t.length() || !isHex(t.charAt(k))) return false;
+        }
+        return true;
+    }
+
+    /**
      * The kinds of identifier, each replaced by {@code <kind_n>}; and TEXT, text written in a
      * placeholder's shape, which is no identifier and is not counted as one.
      */
@@ -243,6 +315,37 @@ public final class Redactor {
         if (value instanceof List<?> l) {
             var out = new ArrayList<Object>(l.size());
             for (Object o : l) out.add(filterTree(userId, o, vault, tally));
+            return out;
+        }
+        return value;
+    }
+
+    /**
+     * {@code text} that this application's code wrote -- the think call's system prompt, the
+     * special actions' descriptions -- as a cloud model may read it: the vault's values removed,
+     * and nothing replaced. Such text holds no identifier of the user's, and the words of it that
+     * the user's table holds by coincidence -- "unavailable", once read as a WiFi's name from a
+     * sensor's state -- were rewritten as placeholders in every request from the moment they were
+     * learned: the instructions read "NEVER say a package is <ssid_28>", and the front of every
+     * cached prompt changed at once, so every chat's prompt was written to the cache again.
+     */
+    public static String filterAuthored(String text, Map<String, String> vault, Tally tally) {
+        Scrubbed scrubbed = scrubVault(text, vault);
+        tally.secrets += scrubbed.count();
+        return scrubbed.text();
+    }
+
+    /** {@link #filterAuthored} over every string in a JSON-shaped value: an action's input schema. */
+    public static Object filterAuthoredTree(Object value, Map<String, String> vault, Tally tally) {
+        if (value instanceof String s) return filterAuthored(s, vault, tally);
+        if (value instanceof Map<?, ?> m) {
+            var out = new LinkedHashMap<Object, Object>();
+            for (var e : m.entrySet()) out.put(e.getKey(), filterAuthoredTree(e.getValue(), vault, tally));
+            return out;
+        }
+        if (value instanceof List<?> l) {
+            var out = new ArrayList<Object>(l.size());
+            for (Object o : l) out.add(filterAuthoredTree(o, vault, tally));
             return out;
         }
         return value;
@@ -812,7 +915,10 @@ public final class Redactor {
                 int nul = e.indexOf('\0');
                 Kind kind = Kind.valueOf(e.substring(0, nul).toUpperCase(Locale.ROOT));
                 String value = e.substring(nul + 1);
-                if (out.containsKey(kind) && value.length() >= MIN_KNOWN_LENGTH) out.get(kind).add(value);
+                // A value learned before the rule that it fails (lookedForEverywhere) -- "host",
+                // "unavailable" -- keeps its number, and is put back where a reply names it, but is
+                // looked for nowhere: the rows are kept, not deleted.
+                if (out.containsKey(kind) && lookedForEverywhere(kind, value)) out.get(kind).add(value);
             }
             return out;
         }
@@ -844,6 +950,9 @@ public final class Redactor {
         ipv4(s, ids);
         ipv6(s, ids);
         literals(s, ids);
+        // A sentinel or a generic name found where an SSID or a host's name is written names no
+        // device: it is not replaced, and not learned (namesNoDevice).
+        ids.removeIf(f -> namesNoDevice(f.kind(), f.valueIn(s)));
         // What to look for as a word, each as it is written, with the kind and value it stands for.
         var needles = new HashMap<String, Finding>();
         for (var e : known.entrySet()) {
@@ -853,7 +962,8 @@ public final class Redactor {
             }
         }
         for (Finding f : ids) {
-            if ((f.kind() == Kind.SSID || f.kind() == Kind.HOST) && f.end() - f.start() >= MIN_KNOWN_LENGTH) {
+            if ((f.kind() == Kind.SSID || f.kind() == Kind.HOST) && f.end() - f.start() >= MIN_KNOWN_LENGTH
+                    && lookedForEverywhere(f.kind(), f.valueIn(s))) {
                 needles.putIfAbsent(s.substring(f.start(), f.end()), f);
             }
         }

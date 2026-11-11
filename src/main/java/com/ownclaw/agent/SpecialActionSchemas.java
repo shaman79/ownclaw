@@ -25,8 +25,13 @@ public final class SpecialActionSchemas {
 
     private SpecialActionSchemas() { /* static only */ }
 
+    /**
+     * A special action's spec: the code's own text, so the cloud gateway replaces no identifier in
+     * it ({@link ToolSpec#authored}) -- a word of it the privacy filter had learned as a name would
+     * otherwise change the front of every cached prompt.
+     */
     private static ToolSpec spec(String name, String description, Map<String, ToolParam> params) {
-        return new ToolSpec(name, description, ToolSchemas.toJsonSchema(params));
+        return new ToolSpec(name, description, ToolSchemas.toJsonSchema(params), false, true);
     }
 
     private static Map<String, ToolParam> params(Object... pairs) {

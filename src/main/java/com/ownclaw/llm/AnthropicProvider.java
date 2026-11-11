@@ -496,16 +496,16 @@ class AnthropicProvider implements LlmProvider {
         // Claude: system prompt is a top-level field, not in messages.
         // We use structured content blocks with cache_control to enable prompt caching.
         //
-        // A task's think call is a stable prefix -- the tools, the system prompt and the task,
-        // which the engine ends with its marker in the first message on every step -- then the
-        // steps so far. The prefix is the same bytes for the whole task and, but for the task, for
-        // the next turns of the chat, so it is cached for an hour (TTL "1h", writes at 2x the
-        // input rate, reads at the usual rate): a delegation that keeps the cloud waiting for
-        // twenty minutes, or the owner's next message ten minutes on, used to find it expired
-        // after the default five and pay for writing all of it again. The steps after it slide
-        // on the five-minute cache. The API takes the longer-lived marks before the shorter ones,
-        // which this order is. A request without the marker -- code generation, a summary -- has
-        // no prefix worth an hour: its marks are all five-minute ones.
+        // A task's think call is a stable prefix -- the tools, the system prompt, the chat the
+        // task came from and the task, which the engine ends with its marker in the first message
+        // on every step -- then the steps so far. The prefix is the same bytes for the whole task
+        // and, up to the end of the chat, for the chat's next turns, so it is cached for an hour
+        // (TTL "1h", writes at 2x the input rate, reads at the usual rate): a delegation that
+        // keeps the cloud waiting for twenty minutes, or the owner's next message ten minutes on,
+        // used to find it expired after the default five and pay for writing all of it again.
+        // The steps after it slide on the five-minute cache. The API takes the longer-lived marks
+        // before the shorter ones, which this order is. A request without the marker -- code
+        // generation, a summary -- has no prefix worth an hour: its marks are all five-minute ones.
         String systemPrompt = null;
         ArrayNode msgs = body.putArray("messages");
         boolean stable = false;
@@ -551,16 +551,27 @@ class AnthropicProvider implements LlmProvider {
                     // as one block it was re-sent in full, and then written to the cache as well.
                     stable = true;
                     ArrayNode blocks = m.putArray("content");
-                    ObjectNode task = blocks.addObject();
-                    task.put("type", "text");
-                    task.put("text", content.substring(0, cut));
-                    task.set("cache_control", cacheControl(true));
-                    String rest = content.substring(cut + LlmMessage.CACHE_BOUNDARY.length());
-                    if (!rest.isBlank()) {
-                        ObjectNode after = blocks.addObject();
-                        after.put("type", "text");
-                        after.put("text", rest);
+                    String task = content.substring(0, cut);
+                    // Before it, the chat the task came from, a block for each of its messages and
+                    // the hour mark on the last: on the chat's next turn they are the same bytes a
+                    // block apart, and the request reads them back -- the API looks back twenty
+                    // blocks from a mark for what an earlier request cached, and a turn adds two
+                    // messages. The engine marks the chat (ThinkingEngine#anthropicTask) and takes
+                    // every marker out of the text it puts there, so the first end marker is its own.
+                    int chatEnd = task.indexOf(LlmMessage.HISTORY_END);
+                    if (chatEnd >= 0) {
+                        ObjectNode last = null;
+                        for (String message : task.substring(0, chatEnd).split(
+                                java.util.regex.Pattern.quote(LlmMessage.HISTORY_BLOCK), -1)) {
+                            // The API refuses a block of nothing but blanks; no message is one.
+                            if (!message.isBlank()) last = textBlock(blocks, message);
+                        }
+                        if (last != null) last.set("cache_control", cacheControl(true));
+                        task = task.substring(chatEnd + LlmMessage.HISTORY_END.length());
                     }
+                    if (!task.isBlank()) textBlock(blocks, task).set("cache_control", cacheControl(true));
+                    String rest = content.substring(cut + LlmMessage.CACHE_BOUNDARY.length());
+                    if (!rest.isBlank()) textBlock(blocks, rest);
                 } else {
                     m.put("content", content);
                 }
@@ -582,8 +593,8 @@ class AnthropicProvider implements LlmProvider {
         // this step's entry a few positions back, well inside the 20 positions each breakpoint looks back over. Each step
         // pays full price only for its newest turn and the context that changes with it; when
         // this entry has expired, the next step reads the task's hour-long one and writes only
-        // the steps after it. With the tools, the system prompt and the task, that is four
-        // marks, the most the API takes.
+        // the steps after it. With the system prompt, the chat and the task, that is four marks,
+        // the most the API takes.
         // Before the newest user turn, on a message of text: a tool addition -- after that turn,
         // or before it -- is not one.
         int newest = msgs.size() - 1;
@@ -616,11 +627,13 @@ class AnthropicProvider implements LlmProvider {
         // not a side effect of this one.
         //
         // A deferred tool is sent with defer_loading: the API leaves it out of the prompt until a
-        // tool addition names it (above), and it may not carry the cache mark, which goes on the
-        // last tool that is not deferred.
+        // tool addition names it (above).
+        //
+        // No mark of their own: the system prompt's, right after them, caches them with it. The
+        // tools had one, and with the system prompt, the task and the sliding one that was the
+        // API's four -- none left for the chat, which is most of what a turn of a long chat sends.
         if (reqConfig.hasTools()) {
             ArrayNode toolsArray = body.putArray("tools");
-            ObjectNode lastOffered = null;
             for (ToolSpec spec : tools) {
                 ObjectNode t = toolsArray.addObject();
                 t.put("name", spec.name());
@@ -628,9 +641,7 @@ class AnthropicProvider implements LlmProvider {
                 t.set("input_schema", mapper.valueToTree(spec.inputSchema()));
                 t.put("eager_input_streaming", true);
                 if (spec.deferred()) t.put("defer_loading", true);
-                else lastOffered = t;
             }
-            if (lastOffered != null) lastOffered.set("cache_control", cacheControl(stable));
             ObjectNode choice = body.putObject("tool_choice");
             choice.put("type", "auto");
             choice.put("disable_parallel_tool_use", true);
@@ -641,6 +652,14 @@ class AnthropicProvider implements LlmProvider {
         // "respond with valid JSON"). Assistant prefill is NOT used because some
         // Claude models reject it with HTTP 400.
         return body;
+    }
+
+    /** A text block of {@code text}, added to {@code blocks}. */
+    private static ObjectNode textBlock(ArrayNode blocks, String text) {
+        ObjectNode block = blocks.addObject();
+        block.put("type", "text");
+        block.put("text", text);
+        return block;
     }
 
     /**

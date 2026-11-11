@@ -312,7 +312,8 @@ public class ThinkingEngine {
         if (mode.nativeTools() && context.toolsAdded() == null) context.seedTaskTools(firstTools(context));
         if (mode.nativeTools() && !mode.local()) context.cloudStep(mode.localFirst());
         List<LlmMessage> messages = new ArrayList<>();
-        messages.add(LlmMessage.system(buildSystemPrompt(mode)));
+        // The code's own text: no word of it is taken for the user's identifier (LlmMessage#authored).
+        messages.add(LlmMessage.authoredSystem(buildSystemPrompt(mode)));
 
         if ("anthropic".equals(providerName)) {
             // Anthropic: the steps replayed turn by turn, append-only for prefix caching.
@@ -383,13 +384,15 @@ public class ThinkingEngine {
      * carries what changes on every step (the date, the tools on the text protocol, the vault),
      * behind the cache breakpoints. The cache boundary marks where the task ends in the first
      * message, on every step: the task -- with the tools and the system prompt before it -- is
-     * the stable prefix, which the provider caches for longer than the steps after it.
+     * the stable prefix, which the provider caches for longer than the steps after it. Before the
+     * task, the chat it came from is marked message by message ({@link #anthropicTask}), so the
+     * chat's next turn reads it back from the cache too.
      */
     void buildAnthropicMessages(List<LlmMessage> messages, AgentContext context, StepMode mode) {
         var added = toolsAdded(context, mode);
         int next = 0;
         int steps = 0;
-        var user = new StringBuilder(buildUserMessage(context)).append(CACHE_BOUNDARY_MARKER);
+        var user = new StringBuilder(anthropicTask(context)).append(CACHE_BOUNDARY_MARKER);
         var turns = context.trajectory().turns();
         for (int i = 0; i < turns.size(); i++) {
             var turn = turns.get(i);
@@ -545,21 +548,35 @@ public class ThinkingEngine {
     /**
      * What delegate's description adds on a task whose cloud orchestrates first. The cloud cannot
      * CALL the skills, but it still has to know they exist, or it will write a goal that asks for
-     * something already built -- or reach for skill_create to rebuild it. So this names the
-     * task's likeliest -- its first tools and the owner's usual ones, the same on every step of
-     * the task -- and find_tools searches the rest. It used to carry every skill's whole
-     * description: 114,293 characters of a scheduled run's every request. In the description, a
-     * tool part, not the task's message: the canary reads the user parts for private text, and a
-     * skill's own words are not that. Its words hold after a delegation has failed too, when the
-     * skills are offered after all: the description is part of the cached prefix and does not
-     * change.
+     * something already built -- or reach for skill_create to rebuild it. So this names some, and
+     * find_tools searches the rest. It used to carry every skill's whole description: 114,293
+     * characters of a scheduled run's every request. In the description, a tool part, not the
+     * task's message: the canary reads the user parts for private text, and a skill's own words
+     * are not that -- a skill describes the shape of its own output, so a private result of it
+     * would match its description, and the next request would be refused. Its words hold after a
+     * delegation has failed too, when the skills are offered after all: the description is part of
+     * the cached prefix and does not change.
+     * <p>
+     * Which ones it names is what keeps that prefix the same. Unattended work names the task's
+     * likeliest -- its first tools and the owner's usual ones -- since nothing is cached across its
+     * runs anyway: they are a day apart. A chat names the owner's usual skills only, by name, the
+     * same on every turn: the tools come first in the prompt and this is the eighth of them, so a
+     * list that followed each message changed the front of every turn's prompt, and every turn
+     * wrote the whole chat to the cache again ($2.02 for one turn a minute after the last, on
+     * 2026-11-10).
      */
     private String orchestrationNote(AgentContext context) {
         var likeliest = new StringBuilder();
-        var added = context.toolsAdded();
         var names = new LinkedHashSet<String>();
-        if (added != null && !added.isEmpty()) names.addAll(added.getFirst().names());
-        names.addAll(context.usualTools());
+        if (context.isUnattended()) {
+            var added = context.toolsAdded();
+            if (added != null && !added.isEmpty()) names.addAll(added.getFirst().names());
+            names.addAll(context.usualTools());
+        } else {
+            // By name: the set changes when the owner's most used skills do, the order every time
+            // two of them swap places.
+            context.usualTools().stream().sorted().forEach(names::add);
+        }
         for (String name : names) {
             toolRegistry.find(name).ifPresent(t -> likeliest.append("\n- ").append(t.name()).append(": ")
                     .append(ToolFinder.gist(t.description())));
@@ -569,7 +586,9 @@ public class ThinkingEngine {
                 + ", so while the local model can do the work you are not given the skills to run "
                 + "yourself — this is how the work gets done. State the goal fully and name the skills "
                 + "it needs in 'tools'; find_tools searches every skill."
-                + (likeliest.isEmpty() ? "" : " The likeliest for this task:" + likeliest);
+                + (likeliest.isEmpty() ? ""
+                        : (context.isUnattended() ? " The likeliest for this task:" : " The owner's usual skills:")
+                                + likeliest);
     }
 
     /**
@@ -594,7 +613,7 @@ public class ThinkingEngine {
         for (var spec : SpecialActionSchemas.ALL) {
             specials.add(!AgentAction.DELEGATE.equals(spec.name()) ? spec
                     : mode.local() ? new com.ownclaw.llm.ToolSpec(spec.name(),
-                            SpecialActionSchemas.DELEGATE_ON_THE_LOCAL_MODEL, spec.inputSchema())
+                            SpecialActionSchemas.DELEGATE_ON_THE_LOCAL_MODEL, spec.inputSchema(), false, true)
                     : orchestrating ? new com.ownclaw.llm.ToolSpec(spec.name(),
                             spec.description() + orchestrationNote(context), spec.inputSchema())
                     : spec);
@@ -1018,6 +1037,45 @@ public class ThinkingEngine {
         String files = filesSection(context);
         if (!files.isEmpty()) sb.append("\n\n").append(files);
 
+        return sb.toString();
+    }
+
+    /**
+     * The task as Anthropic's provider is sent it: what {@link #buildUserMessage} writes, with each
+     * message of the chat marked as a block of its own ({@link LlmMessage#HISTORY_BLOCK}) and the
+     * end of the chat marked ({@link LlmMessage#HISTORY_END}). The provider caches the chat for an
+     * hour where it ends. On the chat's next turn every one of those messages is the same bytes, a
+     * block where it was, so that turn's request reads them back and writes only what was said
+     * since -- and its own task. Sent as one block with the task, the chat was a turn longer on
+     * every turn and never matched what the last turn cached: from 5 to 10 November 2026 fourteen
+     * turns wrote their whole chat to the cache again, $30.80 of the $52 the cloud cost.
+     * <p>
+     * The model reads buildUserMessage's text but for blanks at the very end of the chat: each
+     * message goes as the chat holds it, so that it is the same bytes wherever it stands. The
+     * chat's and the task's text go in through {@link LlmMessage#unmarked}, so that nothing a user,
+     * a tool or a page wrote is taken for a marker.
+     */
+    String anthropicTask(AgentContext context) {
+        var sb = new StringBuilder();
+        List<String> chat = context.conversationShownMessages();
+        String shown = context.conversationShown();
+        // The chat's messages where the chat is shown at all: what buildUserMessage shows, no more.
+        if (shown != null && !shown.isBlank() && !chat.isEmpty()) {
+            sb.append("## Prior Context\n").append(AgentContext.CONVERSATION_HEADER);
+            for (int i = 0; i < chat.size(); i++) {
+                if (i > 0) sb.append(LlmMessage.HISTORY_BLOCK);
+                sb.append(LlmMessage.unmarked(chat.get(i)));
+            }
+            // A blank line before the task, as buildUserMessage writes: a message ends its line.
+            sb.append(LlmMessage.HISTORY_END).append(chat.getLast().endsWith("\n") ? "\n" : "\n\n");
+        } else if (shown != null && !shown.isBlank()) {
+            sb.append("## Prior Context\n").append(LlmMessage.unmarked(shown)).append('\n')
+              .append(LlmMessage.HISTORY_END).append('\n');
+        }
+        sb.append("## Task\n");
+        sb.append(LlmMessage.unmarked(context.originalMessage()));
+        String files = filesSection(context);
+        if (!files.isEmpty()) sb.append("\n\n").append(files);
         return sb.toString();
     }
 

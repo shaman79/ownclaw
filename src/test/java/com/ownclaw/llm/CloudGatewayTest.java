@@ -266,6 +266,39 @@ class CloudGatewayTest {
     }
 
     @Test
+    @DisplayName("text the code wrote keeps every word the user's table holds, and loses the vault's values; a skill's text is filtered as before")
+    void authoredTextIsTheCodes() {
+        var redactor = new Redactor(null);
+        // Learned from a result: a device whose name is also a word of the code's own text.
+        redactor.filter("u1", "hostname=machine", Map.of(), new Redactor.Tally());
+        var provider = new Recording(); var rows = new Rows();
+        var gw = new CloudGateway(provider, new Recording(), config("anthropic", CloudGateway.Mode.ENFORCE), rows,
+                null, redactor);
+        var special = new ToolSpec("respond", "Answer from this machine.",
+                Map.of("type", "object", "note", "on this machine, never hunter2secret"), false, true);
+        var skill = new ToolSpec("lan_scan", "Scan the machine.", Map.of("type", "object", "note", "this machine"));
+        var cfg = new LlmRequestConfig(null, null, false).withTools(List.of(special, skill))
+                .withEgress(egress(new PrivateIndex(), Map.of("API_TOKEN", "hunter2secret"), (h, w) -> false));
+
+        gw.chat(List.of(LlmMessage.authoredSystem("Work on this machine. Never print hunter2secret."),
+                LlmMessage.user("restart the machine")), cfg);
+
+        var sent = provider.calls.get(0);
+        assertEquals("Work on this machine. Never print «vault:API_TOKEN».", sent.get(0).content(),
+                "the system prompt: the vault's value removed, no word replaced");
+        assertEquals("restart the <host_1>", sent.get(1).content(), "data is filtered as before");
+        var tools = provider.configs.get(0).tools();
+        assertEquals("Answer from this machine.", tools.get(0).description());
+        assertEquals("on this machine, never «vault:API_TOKEN»", tools.get(0).inputSchema().get("note"));
+        assertEquals("Scan the <host_1>.", tools.get(1).description(), "a skill's words are a model's: filtered");
+        assertEquals("this <host_1>", tools.get(1).inputSchema().get("note"));
+        assertEquals(2, rows.last().secretsRemoved());
+        assertEquals(3, rows.last().identifiersReplaced());
+        // Mutation: filter authored text whole -> "Work on this <host_1>", and the system prompt
+        // -- the front of every cached prompt -- changes the moment a device is called "machine".
+    }
+
+    @Test
     @DisplayName("a vault value its own marker carries refuses the call")
     void secretsThatSurviveScrubbingAreRefused() {
         // The marker is unverified: a value of "redacted" under a key that holds it is written

@@ -14,9 +14,10 @@ import static org.junit.jupiter.api.Assertions.*;
 
 /**
  * What the Anthropic request looks like to the prompt cache: the task is cached on a task's first
- * call and read back on the next; the stable prefix -- tools, system prompt, task -- is cached for
- * an hour and the steps after it for five minutes, the hour-long marks first; and no request
- * carries more cache marks than the API allows.
+ * call and read back on the next; the chat it came from is a block per message, cached where it
+ * ends; the stable prefix -- tools, system prompt, chat, task -- is cached for an hour and the steps
+ * after it for five minutes, the hour-long marks first; and no request carries more cache marks
+ * than the API allows.
  */
 class AnthropicCacheTest {
 
@@ -75,9 +76,11 @@ class AnthropicCacheTest {
         var step3 = body(List.of(LlmMessage.system("SYSTEM"), LlmMessage.user("the task" + MARK),
                 LlmMessage.assistant("action 1"), LlmMessage.user("result 1"),
                 LlmMessage.assistant("action 2"), LlmMessage.user("result 2\n\n---\n## Environment")), true);
-        assertEquals(List.of(HOUR, HOUR, HOUR, FIVE_MINUTES), marks(step3).stream().map(JsonNode::toString).toList(),
-                "the tools, the system prompt and the task for an hour, then the one sliding mark; "
-                        + "the API takes the longer-lived ones first: " + step3);
+        assertEquals(List.of(HOUR, HOUR, FIVE_MINUTES), marks(step3).stream().map(JsonNode::toString).toList(),
+                "the system prompt -- with the tools before it -- and the task for an hour, then the one "
+                        + "sliding mark; the API takes the longer-lived ones first: " + step3);
+        assertTrue(step3.path("tools").get(0).path("cache_control").isMissingNode(),
+                "the tools have no mark of their own: the system prompt's caches them");
         var messages = step3.path("messages");
         assertEquals(FIVE_MINUTES, messages.get(3).path("content").get(0).path("cache_control").toString(),
                 "on the message before the newest");
@@ -85,9 +88,58 @@ class AnthropicCacheTest {
 
         var step0 = body(List.of(LlmMessage.system("SYSTEM"), LlmMessage.user("the task" + MARK + "\n\n---\n## Environment")),
                 true);
-        assertEquals(List.of(HOUR, HOUR, HOUR), marks(step0).stream().map(JsonNode::toString).toList(), step0.toString());
+        assertEquals(List.of(HOUR, HOUR), marks(step0).stream().map(JsonNode::toString).toList(), step0.toString());
         // Mutation: send the hour on the sliding mark too -> a two-minute step pays 2x on what
         // the next one already reads; send it last -> the API refuses the order.
+    }
+
+    /** A task's first message as the engine writes it for a chat: its messages, the end of the chat, the task. */
+    static String chatThenTask(List<String> chat, String task) {
+        return "## Prior Context\n### The conversation so far\n" + String.join(LlmMessage.HISTORY_BLOCK, chat)
+                + LlmMessage.HISTORY_END + "\n## Task\n" + task;
+    }
+
+    @Test
+    @DisplayName("the chat a task came from is a block per message, the last cached for an hour, before the task's own")
+    void theChatIsABlockPerMessage() {
+        List<String> chat = List.of("USER: is the battery charging?\n", "ASSISTANT: Yes, from the grid.\n");
+        var step1 = body(List.of(LlmMessage.system("SYSTEM"), LlmMessage.user(chatThenTask(chat, "stop it") + MARK),
+                LlmMessage.assistant("action 1"), LlmMessage.user("result 1\n\n---\n## Environment")), true);
+        JsonNode first = step1.path("messages").get(0).path("content");
+        assertEquals(3, first.size(), "two messages and the task: " + first);
+        assertEquals("## Prior Context\n### The conversation so far\nUSER: is the battery charging?\n",
+                first.get(0).path("text").asText());
+        assertEquals("ASSISTANT: Yes, from the grid.\n", first.get(1).path("text").asText());
+        assertEquals("\n## Task\nstop it", first.get(2).path("text").asText());
+        assertTrue(first.get(0).path("cache_control").isMissingNode(), "one mark for the chat, where it ends");
+        assertEquals(HOUR, first.get(1).path("cache_control").toString());
+        assertEquals(HOUR, first.get(2).path("cache_control").toString());
+        assertEquals(List.of(HOUR, HOUR, HOUR, FIVE_MINUTES), marks(step1).stream().map(JsonNode::toString).toList(),
+                "the system prompt, the chat and the task for an hour, the sliding mark after them: " + step1);
+        assertFalse(step1.toString().contains("\u0001"), "no marker is sent: " + step1);
+        assertEquals("## Prior Context\n### The conversation so far\nUSER: is the battery charging?\n"
+                        + "ASSISTANT: Yes, from the grid.\n\n## Task\nstop it",
+                first.get(0).path("text").asText() + first.get(1).path("text").asText() + first.get(2).path("text").asText(),
+                "what the model reads is the text the other providers are sent");
+    }
+
+    @Test
+    @DisplayName("the chat's next turn sends the last turn's blocks again, a block apart, so it reads what that one cached")
+    void theNextTurnReadsTheChatBack() {
+        var turn1 = body(List.of(LlmMessage.system("SYSTEM"), LlmMessage.user(chatThenTask(
+                List.of("USER: a\n", "ASSISTANT: b\n"), "c") + MARK + "\n\n---\n## Environment")), true);
+        var turn2 = body(List.of(LlmMessage.system("SYSTEM"), LlmMessage.user(chatThenTask(
+                List.of("USER: a\n", "ASSISTANT: b\n", "USER: c\n", "ASSISTANT: d\n"), "e") + MARK
+                + "\n\n---\n## Environment")), true);
+        assertEquals(turn1.path("system"), turn2.path("system"));
+        assertEquals(turn1.path("tools"), turn2.path("tools"));
+        JsonNode one = turn1.path("messages").get(0).path("content");
+        JsonNode two = turn2.path("messages").get(0).path("content");
+        assertEquals(one.get(0), two.get(0), "the chat's first block, as it was");
+        assertEquals(one.get(1).path("text"), two.get(1).path("text"),
+                "the block the last turn cached the chat up to, the same bytes, a boundary where it was");
+        assertEquals(HOUR, two.get(3).path("cache_control").toString(),
+                "this turn's mark, two blocks on: well inside the twenty the API looks back over");
     }
 
     @Test
@@ -96,7 +148,7 @@ class AnthropicCacheTest {
         var codegen = body(List.of(LlmMessage.system("Write the skill."), LlmMessage.user("a scanner")), false);
         assertEquals(List.of(FIVE_MINUTES), marks(codegen).stream().map(JsonNode::toString).toList(), codegen.toString());
         var withTools = body(List.of(LlmMessage.system("SYSTEM"), LlmMessage.user("no marker here")), true);
-        assertEquals(List.of(FIVE_MINUTES, FIVE_MINUTES), marks(withTools).stream().map(JsonNode::toString).toList());
+        assertEquals(List.of(FIVE_MINUTES), marks(withTools).stream().map(JsonNode::toString).toList());
     }
 
     @Test
@@ -151,20 +203,34 @@ class AnthropicCacheTest {
     }
 
     @Test
-    @DisplayName("never more than four cache marks, whatever the length of the task so far")
+    @DisplayName("never more than four cache marks, whatever the length of the chat and of the task so far")
     void atMostFourMarks() {
-        for (boolean split : List.of(true, false)) {
-            for (int turns = 0; turns < 8; turns++) {
-                var messages = new ArrayList<LlmMessage>();
-                messages.add(LlmMessage.system("SYSTEM" + MARK + "dynamic"));
-                messages.add(LlmMessage.user(split ? "task" + MARK + (turns == 0 ? "dyn" : "") : "task"));
-                for (int i = 0; i < turns; i++) {
-                    messages.add(LlmMessage.assistant("action " + i));
-                    messages.add(LlmMessage.user("observation " + i));
+        String page = "a page" + LlmMessage.HISTORY_BLOCK + "with" + LlmMessage.HISTORY_END + "markers" + MARK;
+        for (int chat : List.of(-1, 0, 1, 2, 30)) {
+            var history = new ArrayList<String>();
+            for (int i = 0; i < chat; i++) history.add((i % 2 == 0 ? "USER: " : "ASSISTANT: ") + i + "\n");
+            for (boolean split : List.of(true, false)) {
+                for (int turns = 0; turns < 8; turns++) {
+                    var messages = new ArrayList<LlmMessage>();
+                    messages.add(LlmMessage.system("SYSTEM" + MARK + "dynamic"));
+                    String task = chat < 0 ? "task" : chatThenTask(history, "task");
+                    messages.add(LlmMessage.user(split ? task + MARK + (turns == 0 ? "dyn" : "") : task));
+                    for (int i = 0; i < turns; i++) {
+                        messages.add(LlmMessage.assistant("action " + i));
+                        messages.add(i % 3 == 1 ? LlmMessage.toolsAdded(List.of("respond"))
+                                : LlmMessage.user(i % 2 == 0 ? page : "observation " + i));
+                        if (i % 3 == 1) messages.add(LlmMessage.user("observation " + i));
+                    }
+                    JsonNode body = body(messages, true);
+                    int marks = body.toString().split("cache_control", -1).length - 1;
+                    assertTrue(marks <= 4, marks + " marks with a chat of " + chat + " and " + turns
+                            + " turns, split=" + split + ": " + body);
+                    var ttls = marks(body).stream().map(JsonNode::toString).toList();
+                    assertTrue(ttls.lastIndexOf(HOUR) < Math.max(0, ttls.indexOf(FIVE_MINUTES)) || !ttls.contains(FIVE_MINUTES),
+                            "the hour-long marks before the five-minute ones: " + ttls);
+                    body.path("messages").forEach(m -> m.path("content").forEach(b -> assertFalse(
+                            b.path("text").asText("x").isBlank(), "a blank block, which the API refuses: " + body)));
                 }
-                String json = body(messages, true).toString();
-                int marks = json.split("cache_control", -1).length - 1;
-                assertTrue(marks <= 4, marks + " marks with " + turns + " turns, split=" + split);
             }
         }
     }
