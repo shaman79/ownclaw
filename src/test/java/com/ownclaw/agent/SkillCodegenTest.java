@@ -72,6 +72,12 @@ class SkillCodegenTest {
         assertEquals(131_000, ctx.cloudTokens(), "the cut-off reply was billed, and counted");
     }
 
+    /** The syntax check of a broken module: an error on the line its "# k" marker names, k + 5. */
+    static String brokenAt(String code) {
+        var m = java.util.regex.Pattern.compile("# (\\d+)").matcher(code);
+        return code.contains("def broken(:") && m.find() ? "line " + (5 + Integer.parseInt(m.group(1))) + ": invalid syntax" : null;
+    }
+
     @Test
     @DisplayName("code that ran on until it filled the model's window is not asked again, and says what happened")
     void aRunawayCodeReplySaysSo(@TempDir Path tmp) throws Exception {
@@ -91,15 +97,16 @@ class SkillCodegenTest {
     @DisplayName("a repair sends the specification and the latest attempt only, so it does not grow")
     void aRepairSendsOnlyTheLatestAttempt(@TempDir Path tmp) throws Exception {
         var rig = new LoopRig(tmp, List.of());
-        rig.skills.syntax = code -> code.contains("def broken(:") ? "line 5: invalid syntax" : null;
+        rig.skills.syntax = SkillCodegenTest::brokenAt;
         for (int i = 0; i < 4; i++) rig.cloud.codegen.add(finished(module("def broken(:\n    pass  # " + i)));
+        rig.cloud.codegen.add(finished(module("def broken(:\n    pass  # 3")));   // the fourth again
         AgentLoop.Codegen out = rig.loop.generateSkillCode(spec(), task());
 
         var calls = rig.cloud.calls("codegen");
-        assertEquals(4, calls.size(), "the first reply and three repairs");
-        assertEquals("ERROR: Python syntax error:\nline 5: invalid syntax", out.error());
+        assertEquals(5, calls.size(), "the first reply, and repairs until one brought back code already tried");
+        assertEquals("ERROR: Python syntax error:\nline 8: invalid syntax", out.error());
         String theSpec = calls.get(0).messages().get(1).content();
-        for (int k = 1; k < 4; k++) {
+        for (int k = 1; k < 5; k++) {
             List<LlmMessage> sent = calls.get(k).messages();
             assertEquals(2, sent.size(), "repair " + k + " carried earlier attempts");
             assertEquals(LlmMessage.Role.USER, sent.get(1).role());
@@ -107,6 +114,27 @@ class SkillCodegenTest {
             assertTrue(sent.get(1).content().contains("# " + (k - 1)) && !sent.get(1).content().contains("# " + (k - 2)),
                     "repair " + k + " must carry the latest attempt and no earlier one");
         }
+    }
+
+    @Test
+    @DisplayName("no count of repairs ends them: a fifth that works is asked for and used; one bringing back an error already seen ends them")
+    void repairsGoOnWhileTheyGetAnywhere(@TempDir Path tmp) throws Exception {
+        var rig = new LoopRig(tmp, List.of());
+        rig.skills.syntax = SkillCodegenTest::brokenAt;
+        for (int i = 0; i < 5; i++) rig.cloud.codegen.add(finished(module("def broken(:\n    pass  # " + i)));
+        rig.cloud.codegen.add(finished(module("")));
+        AgentLoop.Codegen worked = rig.loop.generateSkillCode(spec(), task());
+        assertNull(worked.error(), "the sixth attempt, the fifth repair, works");
+        assertEquals(6, rig.cloud.calls("codegen").size());
+        assertEquals(module("").strip(), String.valueOf(worked.params().get("code")).strip());
+
+        var again = new LoopRig(tmp.resolve("again"), List.of());
+        again.skills.syntax = code -> code.contains("def broken(:") ? "line 5: invalid syntax" : null;
+        for (int i = 0; i < 6; i++) again.cloud.codegen.add(finished(module("def broken(:\n    pass  # " + i)));
+        AgentLoop.Codegen stuck = again.loop.generateSkillCode(spec(), task());
+        assertEquals(2, again.cloud.calls("codegen").size(), "the same error after a repair: it is not getting past it");
+        assertEquals("ERROR: Python syntax error:\nline 5: invalid syntax", stuck.error());
+        // Mutation: stop after three repairs, as before -> the working fifth repair is never asked for.
     }
 
     @Test

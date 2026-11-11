@@ -2527,9 +2527,6 @@ public class AgentLoop {
 
     // ── Skill code generation ──
 
-    /** How many times a syntax error in generated code is sent back for repair. */
-    private static final int SYNTAX_REPAIRS = 3;
-
     /**
      * Real calls to this skill that failed, as evidence for a repair: every recorded PUBLIC
      * failure, whole -- the same call failing the same way once, with how many times it did.
@@ -2628,8 +2625,13 @@ public class AgentLoop {
      * be reached, here or earlier in the task. The thinking model decides what the skill is; this
      * writes its code.
      * <p>
-     * One loop over attempts: the first reply, then up to {@link #SYNTAX_REPAIRS} repairs of a
-     * syntax error. A repair sends the specification and the latest attempt only, in the
+     * One loop over attempts: the first reply, then repairs of a syntax error for as long as they
+     * get past it -- each brings back code not seen before with an error not seen before. One that
+     * brings back code or an error already seen is going round, and so would the next: there the
+     * code is given up. No count of attempts ends it (the owner's rule: no step limits, 2026-10-01);
+     * each repair is shown as it runs, and Stop ends it. Three repairs used to be all there was, and
+     * a fourth that would have worked was never asked for. A repair sends the specification and the
+     * latest attempt only, in the
      * specification's own message so the roles still alternate. Each used to append the reply and
      * a numbered copy of it to everything sent before, so the third repair resent both earlier
      * attempts twice over: 195,723 bytes for a 6,434-byte request. A reply that reached the
@@ -2702,11 +2704,14 @@ public class AgentLoop {
                 .withEffort(context.options().effort());
 
         List<LlmMessage> prompt = spec;
+        // What the attempts have brought back: a repair that brings either again has not got past it.
+        var triedCode = new java.util.HashSet<String>();
+        var seenErrors = new java.util.HashSet<String>();
         for (int attempt = 0; ; attempt++) {
             if (context.isCancelled()) return Codegen.stopped(name);
             if (attempt > 0) {
                 statusEmitter.emitForTask(context.userId(), context.taskId(), StatusMessage.Type.STEP,
-                        "Repairing syntax error · " + providerLabel + " (attempt " + attempt + "/" + SYNTAX_REPAIRS + ")",
+                        "Repairing syntax error · " + providerLabel + " (attempt " + attempt + ")",
                         tokenData(context));
             }
             // The task's own hook goes with the call, and while it runs its chat is shown what it is
@@ -2791,11 +2796,14 @@ public class AgentLoop {
                 }
                 return new Codegen(enhanced, null);
             }
-            if (attempt == SYNTAX_REPAIRS) {
-                log.error("Skill '{}' still has syntax errors after {} repair attempts: {}", name, SYNTAX_REPAIRS, syntaxError);
+            boolean newCode = triedCode.add(code);
+            boolean newError = seenErrors.add(syntaxError);
+            if (!newCode || !newError) {
+                log.error("Skill '{}': attempt {} brought back {} already seen, so the repairs are not getting past "
+                        + "it: {}", name, attempt + 1, !newCode ? "code" : "an error", syntaxError);
                 return Codegen.failed("Python syntax error:\n" + syntaxError);
             }
-            log.warn("Skill '{}' syntax error (repair attempt {}/{}): {}", name, attempt + 1, SYNTAX_REPAIRS, syntaxError);
+            log.warn("Skill '{}' syntax error (repair {}): {}", name, attempt + 1, syntaxError);
             prompt = List.of(spec.get(0), LlmMessage.user(spec.get(1).content()
                     + "\n\nThe previous attempt failed the syntax check:\n" + syntaxError
                     + "\n\nNumbered code:\n" + numberCodeLines(code)
