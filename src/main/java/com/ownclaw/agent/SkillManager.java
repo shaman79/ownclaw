@@ -565,6 +565,23 @@ public class SkillManager {
      * Check Python code for syntax errors without writing to the skill directory.
      * @return error message if syntax error found, null if code is valid.
      */
+    /**
+     * What a failed syntax check returns when the check itself could not run -- no Python, a
+     * sandbox that refused, a timeout: nothing about the code, which no repair can fix.
+     */
+    static final String CHECK_FAILED = "Syntax check failed: ";
+
+    /** The exit status of the check's script for a finding about the code: its own failures exit otherwise. */
+    private static final int FOUND = 3;
+
+    /**
+     * The syntax check of a skill's code: null when it compiles and has {@code def run(params)};
+     * otherwise what is wrong, as Python says it, with the file named skill.py wherever it was
+     * checked -- the same code always gets the same words, which the repairs compare
+     * (AgentLoop#errorKey). Checked under its temporary path, every error named a directory made
+     * afresh for it, and no two were ever the same. A check that could not run says so, starting
+     * {@link #CHECK_FAILED}.
+     */
     String checkPythonSyntax(String code) {
         Path tempDir = null;
         try {
@@ -577,27 +594,27 @@ public class SkillManager {
             Files.writeString(checkScript,
                     "import py_compile, sys, ast\n" +
                     "try:\n" +
-                    "    py_compile.compile('" + targetPath + "', doraise=True)\n" +
+                    "    py_compile.compile('" + targetPath + "', dfile='skill.py', doraise=True)\n" +
                     "except py_compile.PyCompileError as e:\n" +
                     "    print(str(e), file=sys.stderr)\n" +
-                    "    sys.exit(1)\n" +
-                    "with open('" + targetPath + "') as f:\n" +
+                    "    sys.exit(" + FOUND + ")\n" +
+                    "with open('" + targetPath + "', encoding='utf-8') as f:\n" +
                     "    tree = ast.parse(f.read())\n" +
                     "funcs = [n.name for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)]\n" +
                     "if 'run' not in funcs:\n" +
                     "    print('Missing required function: def run(params)', file=sys.stderr)\n" +
-                    "    sys.exit(1)\n",
+                    "    sys.exit(" + FOUND + ")\n",
                     StandardCharsets.UTF_8);
 
             String python = pythonEnv.getSystemPython();
             SandboxResult result = sandbox.execute(python, checkScript, tempDir, null, Map.of(), 10, null, List.of());
 
-            if (!result.isSuccess()) {
-                return result.stderr().isBlank() ? result.stdout() : result.stderr();
-            }
-            return null;
+            if (result.isSuccess()) return null;
+            String said = result.stderr().isBlank() ? result.stdout() : result.stderr();
+            if (result.exitCode() == FOUND && !result.timedOut()) return said;
+            return CHECK_FAILED + (result.timedOut() ? "it timed out" : "exit " + result.exitCode() + ": " + said.strip());
         } catch (Exception e) {
-            return "Syntax check failed: " + e.getMessage();
+            return CHECK_FAILED + e.getMessage();
         } finally {
             if (tempDir != null) SkillJail.deleteTree(tempDir);
         }

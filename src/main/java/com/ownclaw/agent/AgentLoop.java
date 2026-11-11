@@ -2784,6 +2784,13 @@ public class AgentLoop {
                         + "was created. " + REMOVED_SECRET);
             }
             String syntaxError = skillManager.checkPythonSyntax(code);
+            if (syntaxError != null && syntaxError.startsWith(SkillManager.CHECK_FAILED)) {
+                // The check could not run: nothing a repair of the code could fix, and every repair
+                // would fail it the same way.
+                log.error("Skill '{}': the syntax check could not run: {}", name, syntaxError);
+                return Codegen.failed("the code for '" + name + "' could not be checked (" + syntaxError
+                        + "), so nothing was created.");
+            }
             if (syntaxError == null) {
                 log.info("{} generated {} chars of skill code for '{}' ({} tokens)",
                         local ? "Local LLM (fallback)" : "Cloud LLM", code.length(), name, reply.totalTokens());
@@ -2797,7 +2804,7 @@ public class AgentLoop {
                 return new Codegen(enhanced, null);
             }
             boolean newCode = triedCode.add(code);
-            boolean newError = seenErrors.add(syntaxError);
+            boolean newError = seenErrors.add(errorKey(syntaxError));
             if (!newCode || !newError) {
                 log.error("Skill '{}': attempt {} brought back {} already seen, so the repairs are not getting past "
                         + "it: {}", name, attempt + 1, !newCode ? "code" : "an error", syntaxError);
@@ -2809,6 +2816,22 @@ public class AgentLoop {
                     + "\n\nNumbered code:\n" + numberCodeLines(code)
                     + "\n\nFix the error. Return the COMPLETE corrected code in a ```python fence."));
         }
+    }
+
+    /**
+     * A syntax error as the repairs compare it: the line of code it is on and what Python calls it
+     * -- "def broken(: | SyntaxError: invalid syntax" -- without the line's number. The same broken
+     * line moved down by a line added above it, or under a comment changed each round, is the same
+     * error again, and the repairs are not getting past it; a different broken line is progress.
+     */
+    static String errorKey(String syntaxError) {
+        String[] lines = syntaxError.strip().split("\n");
+        String what = lines[lines.length - 1].strip();
+        for (int i = 0; i + 1 < lines.length; i++) {
+            String line = lines[i].strip();
+            if (line.startsWith("File ") && line.contains(", line ")) return lines[i + 1].strip() + " | " + what;
+        }
+        return syntaxError.strip().replaceAll("line \\d+", "line ?");
     }
 
     /**

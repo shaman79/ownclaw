@@ -72,10 +72,19 @@ class SkillCodegenTest {
         assertEquals(131_000, ctx.cloudTokens(), "the cut-off reply was billed, and counted");
     }
 
-    /** The syntax check of a broken module: an error on the line its "# k" marker names, k + 5. */
+    /**
+     * The syntax check of a module, as Python reports one: the first line that opens a broken
+     * definition, under its number, then the error -- what the real check returns (SkillManager).
+     */
     static String brokenAt(String code) {
-        var m = java.util.regex.Pattern.compile("# (\\d+)").matcher(code);
-        return code.contains("def broken(:") && m.find() ? "line " + (5 + Integer.parseInt(m.group(1))) + ": invalid syntax" : null;
+        String[] lines = code.split("\n");
+        for (int i = 0; i < lines.length; i++) {
+            if (lines[i].contains("def broken")) {
+                return "  File \"skill.py\", line " + (i + 1) + "\n    " + lines[i].strip() + "\n              ^\n"
+                        + "SyntaxError: invalid syntax";
+            }
+        }
+        return null;
     }
 
     @Test
@@ -98,13 +107,14 @@ class SkillCodegenTest {
     void aRepairSendsOnlyTheLatestAttempt(@TempDir Path tmp) throws Exception {
         var rig = new LoopRig(tmp, List.of());
         rig.skills.syntax = SkillCodegenTest::brokenAt;
-        for (int i = 0; i < 4; i++) rig.cloud.codegen.add(finished(module("def broken(:\n    pass  # " + i)));
-        rig.cloud.codegen.add(finished(module("def broken(:\n    pass  # 3")));   // the fourth again
+        for (int i = 0; i < 4; i++) rig.cloud.codegen.add(finished(module("def broken" + i + "(:\n    pass  # " + i)));
+        rig.cloud.codegen.add(finished(module("def broken3(:\n    pass  # 3")));   // the fourth again
         AgentLoop.Codegen out = rig.loop.generateSkillCode(spec(), task());
 
         var calls = rig.cloud.calls("codegen");
         assertEquals(5, calls.size(), "the first reply, and repairs until one brought back code already tried");
-        assertEquals("ERROR: Python syntax error:\nline 8: invalid syntax", out.error());
+        assertTrue(out.error().startsWith("ERROR: Python syntax error:\n  File \"skill.py\", line 5\n    def broken3(:"),
+                out.error());
         String theSpec = calls.get(0).messages().get(1).content();
         for (int k = 1; k < 5; k++) {
             List<LlmMessage> sent = calls.get(k).messages();
@@ -121,7 +131,7 @@ class SkillCodegenTest {
     void repairsGoOnWhileTheyGetAnywhere(@TempDir Path tmp) throws Exception {
         var rig = new LoopRig(tmp, List.of());
         rig.skills.syntax = SkillCodegenTest::brokenAt;
-        for (int i = 0; i < 5; i++) rig.cloud.codegen.add(finished(module("def broken(:\n    pass  # " + i)));
+        for (int i = 0; i < 5; i++) rig.cloud.codegen.add(finished(module("def broken" + i + "(:\n    pass  # " + i)));
         rig.cloud.codegen.add(finished(module("")));
         AgentLoop.Codegen worked = rig.loop.generateSkillCode(spec(), task());
         assertNull(worked.error(), "the sixth attempt, the fifth repair, works");
@@ -135,6 +145,28 @@ class SkillCodegenTest {
         assertEquals(2, again.cloud.calls("codegen").size(), "the same error after a repair: it is not getting past it");
         assertEquals("ERROR: Python syntax error:\nline 5: invalid syntax", stuck.error());
         // Mutation: stop after three repairs, as before -> the working fifth repair is never asked for.
+    }
+
+    @Test
+    @DisplayName("the same broken line is the same error, moved down a line or under a new comment; a check that cannot run ends at once")
+    void theSameBrokenLineIsTheSameError(@TempDir Path tmp) throws Exception {
+        var rig = new LoopRig(tmp, List.of());
+        rig.skills.syntax = SkillCodegenTest::brokenAt;
+        rig.cloud.codegen.add(finished(module("def broken(:\n    pass")));
+        rig.cloud.codegen.add(finished(module("# checked again\ndef broken(:\n    pass  # the repair")));
+        for (int i = 0; i < 4; i++) rig.cloud.codegen.add(finished(module("# round " + i + "\n\ndef broken(:\n    pass")));
+        AgentLoop.Codegen out = rig.loop.generateSkillCode(spec(), task());
+        assertEquals(2, rig.cloud.calls("codegen").size(), "a comment and a line shift are no progress");
+        assertTrue(out.error().contains("def broken(:"), out.error());
+
+        var failing = new LoopRig(tmp.resolve("failing"), List.of());
+        failing.skills.syntax = code -> SkillManager.CHECK_FAILED + "exit 127: python3: not found";
+        for (int i = 0; i < 3; i++) failing.cloud.codegen.add(finished(module("")));
+        AgentLoop.Codegen unchecked = failing.loop.generateSkillCode(spec(), task());
+        assertEquals(1, failing.cloud.calls("codegen").size(), "no repair is asked of code nobody could check");
+        assertEquals("ERROR: the code for 'openwrt_audit' could not be checked (Syntax check failed: exit 127: "
+                + "python3: not found), so nothing was created.", unchecked.error());
+        // Mutation: compare whole error texts -> the shifted line is a new error, and the loop goes on.
     }
 
     @Test
