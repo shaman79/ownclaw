@@ -411,4 +411,8 @@ public class OllamaProvider implements LlmProvider {
 
     @Override
     public String model() { return config.getModel(); }
+
+    /** "low" is sent as no reasoning first ({@link LlmRequestConfig#effort}): another request. */
+    @Override
+    public boolean takesEffort() { return true; }
 }

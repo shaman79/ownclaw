@@ -23,14 +23,22 @@ public interface LlmProvider {
     LlmResponse chat(List<LlmMessage> messages, LlmRequestConfig config);
 
     /**
-     * {@code text}, which the caller joined from the texts of replies to calls made with
-     * {@code config} -- a reply cut off at the model's maximum output, and its continuations --
-     * as the caller may read it. Each of those replies was handed back readable, but their join
-     * can hold what none of them did: a placeholder of the cloud gateway's that the cut fell in,
-     * half of it in one reply and half in the next. The gateway puts such ones back
-     * ({@code CloudGateway}); a provider that hands back no placeholders returns the text as it is.
+     * {@code asWritten} -- text the caller built from replies to calls made with {@code config},
+     * which asked for them as the model wrote them ({@link LlmRequestConfig#asWritten}): a skill's
+     * code, its parts joined -- with the user's values put back where it names their placeholders,
+     * once. Put back in each reply, a placeholder the cut between two fell in was whole in neither,
+     * and its quotes could stand in another; put back twice, a placeholder's shape the user wrote
+     * as text would turn into a value. The cloud gateway puts them back; a provider that hands back
+     * no placeholders returns the text as it is.
      */
-    default String restoreJoined(String text, LlmRequestConfig config) { return text; }
+    default String restored(String asWritten, LlmRequestConfig config) { return asWritten; }
+
+    /**
+     * Whether a request's thinking effort ({@link LlmRequestConfig#effort}) changes what this
+     * provider sends: asking again at another effort is then another request, and not the same one
+     * again. False unless a provider says otherwise.
+     */
+    default boolean takesEffort() { return false; }
 
     /**
      * Quick health check — can we reach the provider?

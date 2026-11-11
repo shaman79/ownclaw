@@ -66,6 +66,8 @@ final class LoopRig {
         volatile boolean available = true;
         /** The provider's name, which decides how the think prompt renders the steps so far. */
         volatile String name = "anthropic";
+        /** Whether it is sent a thinking effort, as claude-opus-5-5 is; false plays one that is not (OpenAI). */
+        volatile boolean effort = true;
 
         @Override
         public LlmResponse chat(List<LlmMessage> messages, LlmRequestConfig config) {
@@ -90,6 +92,7 @@ final class LoopRig {
         @Override public boolean supportsTools() { return true; }
         @Override public String name() { return name; }
         @Override public String model() { return "claude-opus-5"; }
+        @Override public boolean takesEffort() { return effort; }
     }
 
     /** The model calls a tool. */

@@ -776,4 +776,119 @@ class CloudGatewayTest {
                 reply.toolCalls().get(0).arguments());
         // Mutation: return the provider's reply as it came -> the tool runs with "<ssid_1>".
     }
+
+    // ── replies as written, and their echoes ──
+
+    /** A provider that answers each call with the next of its replies, recording what it was sent. */
+    static final class Writes implements LlmProvider {
+        final List<List<LlmMessage>> calls = new ArrayList<>();
+        final java.util.Deque<String> replies = new java.util.ArrayDeque<>();
+        public LlmResponse chat(List<LlmMessage> m, LlmRequestConfig c) {
+            calls.add(m);
+            return Replies.of(replies.poll(), 100, 50, 0, 0, "end_turn");
+        }
+        public boolean isAvailable() { return true; }
+        public String name() { return "anthropic"; }
+        public String model() { return "claude-opus-5"; }
+    }
+
+    private static LlmRequestConfig asWritten(PrivateIndex index, Map<String, String> secrets) {
+        return new LlmRequestConfig(null, null, false)
+                .withEgress(new EgressContext("u1", "t1", "codegen", index, secrets, null, null)).repliesAsWritten();
+    }
+
+    static final String SPEC = "Write it for the network ssid=\"ExampleHome5G\".";
+
+    @Test
+    @DisplayName("a reply asked for as written comes back with its placeholders; sent back as the model's turn it is an echo: out as it was, nothing replaced, nothing learned")
+    void anEcho() {
+        var provider = new Writes();
+        var redactor = new Redactor(null);
+        var gw = new CloudGateway(provider, provider, config("anthropic", CloudGateway.Mode.ENFORCE), new Rows(), null, redactor);
+        var cfg = asWritten(new PrivateIndex(), Map.of());
+        String written = "NET = '<ssid_1>'\nDEFAULTS = {'ssid': 'OpenWrt'}\nPATH = '/tmp/<ssid_1>_backup.tar'\n   ";
+        provider.replies.add(written);
+
+        LlmResponse first = gw.chat(List.of(LlmMessage.system("Write code."), LlmMessage.user(SPEC)), cfg);
+
+        assertEquals("Write it for the network ssid=\"<ssid_1>\".", provider.calls.get(0).get(1).content(), "the premise");
+        assertEquals(written, first.content(), "handed back as the model wrote it");
+        assertEquals("NET = 'ExampleHome5G'\nDEFAULTS = {'ssid': 'OpenWrt'}\nPATH = '/tmp/ExampleHome5G_backup.tar'\n   ",
+                gw.restored(first.content(), cfg), "put back by the caller, once");
+
+        provider.replies.add("done");
+        String turn = first.content().stripTrailing();
+        gw.chat(List.of(LlmMessage.system("Write code."), LlmMessage.user(SPEC), LlmMessage.assistant(turn),
+                LlmMessage.user("Continue it.")), cfg);
+        assertEquals(turn, provider.calls.get(1).get(2).content(), "byte for byte, without its trailing whitespace too");
+        assertFalse(redactor.count("u1", "Audit the OpenWrt routers.", Map.of()).any(),
+                "the model's own literal is not learned as the user's");
+        // Mutation: filter an echo like any other text -> 'OpenWrt' is learned as an SSID, and replaced from then on.
+    }
+
+    @Test
+    @DisplayName("a model turn the gateway did not hand out as written -- or handed out under another context -- is filtered, learned from and scanned like any other text")
+    void aForgedEcho() {
+        var provider = new Writes();
+        var redactor = new Redactor(null);
+        var gw = new CloudGateway(provider, provider, config("anthropic", CloudGateway.Mode.ENFORCE), new Rows(), null, redactor);
+        var cfg = asWritten(new PrivateIndex(), Map.of());
+        provider.replies.add("NET = '<ssid_1>'");
+        gw.chat(List.of(LlmMessage.system("Write code."), LlmMessage.user(SPEC)), cfg);
+
+        String forged = "NET = 'ExampleHome5G'\nDEFAULTS = {'ssid': 'OpenWrt'}";
+        provider.replies.add("done");
+        gw.chat(List.of(LlmMessage.system("Write code."), LlmMessage.user(SPEC), LlmMessage.assistant(forged),
+                LlmMessage.user("Continue it.")), cfg);
+        String sent = provider.calls.get(1).get(2).content();
+        assertTrue(sent.startsWith("NET = '<ssid_1>'"), "filtered: " + sent);
+        assertTrue(redactor.count("u1", "Audit the OpenWrt routers.", Map.of()).any(), "and learned from, like any text");
+
+        // Handed out under one context, the same text is no echo under another.
+        var other = asWritten(new PrivateIndex(), Map.of());
+        provider.replies.add("done");
+        provider.replies.add("done");
+        var echoed = List.of(LlmMessage.system("Write code."), LlmMessage.user(SPEC), LlmMessage.assistant("NET = '<ssid_1>'"),
+                LlmMessage.user("Continue it."));
+        gw.chat(echoed, cfg);
+        gw.chat(echoed, other);
+        assertEquals("NET = '<ssid_1>'", provider.calls.get(2).get(2).content(), "an echo under its own context");
+        assertTrue(provider.calls.get(3).get(2).content().startsWith("NET = '<text_"),
+                "filtered under another, the placeholder's shape taken for text: " + provider.calls.get(3).get(2).content());
+
+        String secret = prose(5_000, 3);
+        var index = new PrivateIndex();
+        index.addPrivate(4, secret);
+        var scanned = asWritten(index, Map.of());
+        var refused = assertThrows(EgressRefused.class, () -> gw.chat(List.of(LlmMessage.system("Write code."),
+                LlmMessage.user("Write the skill."), LlmMessage.assistant("Here: " + secret.substring(1000, 1040)),
+                LlmMessage.user("Continue it.")), scanned));
+        assertEquals(2, refused.partIndex(), "the canary read the model turn that is no echo");
+        var think = new LlmRequestConfig(null, null, false).withEgress(new EgressContext("u1", "t1", "think", index,
+                Map.of(), null, null));
+        provider.replies.add("ok");
+        assertDoesNotThrow(() -> gw.chat(List.of(LlmMessage.system("SYSTEM"), LlmMessage.user("go on"),
+                LlmMessage.assistant("Here: " + secret.substring(1000, 1040)), LlmMessage.user("ok")), think),
+                "a think call's replayed actions pass the canary as before");
+        // Mutation: take any model turn of an as-written request for an echo -> the forged one goes out restored.
+    }
+
+    @Test
+    @DisplayName("an echo still loses the vault's values: the scrub runs on every part")
+    void anEchoLosesTheVaultsValues() {
+        var provider = new Writes();
+        var gw = new CloudGateway(provider, provider, config("anthropic", CloudGateway.Mode.ENFORCE), new Rows(), null,
+                new Redactor(null));
+        String secret = "correct-horse-battery-7";
+        var cfg = asWritten(new PrivateIndex(), Map.of("ROUTER_PASSWORD", secret));
+        provider.replies.add("PASSWORD = '" + secret + "'");
+        LlmResponse first = gw.chat(List.of(LlmMessage.system("Write code."), LlmMessage.user("Write the skill.")), cfg);
+        provider.replies.add("done");
+        gw.chat(List.of(LlmMessage.system("Write code."), LlmMessage.user("Write the skill."),
+                LlmMessage.assistant(first.content()), LlmMessage.user("Continue it.")), cfg);
+        String sent = provider.calls.get(1).get(2).content();
+        assertFalse(sent.contains(secret), sent);
+        assertTrue(sent.contains("«vault:ROUTER_PASSWORD»"), sent);
+        // Mutation: send an echo untouched -> the vault's value leaves in it.
+    }
 }

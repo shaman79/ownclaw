@@ -316,18 +316,15 @@ public final class TaskChat {
     }
 
     /**
-     * A part of a skill's code reached the model's maximum output with nothing of it written: the
-     * model spent all of it reasoning. The same part is asked for again at low effort, so the model
-     * reasons less before it writes ({@code AgentLoop#generateSkillCode}). Said, because the call
-     * the owner watched ended with nothing to show for it, and another begins.
-     *
-     * @param part the part: 1 for the code's beginning
+     * The code of a skill reached the model's maximum output with nothing of it written: the model
+     * spent all of it reasoning. It is asked for again at low effort, so the model reasons less
+     * before it writes ({@code AgentLoop#generateSkillCode}). Said, because the call the owner
+     * watched ended with nothing to show for it, and another begins.
      */
-    void askedAgainAtLowEffort(String skill, OutputTruncated cut, int part) {
+    void askedAgainAtLowEffort(String skill, OutputTruncated cut) {
         if (sessionId == null) return;
-        note("⏩ " + (part == 1 ? "The code of '" + skill + "'" : "Part " + part + " of the code of '" + skill + "'")
-                + " reached " + maximumOutput(cut) + " before any of it was written: the model spent all of it "
-                + "reasoning. Asking again at low effort, so it reasons less first.");
+        note("⏩ The code of '" + skill + "' reached " + maximumOutput(cut) + " before any of it was written: "
+                + "the model spent all of it reasoning. Asking again at low effort, so it reasons less first.");
     }
 
     /** "the model's maximum output of 128,000 tokens", or with no figure when the provider gives none. */

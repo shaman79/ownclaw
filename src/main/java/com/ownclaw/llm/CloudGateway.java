@@ -37,6 +37,12 @@ import java.util.Map;
  * which is trusted input -- a builder that rendered a result into one would not be refused. A
  * new call site next month either carries a context or does not get through.
  * <p>
+ * A reply asked for as written ({@link LlmRequestConfig#asWritten}) is handed back with its
+ * placeholders, and remembered under its context ({@link EgressContext.HandedOut}); sent back as
+ * the model's turn, byte for byte, it is an echo, and goes out with the vault's values removed and
+ * nothing else done to it -- no identifier replaced or learned, no canary. The caller puts the
+ * values back itself, once, in what it keeps ({@link #restored}).
+ * <p>
  * Deliberately not a policy engine. There is one mode switch, {@code ENFORCE} or {@code OBSERVE},
  * and OBSERVE changes exactly one thing: a canary hit is sent and recorded as such instead of
  * refused. Everything else here is not configurable, because it is not a preference.
@@ -129,12 +135,38 @@ public final class CloudGateway implements LlmProvider {
         Map<String, String> vault = egress.secretValues();
         var tally = new Redactor.Tally();
         var filteredMessages = new ArrayList<LlmMessage>(messages.size());
+        // Which messages are echoes: the model's own words coming back exactly as this gateway
+        // handed them out (below).
+        var echoes = new java.util.HashSet<Integer>();
         for (LlmMessage m : messages) {
             // A TOOLS message is the registry's own tool names, not data: filtered, a name that
             // looked like an identifier would no longer name its tool.
             if (m.role() == LlmMessage.Role.TOOLS) {
                 filteredMessages.add(m);
                 continue;
+            }
+            // An echo: an assistant turn whose text is one this gateway handed out under this
+            // context as the model wrote it (asWritten, EgressContext.HandedOut) -- a skill's code
+            // in parts, each part sent back as the model's turn before the next is asked for. It
+            // holds no value of the user's: only the placeholders the model was shown, never put
+            // back. The vault's values are removed from it as from every part, and nothing else
+            // happens to it: no identifier is replaced and none is learned from it. Filtered, the
+            // model's own literals -- its default SSID 'OpenWrt', its hostname 'gateway' -- were
+            // learned as the user's identifiers for good, a value the restore had put back inside a
+            // longer word went out in clear, and the next part's request no longer began with the
+            // one before. The gateway checks the text itself: no caller can mark a turn as one.
+            if (m.role() == LlmMessage.Role.ASSISTANT && egress.handedOut().holds(m.content())) {
+                echoes.add(filteredMessages.size());
+                filteredMessages.add(new LlmMessage(m.role(), Redactor.filterAuthored(m.content(), vault, tally),
+                        m.authored(), m.marked()));
+                continue;
+            }
+            if (cfg.asWritten() && m.role() == LlmMessage.Role.ASSISTANT) {
+                // Every model turn of such a request is an echo; one that is not is filtered,
+                // learned from and scanned like any other text (and by the canary below).
+                log.warn("Cloud call for task {} ({}): an assistant turn of {} characters is not a text this "
+                        + "gateway handed out as written; filtered like any other", egress.taskId(),
+                        egress.purpose(), m.content() == null ? 0 : m.content().length());
             }
             // The engine's marked message is filtered as one text like any other -- its markers
             // are only where the provider splits it (LlmMessage#marked), and nothing the filter
@@ -224,7 +256,14 @@ public final class CloudGateway implements LlmProvider {
             // AssistantPartsTest pins that through the real renderer: a replay carries a reference
             // as the model wrote it, never the bytes it resolves to. The vault check above still
             // covers these parts.
-            if ("assistant".equals(part.kind())) continue;
+            //
+            // An echo (above) passes for a stronger reason: its text is byte for byte what the
+            // provider sent this gateway, so there is nothing in it the provider has not got. In a
+            // request that asked for its replies as written, every model turn should be one; one
+            // that is not has no such guarantee -- the code handed it a text the gateway did not
+            // hand out, a reply put back with the user's values, say -- and it is scanned like a
+            // user's part. The think call's replayed actions are not echoes, and pass as before.
+            if ("assistant".equals(part.kind()) && (echoes.contains(part.index()) || !cfg.asWritten())) continue;
             // The registry's own parts: excused, as the allowance at the top of (c) says.
             if (part.kind().startsWith("tool:") || part.kind().startsWith("schema:")) continue;
             // Every run in the part is tried, not only the first (PrivateIndex.firstLeakIn). It is
@@ -291,11 +330,36 @@ public final class CloudGateway implements LlmProvider {
         // tool call's arguments: from here on nothing sees a placeholder. Then the check, so a
         // refused or cut-off reply is on the ledger with its tokens and why it ended before its
         // caller is told it is no answer -- and what it carries is restored like any reply.
-        return restored(user, response).requireComplete(providerName);
+        // Asked for as written, it is handed out as the model wrote it, and remembered as handed out
+        // so under this context: the caller sends it back as the model's turn, an echo, and puts the
+        // values back itself, once, in what it keeps (restored).
+        if (cfg.asWritten()) {
+            egress.handedOut().add(response.content());
+            return response.requireComplete(providerName);
+        }
+        return restoredReply(user, response).requireComplete(providerName);
     }
 
+    /**
+     * Text the caller built from replies it asked for as written ({@link LlmRequestConfig#asWritten})
+     * -- a skill's code, its parts joined -- with the user's values put back where it names their
+     * placeholders, once: a placeholder the cut between two parts fell in is whole here, its quotes
+     * with it, so it is put back as one within a reply is, between the other quotes when its value
+     * holds the quote around it; and a placeholder's shape the user wrote as text, shown to the
+     * model as one of its own (Redactor's TEXT), comes back as that text and is not put back again.
+     */
+    @Override
+    public String restored(String asWritten, LlmRequestConfig cfg) {
+        EgressContext egress = cfg == null ? null : cfg.egress();
+        return egress == null ? asWritten : redactor.restore(egress.userId(), asWritten);
+    }
+
+    /** Whether the active provider is sent an effort at all. */
+    @Override
+    public boolean takesEffort() { return active().takesEffort(); }
+
     /** The reply with the user's placeholders put back to their values; the same reply when it names none. */
-    private LlmResponse restored(String user, LlmResponse r) {
+    private LlmResponse restoredReply(String user, LlmResponse r) {
         String content = redactor.restore(user, r.content());
         String invalid = redactor.restore(user, r.invalidToolCall());
         boolean changed = content != r.content() || invalid != r.invalidToolCall();
@@ -308,21 +372,6 @@ public final class CloudGateway implements LlmProvider {
         }
         return !changed ? r : new LlmResponse(content, calls, invalid, r.stopReason(), r.stopDetail(),
                 r.model(), r.maxOutputTokens(), r.contextWindow(), r.usage());
-    }
-
-    /**
-     * A text the caller joined from the texts of replies to calls made with {@code cfg} -- a reply
-     * cut off at the model's maximum output, and its continuations -- with the user's placeholders
-     * put back. Each reply's were put back as it came ({@link #chat}), but one the cut fell in was
-     * whole in neither reply: "&lt;ssid_" ended one, "1&gt;" began the next. In a text whose other
-     * placeholders are values already, such a one is what is left to put back, and it is put back
-     * as one within a reply is -- between the other quotes when its value holds the quote around
-     * it, the quote before it standing in the reply before.
-     */
-    @Override
-    public String restoreJoined(String text, LlmRequestConfig cfg) {
-        EgressContext egress = cfg == null ? null : cfg.egress();
-        return egress == null ? text : redactor.restore(egress.userId(), text);
     }
 
     // ── parts ──

@@ -90,7 +90,7 @@ class SkillCodegenTest {
     }
 
     @Test
-    @DisplayName("a repair sends the specification and the latest attempt only, so it does not grow")
+    @DisplayName("a repair sends the specification, the latest attempt as the model's own turn and the error -- no earlier attempt, so it does not grow")
     void aRepairSendsOnlyTheLatestAttempt(@TempDir Path tmp) throws Exception {
         var rig = new LoopRig(tmp, List.of());
         rig.skills.syntax = SkillCodegenTest::brokenAt;
@@ -102,14 +102,19 @@ class SkillCodegenTest {
         assertEquals(5, calls.size(), "the first reply, and repairs until one brought back code already tried");
         assertTrue(out.error().startsWith("ERROR: Python syntax error:\n  File \"skill.py\", line 5\n    def broken3(:"),
                 out.error());
-        String theSpec = calls.get(0).messages().get(1).content();
+        List<LlmMessage> theSpec = calls.get(0).messages();
         for (int k = 1; k < 5; k++) {
             List<LlmMessage> sent = calls.get(k).messages();
-            assertEquals(2, sent.size(), "repair " + k + " carried earlier attempts");
-            assertEquals(LlmMessage.Role.USER, sent.get(1).role());
-            assertTrue(sent.get(1).content().startsWith(theSpec), "repair " + k + " lost the specification");
-            assertTrue(sent.get(1).content().contains("# " + (k - 1)) && !sent.get(1).content().contains("# " + (k - 2)),
-                    "repair " + k + " must carry the latest attempt and no earlier one");
+            assertEquals(4, sent.size(), "repair " + k + " carried earlier attempts: " + sent);
+            assertEquals(theSpec, sent.subList(0, 2), "repair " + k + " lost the specification");
+            assertEquals(LlmMessage.Role.ASSISTANT, sent.get(2).role());
+            assertTrue(sent.get(2).content().contains("# " + (k - 1)), "repair " + k + " must carry the latest attempt");
+            String earlier = "# " + (k - 2);
+            assertTrue(sent.stream().noneMatch(m -> m.content().contains(earlier)), "and no earlier one");
+            assertEquals(LlmMessage.Role.USER, sent.get(3).role());
+            assertEquals("The code failed Python's syntax check at line 5: SyntaxError: invalid syntax.\nLine 5, as you "
+                    + "wrote it:\ndef broken" + (k - 1) + "(:\n\nFix the error. Return the COMPLETE corrected code in a "
+                    + "```python fence, and the ```requirements fence as asked.", sent.get(3).content());
         }
     }
 

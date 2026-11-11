@@ -802,4 +802,8 @@ class AnthropicProvider implements LlmProvider {
 
     @Override
     public String model() { return config.getAnthropicModel(); }
+
+    /** Whether the configured model is sent an effort at all ({@link #supportsEffort}). */
+    @Override
+    public boolean takesEffort() { return supportsEffort(model()); }
 }
