@@ -212,6 +212,37 @@ class LiveCallTaskTest {
     }
 
     @Test
+    @DisplayName("a task asked from Telegram is told once that its model call is still writing, and how to stop it; a web task is not")
+    void aLongCallIsToldToTelegram(@TempDir Path tmp) throws Exception {
+        for (var channel : List.of(TaskChat.Channel.TELEGRAM, TaskChat.Channel.WEB)) {
+            var rig = new LoopRig(java.nio.file.Files.createDirectories(tmp.resolve(channel.name())), List.of(NOOP));
+            rig.loop.liveEveryMs = 20;
+            rig.loop.longCallMs = 100;    // ten minutes, shortened: the reply below takes some 500 ms
+            var statuses = rig.statuses();
+            rig.cloud.think.add(c -> reasoning(12, () -> { }).answer(c));
+            rig.cloud.think.add(respond("Both routers answer."));
+            String session = rig.chat.createSession("u1", "Routers");
+            String row = rig.chat.saveMessage("u1", session, "user", "check the routers");
+
+            AgentResult r = rig.loop.executeFull("u1", "check the routers", false, row, List.of(), channel);
+
+            assertEquals(AgentResult.TerminationReason.COMPLETED, r.terminationReason(), r.response());
+            var told = rows(rig).stream().filter(t -> t.contains("model is still writing")).toList();
+            if (channel == TaskChat.Channel.WEB) {
+                assertEquals(List.of(), told, "the web chat shows the call as it runs: nothing more is said");
+                continue;
+            }
+            assertEquals(1, told.size(), "once, however long it runs: " + rows(rig));
+            assertTrue(told.get(0).startsWith("☁️ Step 1: the cloud model is still writing, "), told.get(0));
+            assertTrue(told.get(0).endsWith(" characters so far. /cancel stops it."), told.get(0));
+            assertTrue(statuses.stream().anyMatch(m -> m.type() == StatusMessage.Type.PROGRESS_MESSAGE
+                    && m.text().contains("model is still writing") && Boolean.TRUE.equals(m.data().get("telegram"))),
+                    "and sent to Telegram");
+        }
+        // Mutation: drop the channel check in TaskChat#longCall -> the web chat is told too.
+    }
+
+    @Test
     @DisplayName("while a call runs its chat is sent its live state, in place, from its start; once it has ended, nothing more")
     void theLiveStateWhileACallRuns(@TempDir Path tmp) throws Exception {
         var rig = new LoopRig(tmp, List.of(NOOP));
