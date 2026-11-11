@@ -485,7 +485,71 @@ class DelegationCallsTest {
         assertFalse(first.get(2).content().contains("{{1.text}}"), "the cloud's handle would be the model's own result 1");
         assertFalse(first.get(0).content().contains("Pick up the kids"),
                 "a task result a call named is not handed over whole: it would not fold");
-        assertTrue(llm.allSeen().contains("stands for a result of the task that you were not given"), llm.allSeen());
+        assertTrue(llm.allSeen().contains("stands for a result of the task, and it has no reference here. You were not "
+                + "given it"), llm.allSeen());
+    }
+
+    @Test
+    @DisplayName("a template's expression that starts with a number is no reference: in a text and in a call's argument")
+    void templatesWithNumbersStay() {
+        String scaled = "state: \"{{ 3.6 * states('sensor.wind_speed')|float }}\"";
+        String boost = "{{ 1.5 if is_state('input_boolean.boost', 'on') else 1.0 }}";
+        assertEquals(scaled, LocalExecutor.parsePlan(Map.of("texts", Map.of("wind", scaled))).texts().get("wind"));
+        assertEquals(boost, LocalExecutor.parsePlan(Map.of("texts", Map.of("boost", boost))).texts().get("boost"));
+        var ha = new FakeTool("ha_config_file", true, List.of(), p -> ToolResult.success("{\"ok\":true}"));
+        var outcome = executor(new Scripted(), new Usage(), ha).execute(calls("",
+                c("ha_config_file", Map.of("content", scaled + "\n" + boost + "\nFirmware {{ 2.4 }} is required"))),
+                task(), UNCOUNTED);
+        assertTrue(outcome.ok(), outcome.text());
+        assertEquals(scaled + "\n" + boost + "\nFirmware {{ 2.4 }} is required", ha.calls.get(0).get("content"));
+        for (String broken : List.of("Total: {{1.}}", "From {{1:body_text}}")) {
+            assertFalse(executor(new Scripted(), new Usage(), ha).execute(calls("",
+                    c("ha_config_file", Map.of("content", broken))), withMail(), UNCOUNTED).ok(), broken);
+        }
+    }
+
+    @Test
+    @DisplayName("a field after the braces of a JSON result -- an object or a list -- is refused, with the right advice")
+    void aFieldOutsideTheBracesOfJson() {
+        var host = new FakeTool("find_host", false, List.of(), p -> ToolResult.success("{\"ok\":true,\"host\":\"nas\"}"));
+        var list = new FakeTool("list_mail", false, List.of(), p -> ToolResult.success("[{\"body_text\":\"hi\"}]"));
+        var shell = new FakeTool("shell_exec", true, List.of(), p -> ToolResult.success("ok"));
+        var lan = executor(new Scripted(), new Usage(), host, shell).execute(calls("",
+                c("find_host", Map.of()), c("shell_exec", Map.of("command", "ping {{call1}}.lan"))), task(), UNCOUNTED);
+        assertTrue(lan.text().contains("Put the field you mean inside the braces"), lan.text());
+        var ok = executor(new Scripted(), new Usage(), host, shell).execute(calls("",
+                c("find_host", Map.of()), c("shell_exec", Map.of("command", "ping {{call1}}.host"))), task(), UNCOUNTED);
+        assertTrue(ok.text().contains("Write {{1.host}} for its field."), ok.text());
+        var arr = executor(new Scripted(), new Usage(), list, shell).execute(calls("",
+                c("list_mail", Map.of()), c("shell_exec", Map.of("command", "echo {{call1}}.body_text"))), task(), UNCOUNTED);
+        assertFalse(arr.ok(), arr.text());
+        assertTrue(shell.calls.isEmpty());
+    }
+
+    @Test
+    @DisplayName("a copy of the mark however written is refused; when the goal gives that result, the model is told to type it")
+    void theMarkHoweverCopied() {
+        var weather = new FakeTool("weather", false, List.of(), p -> ToolResult.success("{\"ok\":true,\"text\":\"Rain, 7 C\"}"));
+        var smtp = new FakeTool("smtp_send_email", true, List.of(), p -> ToolResult.success("Sent"));
+        for (String copy : List.of("[task result 1.text]", "task result 1.text", "Task Result 1",
+                "{\"message\": \"\\u27E6task result 1.text\\u27E7\"}")) {
+            var ctx = task();
+            ctx.addArtifact("note", Map.of(), Map.of(), "{\"ok\":true,\"text\":\"Pick up the kids at 15:30.\"}", true,
+                    new Artifact.Decision(com.ownclaw.privacy.Label.PUBLIC, List.of()));
+            var llm = new Scripted(call("smtp_send_email", Map.of("to", "jana@example.com", "body", copy)), done("stopped"));
+            executor(llm, new Usage(), weather, smtp).execute(calls("Tell Jana too.",
+                    c("smtp_send_email", Map.of("to", "petr@example.com", "body", "{{1.text}}"))), ctx, UNCOUNTED);
+            assertTrue(llm.allSeen().contains("stands for a result of the task"), copy + ": " + llm.allSeen());
+        }
+        assertTrue(smtp.calls.stream().noneMatch(c -> String.valueOf(c.get("to")).startsWith("jana")), "no copy was sent");
+        var ctx = task();
+        ctx.addArtifact("note", Map.of(), Map.of(), "{\"ok\":true,\"text\":\"Pick up the kids at 15:30.\"}", true,
+                new Artifact.Decision(com.ownclaw.privacy.Label.PUBLIC, List.of()));
+        var llm = new Scripted(call("smtp_send_email", Map.of("to", "jana@example.com", "body", "⟦task result 1.text⟧")),
+                done("stopped"));
+        executor(llm, new Usage(), weather, smtp).execute(calls("Send Jana the reminder {{1.text}} too.",
+                c("smtp_send_email", Map.of("to", "petr@example.com", "body", "{{1.text}}"))), ctx, UNCOUNTED);
+        assertTrue(llm.allSeen().contains("Result 1 is given above: type its text exactly as given."), llm.allSeen());
     }
 
     @Test

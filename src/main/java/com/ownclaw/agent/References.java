@@ -252,6 +252,8 @@ final class References {
                     return v;
                 }
                 replacement = text == null ? m.group() : text;   // no such text: a template's own
+            } else if (!ArtifactRef.referenceLike(m.group())) {
+                replacement = m.group();   // a template's expression that starts with a number
             } else {
                 ArtifactRef inner = ArtifactRef.parse(m.group());
                 if (inner == null) {
@@ -264,12 +266,16 @@ final class References {
                 // A field hung outside the braces, {{1}}.body_text: the whole of a JSON result and
                 // the literal ".body_text" would go out. Only a whole reference to a JSON object:
                 // {{1.path}}.bak is a file name, and {{1}}.json one too when result 1 is text.
-                if (inner.field() == null && s.startsWith(".", m.end()) && m.end() + 1 < s.length()
+                String after = s.startsWith(".", m.end()) && m.end() + 1 < s.length()
                         && Character.isLetter(s.charAt(m.end() + 1))
-                        && com.ownclaw.agent.tools.ToolResult.jsonObject(namespace.get(inner.handle() - 1).output()) != null) {
-                    why[0] = "'" + m.group().strip() + s.substring(m.end()).split("[^.\\p{L}\\p{N}_]", 2)[0]
-                            + "' has its field outside the braces. Write " + new ArtifactRef(inner.handle(),
-                            s.substring(m.end() + 1).split("[^\\p{L}\\p{N}_]", 2)[0]) + " instead.";
+                        ? s.substring(m.end() + 1).split("[^\\p{L}\\p{N}_]", 2)[0] : null;
+                if (inner.field() == null && after != null && isJson(namespace.get(inner.handle() - 1).output())) {
+                    var asField = new ArtifactRef(inner.handle(), after);
+                    why[0] = "'" + m.group().strip() + "." + after + "': " + inner + " is a JSON result, and what "
+                            + "follows the braces is text, so all of it and a literal '." + after + "' would go out. "
+                            + (field(namespace.get(inner.handle() - 1).output(), asField) != null
+                                    ? "Write " + asField + " for its field."
+                                    : "Put the field you mean inside the braces, as {{" + inner.handle() + ".name}}.");
                     return v;
                 }
             }
@@ -285,6 +291,17 @@ final class References {
         }
         m.appendTail(sb);
         return sb.toString();
+    }
+
+    /** Whether a result is JSON, an object or a list: a field written after its braces is no field of it. */
+    private static boolean isJson(String output) {
+        if (output == null || output.isBlank()) return false;
+        try {
+            var node = com.ownclaw.agent.TextCalls.MAPPER.readTree(output);
+            return node != null && (node.isObject() || node.isArray());
+        } catch (Exception notJson) {
+            return false;
+        }
     }
 
     /** What a reference in a call the cloud wrote stands for, or null with {@code why[0]} set. */

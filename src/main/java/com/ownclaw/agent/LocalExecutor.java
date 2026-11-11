@@ -822,6 +822,10 @@ public class LocalExecutor {
      */
     static final String TASK_RESULT = "\u27E6task result ";
 
+    /** A copy of {@link #TASK_RESULT}'s mark, however written: brackets or none, escaped, any case. */
+    static final java.util.regex.Pattern MARK_COPY = java.util.regex.Pattern.compile(
+            "(?i)task[\\s\\u00A0]+result[\\s\\u00A0]+(\\d{1,9})");
+
     /** A value of a call the cloud wrote, as the local model numbers: see {@link #renderPlanned}. */
     private static Object inOwnNumbering(Object v) {
         if (v instanceof String s) {
@@ -1101,11 +1105,18 @@ public class LocalExecutor {
         // It was once computed twice, which is how a guard and the thing it guards drift
         // apart. The texts the cloud handed the delegation are put in here too, by name: retyped,
         // a 33-line script install came back with a line broken in five calls of seven (2026-10-08).
-        // A result of the task it was shown in a call that ran for it, copied: no result of its own.
-        if (!byCode && String.valueOf(action.params).contains(TASK_RESULT)) {
-            return "Not run: '" + TASK_RESULT + "...\u27E7' stands for a result of the task that you were not "
-                    + "given, and it has no reference here. Leave it out; if the goal needs it, say so when you "
-                    + "call done.";
+        // A result of the task it was shown in a call that ran for it, copied -- the mark whole,
+        // its words without the brackets, or the brackets escaped: no result of its own.
+        if (!byCode) {
+            var mark = MARK_COPY.matcher(String.valueOf(action.params));
+            if (mark.find()) {
+                int n = Integer.parseInt(mark.group(1));
+                boolean isGiven = given.stream().anyMatch(a -> a.n() == n);
+                return "Not run: 'task result " + n + "' stands for a result of the task, and it has no reference "
+                        + "here. " + (isGiven
+                                ? "Result " + n + " is given above: type its text exactly as given."
+                                : "You were not given it: leave it out, and if the goal needs it, say so when you call done.");
+            }
         }
         // The local model's {{call2}} is its own {{2}}: the calls ran first (callsAsOwn).
         if (!byCode && !plan.calls().isEmpty()) {
@@ -1427,7 +1438,8 @@ public class LocalExecutor {
                 var token = ArtifactRef.TOKEN.matcher(text);
                 while (token.find()) {
                     ArtifactRef ref = ArtifactRef.parse(token.group());
-                    if (ref != null && ref.field() != null) {
+                    // A template's expression that starts with a number is no reference.
+                    if (ref != null && ref.field() != null && ArtifactRef.referenceLike(token.group())) {
                         held = token.group().strip();
                         break;
                     }
@@ -1912,7 +1924,17 @@ public class LocalExecutor {
         var sb = new StringBuilder();
         boolean blank = false;
         for (String line : t.split("\n", -1)) {
-            String l = line.replaceAll("[\\s\\p{Z}]+$", "");
+            // A no-break space typed as a space, wherever it stands: the model cannot see which it is.
+            var spaced = new StringBuilder(line.length());
+            for (int i = 0; i < line.length(); i++) {
+                char c = line.charAt(i);
+                spaced.append(c != ' ' && Character.getType(c) == Character.SPACE_SEPARATOR ? ' ' : c);
+            }
+            // Blanks at the end stripped by a walk back: a pattern anchored at the end tried every
+            // run of blanks inside the line, and 100,000 of them took 48 seconds.
+            int end = spaced.length();
+            while (end > 0 && (Character.isWhitespace(spaced.charAt(end - 1)) || Character.isSpaceChar(spaced.charAt(end - 1)))) end--;
+            String l = spaced.substring(0, end);
             if (l.isEmpty()) {
                 blank = sb.length() > 0;
                 continue;

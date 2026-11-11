@@ -615,6 +615,21 @@ class DelegationSafetyTest {
         String html = text.replace("\n\n", "\n\u00A0\n");
         assertNull(LocalExecutor.retyped(send, Map.of("body", text), List.of(step("mail_read", Map.of(), html)), List.of()),
                 "typed with empty lines, it is still the whole mail");
+        // No-break spaces inside lines too -- "45 Kč", "tel. 777 123 456" -- typed as spaces.
+        String czech = "Dobrý den,\n\nfaktura na 45\u00A0Kč je v příloze, tel.\u00A0777\u00A0123\u00A0456.\n\n" + plain(300)
+                + "\n\nS\u00A0pozdravem";
+        assertNull(LocalExecutor.retyped(send, Map.of("body", czech.replace('\u00A0', ' ')),
+                List.of(step("mail_read", Map.of(), czech)), List.of()));
+    }
+
+    @Test
+    @DisplayName("a line of a hundred thousand blanks is read at once, not tried at every blank")
+    void blanksInsideALineAreCheap() {
+        String mail = plain(350) + " ".repeat(100_000) + "x\n" + plain(300);
+        long start = System.nanoTime();
+        LocalExecutor.retyped(sideEffecting("smtp_send_email"), Map.of("body", plain(350)),
+                List.of(step("mail_read", Map.of(), mail)), List.of());
+        assertTrue(System.nanoTime() - start < 3_000_000_000L, "48 seconds before");
     }
 
     @Test

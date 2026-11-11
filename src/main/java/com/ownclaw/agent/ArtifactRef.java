@@ -118,7 +118,33 @@ public record ArtifactRef(int handle, String field) {
     static String nearReferenceIn(String text) {
         if (text == null) return null;
         var m = NEAR.matcher(text);
-        return m.find() ? m.group().strip() : null;
+        while (m.find()) {
+            if (referenceLike(m.group())) return m.group().strip();
+        }
+        return null;
+    }
+
+    /** What may follow the handle and its dot or colon in something meant as a reference. */
+    private static final Pattern FIELD_LIKE = Pattern.compile(SP + "(?:[\\p{L}_][\\p{L}\\p{N}_]*|#\\p{N}+)?" + SP);
+
+    /**
+     * Whether braces around a number are written as a reference -- {{1}}, {{1.body_text}}, {{1.#3}},
+     * or a broken one like {{1.}} or {{1:body_text}} -- rather than a template's expression that
+     * starts with a number: {{ 3.6 * states('sensor.wind_speed') }} reads as handle 3 with the
+     * field "6 * states(...)", and refused as a reference, every Home Assistant template that
+     * scales a value could not be handed over. A field is a name or a position, never an
+     * expression.
+     */
+    static boolean referenceLike(String token) {
+        var m = NEAR.matcher(token);
+        if (!m.find()) return false;
+        String inner = token.substring(token.indexOf("{{") + 2, token.lastIndexOf("}}"));
+        int at = -1;
+        for (int i = 0; i < inner.length(); i++) {
+            char c = inner.charAt(i);
+            if (c == '.' || c == ':') { at = i; break; }
+        }
+        return at < 0 || FIELD_LIKE.matcher(inner.substring(at + 1)).matches();
     }
 
     /** Whether a model plausibly meant this whole value as a reference. */
