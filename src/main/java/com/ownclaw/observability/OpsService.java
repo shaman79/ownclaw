@@ -284,6 +284,10 @@ public class OpsService {
             m.put("chatUsable", com.ownclaw.llm.LocalModelCheck.chatUsable(template, caps));
             m.put("supportsTools", caps.contains("tools"));
             m.put("supportsThinking", caps.contains("thinking"));
+            // How it is offered its tools (OllamaProvider): described in its system message with
+            // its calls read as text as they stream, or through Ollama's tools field.
+            m.put("toolCalls", !localModelCheck.writesToolCallsAsText(model) ? "native"
+                    : config.getExecutor().isToolCallsAsText() ? "text" : "native (text calls switched off)");
             m.put("templateLength", template.length());
             m.put("templateRendersMessages", template.contains(".Messages") || template.contains(".System"));
             m.put("parameterSize", show.path("details").path("parameter_size").asText(""));

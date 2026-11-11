@@ -117,10 +117,14 @@ class OllamaSamplingTest {
     void theYamlBinds() throws Exception {
         var sources = new org.springframework.boot.env.YamlPropertySourceLoader().load("application.yaml",
                 new org.springframework.core.io.ClassPathResource("application.yaml"));
+        // ${NAME:default} resolved as the application resolves it, to its default here: a boolean
+        // left unresolved does not bind.
         var executor = new org.springframework.boot.context.properties.bind.Binder(
-                org.springframework.boot.context.properties.source.ConfigurationPropertySources.from(sources))
+                org.springframework.boot.context.properties.source.ConfigurationPropertySources.from(sources),
+                new org.springframework.boot.context.properties.bind.PropertySourcesPlaceholdersResolver(sources))
                 .bind("ownclaw.executor", OwnClawConfig.Executor.class)
                 .get();
+        assertTrue(executor.isToolCallsAsText(), "calls written as text, unless OWNCLAW_EXECUTOR_TOOL_CALLS_AS_TEXT says not");
         var thinking = new com.fasterxml.jackson.databind.node.ObjectNode(JSON.getNodeFactory());
         executor.getThinking().into(thinking);
         var answering = new com.fasterxml.jackson.databind.node.ObjectNode(JSON.getNodeFactory());

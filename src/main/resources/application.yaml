@@ -75,6 +75,10 @@ ownclaw:
       presence-penalty: 1.5
     # No context-window setting: every local call is sent the model's own context length
     # (num_ctx), read from Ollama's /api/show.
+    # Ollama sends nothing while the model writes a tool call offered through its tools field, so
+    # a model whose template writes calls in Qwen's text format is given its tools in the system
+    # message instead, and its calls are read as they stream. false: tools go natively, as before.
+    tool-calls-as-text: ${OWNCLAW_EXECUTOR_TOOL_CALLS_AS_TEXT:true}
 
   mentor:
     provider: ${OWNCLAW_MENTOR_PROVIDER:openai}

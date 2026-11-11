@@ -23,6 +23,11 @@ import java.util.concurrent.TimeUnit;
  * API: POST {url}/api/chat with {"model", "messages", "stream": true, "options": {"temperature",
  * "num_ctx"}, "truncate": false, "shift": false}. The reply streams back as one JSON object per
  * line, the last one with {@code "done": true} and the counters.
+ * <p>
+ * A model whose chat template writes tool calls in Qwen's text format is not sent the "tools"
+ * field: its tools are described in the system message as the template would describe them, and
+ * its calls are read out of the reply's text ({@link TextToolCalls}), because Ollama sends nothing
+ * of a call offered through that field until the whole of it has been written.
  */
 @Component
 public class OllamaProvider implements LlmProvider {
@@ -110,6 +115,18 @@ public class OllamaProvider implements LlmProvider {
      */
     public static JsonNode streamChat(OkHttpClient http, String baseUrl, ObjectNode body,
                                       int contextLength, LlmProgress progress, ObjectMapper mapper) {
+        return streamChat(http, baseUrl, body, contextLength, progress, mapper, null);
+    }
+
+    /**
+     * As {@link #streamChat(OkHttpClient, String, ObjectNode, int, LlmProgress, ObjectMapper)}, the
+     * reply's text told to the hook through {@code calls} when the model writes its tool calls as
+     * text: the answer as the answer, and each call, as it is written, as the call it is.
+     *
+     * @param calls how the reply's text is told to the hook, or null to tell all of it as the answer
+     */
+    static JsonNode streamChat(OkHttpClient http, String baseUrl, ObjectNode body, int contextLength,
+                               LlmProgress progress, ObjectMapper mapper, TextToolCalls.Stream calls) {
         body.put("stream", true);
         body.put("truncate", false);
         body.put("shift", false);
@@ -129,13 +146,13 @@ public class OllamaProvider implements LlmProvider {
             if (responseBody == null) {
                 throw new LlmException("ollama", "HTTP " + response.code() + " with no body", 0, null);
             }
-            return read(responseBody.source(), contextLength, progress, mapper);
+            return read(responseBody.source(), contextLength, progress, mapper, calls);
         });
     }
 
     /** The reply, line by line, until the one with {@code "done": true}. */
     private static JsonNode read(BufferedSource source, int contextLength, LlmProgress progress,
-                                 ObjectMapper mapper) throws IOException {
+                                 ObjectMapper mapper, TextToolCalls.Stream calls) throws IOException {
         var content = new StringBuilder();
         var thinking = new StringBuilder();
         ArrayNode toolCalls = mapper.createArrayNode();
@@ -155,7 +172,10 @@ public class OllamaProvider implements LlmProvider {
             thinking.append(reasoning);
             content.append(said);
             if (!reasoning.isEmpty()) progress.received(LlmProgress.Part.REASONING, reasoning);
-            if (!said.isEmpty()) progress.received(LlmProgress.Part.ANSWER, said);
+            if (!said.isEmpty()) {
+                if (calls != null) calls.content(said, progress);
+                else progress.received(LlmProgress.Part.ANSWER, said);
+            }
             for (JsonNode call : message.path("tool_calls")) {
                 toolCalls.add(call);
                 // Ollama sends each call whole: its name, then all of its arguments at once.
@@ -163,6 +183,8 @@ public class OllamaProvider implements LlmProvider {
                 progress.received(LlmProgress.Part.ARGUMENTS, call.path("function").path("arguments").toString());
             }
             if (!chunk.path("done").asBoolean(false)) continue;
+            // What was held back as the possible start of a tag is told now: the reply has ended.
+            if (calls != null) calls.end(progress);
 
             ObjectNode last = chunk.deepCopy();
             ObjectNode whole = last.putObject("message");
@@ -238,9 +260,18 @@ public class OllamaProvider implements LlmProvider {
         // 0.3, without a presence penalty, this model reasoned itself into a loop.
         (thinks ? config.getThinking() : config.getAnswering()).into(body.putObject("options"));
 
-        if (reqConfig.hasTools()) {
+        List<ToolSpec> offered = reqConfig.hasTools() ? ToolSpec.offered(reqConfig.tools(), messages) : List.of();
+        // Offered through the tools field, a call reaches this application only once the model has
+        // written the whole of it: Ollama sends nothing meanwhile, so the owner saw no progress, the
+        // loop guard had nothing to read, and a call that had become a loop ran until the read
+        // timeout's hour was up (TextToolCalls). A model whose template writes its calls as text is
+        // told its tools in the system message instead, as that template would tell it, and its
+        // calls stream in as the text they are.
+        boolean callsAsText = !offered.isEmpty() && config.isToolCallsAsText()
+                && localModelCheck.writesToolCallsAsText(model);
+        if (reqConfig.hasTools() && !callsAsText) {
             ArrayNode toolsArray = body.putArray("tools");
-            for (ToolSpec spec : ToolSpec.offered(reqConfig.tools(), messages)) {
+            for (ToolSpec spec : offered) {
                 ObjectNode fn = toolsArray.addObject().put("type", "function").putObject("function");
                 fn.put("name", spec.name());
                 fn.put("description", spec.description() == null ? "" : spec.description());
@@ -249,27 +280,63 @@ public class OllamaProvider implements LlmProvider {
         }
 
         ArrayNode msgs = body.putArray("messages");
+        // The tools open the system message, where the template puts them: a conversation with no
+        // system prompt is given a system message of the tools alone.
+        boolean described = !callsAsText;
         for (LlmMessage msg : messages) {
-            if (msg.role() == LlmMessage.Role.TOOLS) continue;   // its tools join the array
+            if (msg.role() == LlmMessage.Role.TOOLS) continue;   // its tools join the others (offered)
+            if (!described) {
+                described = true;
+                boolean system = msg.role() == LlmMessage.Role.SYSTEM;
+                msgs.addObject().put("role", "system")
+                        .put("content", TextToolCalls.system(offered, system ? msg.content() : null));
+                if (system) continue;
+            }
             ObjectNode m = msgs.addObject();
             m.put("role", msg.role().apiValue());
             m.put("content", msg.content());
         }
+        if (!described) {
+            msgs.addObject().put("role", "system").put("content", TextToolCalls.system(offered, null));
+        }
 
-        JsonNode last = streamChat(httpClient, config.getUrl(), body, contextLength, reqConfig.progress(), mapper);
+        // Every tool of the request, deferred ones too: a call to one the model has not been offered
+        // yet still has its values typed by its schema, and is named while it is written.
+        JsonNode last = streamChat(httpClient, config.getUrl(), body, contextLength, reqConfig.progress(), mapper,
+                callsAsText ? new TextToolCalls.Stream(reqConfig.tools().stream().map(ToolSpec::name)
+                        .collect(java.util.stream.Collectors.toSet())) : null);
         // The one check every reply passes before a caller sees it -- here, because local calls
         // have no gateway to apply it.
-        return response(last, model, contextLength).requireComplete("ollama");
+        return response(last, model, contextLength, callsAsText ? reqConfig.tools() : null).requireComplete("ollama");
     }
 
-    /** The reply {@link #streamChat} read, as the response every provider gives. */
-    private LlmResponse response(JsonNode last, String model, int contextLength) {
+    /**
+     * The reply {@link #streamChat} read, as the response every provider gives.
+     *
+     * @param callsAsText the request's tools, offered or deferred, when the model was asked to write
+     *                    its calls as text ({@link TextToolCalls}): they are read out of its text,
+     *                    their values typed by these schemas. Null when it was offered them natively.
+     */
+    private LlmResponse response(JsonNode last, String model, int contextLength, List<ToolSpec> callsAsText) {
         var reply = new StreamedReply("ollama", mapper);
         JsonNode message = last.path("message");
-        reply.text(message.path("content").asText(""));
+        String content = message.path("content").asText("");
+        int index = 0;
+        if (callsAsText == null) {
+            reply.text(content);
+        } else {
+            // The calls written as text, each typed by its tool's schema and then parsed as every
+            // call is (StreamedReply#close); the text outside them is the reply's.
+            TextToolCalls.Parsed read = TextToolCalls.parse(content, callsAsText);
+            reply.text(read.text());
+            for (TextToolCalls.Call call : read.calls()) {
+                reply.call(index, null, call.name(), json(call.arguments()));
+                reply.close(index++);
+            }
+            if (read.malformed() != null) reply.malformed(read.malformed());
+        }
         // Ollama sends each tool call whole, its arguments an object -- like Anthropic's input
         // and unlike OpenAI's string -- and they go through the same strict parse.
-        int index = 0;
         for (JsonNode tc : message.path("tool_calls")) {
             reply.call(index, tc.path("id").asText(null), tc.path("function").path("name").asText(null),
                     tc.path("function").path("arguments").toString());
@@ -301,6 +368,16 @@ public class OllamaProvider implements LlmProvider {
         // No output limit was sent, so a "length" here is the context window filling up.
         return reply.response(List.of(new LlmResponse.Usage(model, promptTokens, completionTokens, 0, 0)),
                 last.path("done_reason").asText(null), null, model, null, contextLength);
+    }
+
+    /** Arguments read out of the model's text, as the JSON a native call's arrive in. */
+    private String json(java.util.Map<String, Object> arguments) {
+        try {
+            return mapper.writeValueAsString(arguments);
+        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+            throw new LlmException("ollama", "a tool call's arguments could not be written as JSON: "
+                    + e.getOriginalMessage(), 0, e);
+        }
     }
 
     /**

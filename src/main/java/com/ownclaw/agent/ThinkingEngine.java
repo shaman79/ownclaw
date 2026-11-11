@@ -177,11 +177,13 @@ public class ThinkingEngine {
             // extraction, whose step it asks again with no words asked for beside the call.
             throw notToAskAgain;
         } catch (MalformedToolCall malformed) {
-            // The reply came, whole, and was billed; a tool call in it cannot be run, because its
-            // arguments are not a JSON object. Not an ending, and not a reply that "never came":
-            // nothing ran, the model is shown what it wrote, the call as it wrote it included,
-            // and it is asked again -- until steps in a row that produce nothing end the task
-            // (AgentLoop.NOTHING_TO_RUN_IN_A_ROW).
+            // The reply came, whole, and was billed; a tool call in it cannot be run: its arguments
+            // are not a JSON object, or -- the local model writing its calls as text -- the call
+            // cannot be read. Not an ending, and not a reply that "never came": nothing ran, the
+            // model is shown what it wrote, the call as it wrote it included, and why, and it is
+            // asked again -- until steps in a row that produce nothing end the task
+            // (AgentLoop.NOTHING_TO_RUN_IN_A_ROW). The ask names no format: each model is told its
+            // own by its tools.
             LlmResponse reply = malformed.reply();
             String text = reply.content() == null ? "" : reply.content();
             String wrote = (text.isBlank() ? "" : text + "\n\n") + reply.invalidToolCall();
@@ -189,7 +191,7 @@ public class ThinkingEngine {
                     context.taskId(), wrote.length());
             return new ThinkResult(unusable(wrote, "Your previous reply held a tool call that cannot "
                             + "be run, so nothing was run.",
-                    "Make the call again with its arguments as one JSON object."), messages, wrote, reply);
+                    "Make the call again, whole, in the form your tools are called in."), messages, wrote, reply);
         } catch (LlmException e) {
             // A request the provider answered by refusing it as it stands -- a key it does not
             // take, a model it does not have, a request it cannot read -- is refused the same way

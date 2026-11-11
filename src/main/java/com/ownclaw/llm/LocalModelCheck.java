@@ -79,6 +79,12 @@ public class LocalModelCheck {
      */
     private final Map<String, Integer> contextLengths = new ConcurrentHashMap<>();
 
+    /**
+     * Whether each model's chat template writes tool calls in the text format
+     * {@link TextToolCalls} reads, from the same {@code /api/show} as its context length.
+     */
+    private final Map<String, Boolean> callsAsText = new ConcurrentHashMap<>();
+
     @Autowired
     public LocalModelCheck(OwnClawConfig config, ObjectMapper mapper) {
         // Seconds, not the chat client's hour: every question here is answered from the model
@@ -125,6 +131,24 @@ public class LocalModelCheck {
                     + "', so its context window is unknown");
         }
         return known;
+    }
+
+    /**
+     * Whether a model's chat template writes its tool calls in the text format
+     * {@link TextToolCalls} reads ({@link TextToolCalls#writtenBy}): known from the first
+     * {@code /api/show} made for the model, and read now when none has been. A model that cannot
+     * be asked is offered its tools natively, as every model was before.
+     */
+    public boolean writesToolCallsAsText(String model) {
+        Boolean known = callsAsText.get(model);
+        if (known != null) return known;
+        try {
+            show(config.getExecutor().getUrl(), model);
+        } catch (Exception e) {
+            log.debug("Could not read the chat template of '{}': {}", model, e.getMessage());
+            return false;
+        }
+        return callsAsText.getOrDefault(model, false);
     }
 
     /** {@code <general.architecture>.context_length} from an {@code /api/show} reply, or null. */
@@ -215,8 +239,11 @@ public class LocalModelCheck {
 
             toolsCapable = capabilities.contains("tools");
             Integer window = contextLengths.get(model);
-            log.info("Local model '{}' ready on {} (capabilities={}, context window {})", model, url,
-                    capabilities, window == null ? "not stated by /api/show" : window + " tokens");
+            log.info("Local model '{}' ready on {} (capabilities={}, context window {}, tool calls {})", model, url,
+                    capabilities, window == null ? "not stated by /api/show" : window + " tokens",
+                    !callsAsText.getOrDefault(model, false) ? "offered natively"
+                            : config.getExecutor().isToolCallsAsText() ? "read as text as they stream"
+                            : "offered natively (text calls switched off)");
         } catch (Exception e) {
             log.warn("Could not inspect local model '{}' on {}: {}", model, url, e.getMessage());
         }
@@ -446,6 +473,7 @@ public class LocalModelCheck {
             JsonNode show = mapper.readTree(text);
             Integer window = contextLengthIn(show);
             if (window != null) contextLengths.put(model, window);
+            callsAsText.put(model, TextToolCalls.writtenBy(show.path("template").asText("")));
             return show;
         }
     }
