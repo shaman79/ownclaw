@@ -49,6 +49,24 @@ class MarkdownInertPageTest {
     }
 
     @Test
+    @DisplayName("a free class is dropped, code keeps only marked's language-*, and comments are removed")
+    void classesAndComments() {
+        String sanitize = between("function mdSanitize(root) {", "function renderMarkdown(text) {");
+        assertTrue(page.contains("CODE: ['class'], PRE: ['class'], SPAN: [], DIV: [],"), "no class on a span or a div");
+        assertTrue(sanitize.contains("/^language-[\\w+#.-]+$/.test(c)"), "only language-* on code: " + sanitize);
+        assertTrue(sanitize.contains("createTreeWalker(root, NodeFilter.SHOW_COMMENT)"), "comments removed: " + sanitize);
+        assertTrue(sanitize.contains("if (!root.contains(el)) continue;"), sanitize);
+    }
+
+    @Test
+    @DisplayName("the skill Test Run escapes a parameter's type: a model writes it into SKILL.yaml")
+    void theTestRunEscapesTheType() {
+        assertTrue(page.contains("font-weight:400\">(' + escapeHtml(pType) + ')</span></label>"),
+                "a type of <img src=x onerror=…> ran with the session's token (review, 2026-11-11)");
+        assertFalse(page.contains("(' + pType + ')"));
+    }
+
+    @Test
     @DisplayName("every Markdown body the chat shows goes through the one renderer")
     void everyBodyGoesThroughIt() {
         assertEquals(1, page.split("marked\\.parse\\(", -1).length - 1, "marked.parse is called in renderMarkdown only");

@@ -5329,7 +5329,7 @@
                 var required = p.required ? ' *' : '';
                 fieldsHtml +=
                     '<div class="task-modal-field">' +
-                        '<label>' + escapeHtml(key) + required + ' <span style="color:var(--text-3);font-weight:400">(' + pType + ')</span></label>' +
+                        '<label>' + escapeHtml(key) + required + ' <span style="color:var(--text-3);font-weight:400">(' + escapeHtml(pType) + ')</span></label>' +
                         '<input type="text" class="skill-run-param" data-param="' + escapeHtml(key) + '" placeholder="' + escapeHtml(pDesc) + '">' +
                     '</div>';
             });
@@ -6812,7 +6812,7 @@
         P: [], BR: [], HR: [], STRONG: [], EM: [], B: [], I: [], U: [], S: [], DEL: [], INS: [],
         H1: [], H2: [], H3: [], H4: [], H5: [], H6: [], BLOCKQUOTE: [], UL: [], OL: ['start'],
         LI: [], DL: [], DT: [], DD: [], MARK: [], SUP: [], SUB: [], SMALL: [],
-        CODE: ['class'], PRE: ['class'], SPAN: ['class'], DIV: ['class'],
+        CODE: ['class'], PRE: ['class'], SPAN: [], DIV: [],
         A: ['href', 'title'], IMG: ['src', 'alt', 'title'],
         TABLE: [], THEAD: [], TBODY: [], TFOOT: [], TR: [], TH: ['align'], TD: ['align']
     });
@@ -6834,7 +6834,7 @@
         var all = Array.prototype.slice.call(root.querySelectorAll('*'));
         for (var i = 0; i < all.length; i++) {
             var el = all[i];
-            if (!el.parentNode) continue;                 // already removed with an ancestor
+            if (!root.contains(el)) continue;             // already removed with an ancestor
             var allowedAttrs = MD_ALLOWED[el.tagName];
             if (!allowedAttrs) {
                 // Not on the allowlist. Drop the element but keep its text, so a message that
@@ -6849,6 +6849,11 @@
                     el.removeAttribute(attrs[j].name);
                 } else if ((name === 'href' || name === 'src') && !mdIsSafeUrl(attrs[j].value)) {
                     el.removeAttribute(attrs[j].name);
+                } else if (name === 'class') {
+                    // Only marked's own language-* on a code block. Any other class can be the
+                    // page's own: task-modal-overlay is fixed over the whole page (review, 2026-11-11).
+                    var kept = attrs[j].value.split(/\s+/).filter(function (c) { return /^language-[\w+#.-]+$/.test(c); });
+                    if (kept.length) el.setAttribute('class', kept.join(' ')); else el.removeAttribute(attrs[j].name);
                 }
             }
             if (el.tagName === 'A' && el.getAttribute('href')) {
@@ -6856,6 +6861,11 @@
                 el.setAttribute('target', '_blank');
             }
         }
+        // Comments are inert, and nothing a message needs: none is kept.
+        var walker = root.ownerDocument.createTreeWalker(root, NodeFilter.SHOW_COMMENT);
+        var comments = [];
+        while (walker.nextNode()) comments.push(walker.currentNode);
+        comments.forEach(function (c) { c.parentNode.removeChild(c); });
         return root;
     }
 
