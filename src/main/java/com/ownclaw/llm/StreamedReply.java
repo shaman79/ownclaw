@@ -101,6 +101,14 @@ final class StreamedReply {
     }
 
     /**
+     * A call the model wrote as text that cannot be read at all ({@link TextToolCalls#parse}): it
+     * is named in the reply as one whose arguments do not parse is, unless one already is.
+     */
+    void malformed(String why) {
+        if (malformed == null) malformed = why;
+    }
+
+    /**
      * A fallback model took over mid-reply. The calls so far were the declined model's and are
      * not part of the reply; its text is, because the fallback model continues from it.
      */

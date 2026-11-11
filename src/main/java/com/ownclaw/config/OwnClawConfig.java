@@ -55,6 +55,14 @@ public class OwnClawConfig {
          */
         private Sampling answering = new Sampling(0.7, 0.80, 20, 0.0, 1.5);
 
+        /**
+         * Whether a model whose chat template writes tool calls in Qwen's text format is offered
+         * its tools in the system message and has its calls read as they stream, rather than
+         * through Ollama's tools field, which holds a call back until it is whole
+         * (OllamaProvider). On by default; off sends every model its tools natively, as before.
+         */
+        private boolean toolCallsAsText = true;
+
         public String getProvider() { return provider; }
         public void setProvider(String provider) { this.provider = provider; }
         public String getUrl() { return url; }
@@ -65,6 +73,8 @@ public class OwnClawConfig {
         public void setThinking(Sampling thinking) { this.thinking = thinking; }
         public Sampling getAnswering() { return answering; }
         public void setAnswering(Sampling answering) { this.answering = answering; }
+        public boolean isToolCallsAsText() { return toolCallsAsText; }
+        public void setToolCallsAsText(boolean toolCallsAsText) { this.toolCallsAsText = toolCallsAsText; }
     }
 
     /**
