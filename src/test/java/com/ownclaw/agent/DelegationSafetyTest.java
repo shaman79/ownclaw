@@ -571,6 +571,48 @@ class DelegationSafetyTest {
                 echoed, List.of())));
     }
 
+    /** Block {@code i} of {@link #config()}: one sensor, the shape every block of it shares. */
+    static String block(int i) {
+        return "- sensor:\n    - name: \"inverter output " + i + " in kW\"\n"
+                + "      unique_id: inverter_output_kw_" + i + "\n"
+                + "      state: \"{{ states('sensor.inverter_" + i + "') | float / 1000 }}\"\n";
+    }
+
+    @Test
+    @DisplayName("an edit of a repetitive file is not a copy of it: a new block, a whole block replaced, a block quoted in prose")
+    void aRepetitiveFileCanBeEdited() {
+        // Round 2 of the 2026-11-11 review: with the argument the shorter side, every run the
+        // file repeats covered every place it occurs, and a brand-new block "covered" 80% of it.
+        String config = config();
+        var done = List.of(step("ha_config_file", Map.of("action", "read"), config));
+        var write = sideEffecting("ha_config_file");
+        assertNull(LocalExecutor.retyped(write, Map.of("content", block(31)), done, List.of()), "a new block appended");
+        assertNull(LocalExecutor.retyped(write, Map.of("content", block(31) + block(32)), done, List.of()), "two");
+        assertNull(LocalExecutor.retyped(write, Map.of("find", block(7), "replace",
+                block(7).replace("/ 1000 }}", "/ 1000 | round(2) }}")), done, List.of()), "a whole block replaced");
+        assertNull(LocalExecutor.retyped(sideEffecting("smtp_send_email"), Map.of("body",
+                composed(1_500) + "\n" + block(12)), done, List.of()), "a block quoted in an email");
+        var journal = new StringBuilder();
+        for (int i = 0; i < 400; i++) {
+            journal.append(String.format("2026-11-10 12:%02d:%02d homeassistant sensor.battery_state_of_charge unavailable%n",
+                    i / 60 % 60, i % 60));
+        }
+        String lines = journal.toString().lines().skip(200).limit(3).reduce("", (a, b) -> a + b + "\n");
+        assertNull(LocalExecutor.retyped(sideEffecting("smtp_send_email"), Map.of("body", composed(1_500) + "\n" + lines),
+                List.of(step("journal", Map.of(), journal.toString())), List.of()), "three lines of a long journal in an alert");
+        // Mutation: drop the once-placed rule -> each of these is refused as a copy of the file.
+    }
+
+    @Test
+    @DisplayName("a copy that loses a text's paragraph breaks is no exact copy; more blank lines between them are")
+    void paragraphBreaksCount() {
+        String text = "Dear Petr,\n\n" + plain(400) + "\n\n" + plain(300).toUpperCase() + "\n\nRegards";
+        var done = List.of(step("mail_read", Map.of(), text));
+        var send = sideEffecting("smtp_send_email");
+        assertEquals("body", refused(LocalExecutor.retyped(send, Map.of("body", text.replace("\n\n", "\n")), done, List.of())));
+        assertNull(LocalExecutor.retyped(send, Map.of("body", text.replace("\n\n", "\n\n\n")), done, List.of()));
+    }
+
     @Test
     @DisplayName("a message quoting a few lines of a long result is the model's own text")
     void quotingAFewLinesIsComposing() {

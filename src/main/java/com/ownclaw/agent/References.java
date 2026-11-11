@@ -204,6 +204,13 @@ final class References {
         if (v instanceof Map<?, ?> map) {
             var out = new LinkedHashMap<Object, Object>();
             for (var e : map.entrySet()) {
+                // A key is not filled in: one written as a reference would go out as braces.
+                String inKey = ArtifactRef.nearReferenceIn(String.valueOf(e.getKey()));
+                if (inKey != null || LocalExecutor.CALL_REF.matcher(String.valueOf(e.getKey())).find()) {
+                    why[0] = "'" + e.getKey() + "' is a key written as a reference, and a key is not filled in. "
+                            + "Put the reference in a value.";
+                    return v;
+                }
                 out.put(e.getKey(), exactly(e.getValue(), namespace, texts, used, why));
                 if (why[0] != null) return v;
             }
@@ -238,6 +245,12 @@ final class References {
             String replacement;
             if (m.group(1) != null) {
                 String text = texts.get(m.group(1));
+                // A call's result that code could not place -- written as no call it knows -- is
+                // no template's placeholder: no text has that name (LocalExecutor#texts).
+                if (text == null && m.group(1).matches("(?i)call\\d+")) {
+                    why[0] = "'" + m.group().strip() + "' names a call that has not run before this one.";
+                    return v;
+                }
                 replacement = text == null ? m.group() : text;   // no such text: a template's own
             } else {
                 ArtifactRef inner = ArtifactRef.parse(m.group());
@@ -248,6 +261,15 @@ final class References {
                 }
                 replacement = filled(inner, namespace, used, why);
                 if (replacement == null) return v;
+                // A field hung outside the braces, {{1}}.body_text: the whole result and the
+                // literal ".body_text" would go out.
+                if (s.startsWith(".", m.end()) && m.end() + 1 < s.length()
+                        && Character.isLetter(s.charAt(m.end() + 1))) {
+                    why[0] = "'" + m.group().strip() + s.substring(m.end()).split("[^.\\p{L}\\p{N}_]", 2)[0]
+                            + "' has its field outside the braces. Write " + new ArtifactRef(inner.handle(),
+                            s.substring(m.end() + 1).split("[^\\p{L}\\p{N}_]", 2)[0]) + " instead.";
+                    return v;
+                }
             }
             m.appendReplacement(sb, java.util.regex.Matcher.quoteReplacement(replacement));
         }

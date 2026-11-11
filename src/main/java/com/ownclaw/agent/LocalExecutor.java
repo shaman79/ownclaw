@@ -267,7 +267,7 @@ public class LocalExecutor {
                 int k = Integer.parseInt(c.group(1));
                 String own;
                 if (k >= 1 && k <= plan.calls().size()) {
-                    own = "{{" + k + c.group(2) + "}}";
+                    own = "{{" + k + c.group(2).strip() + "}}";
                 } else {
                     missing[0]++;
                     own = "(a result that does not exist)";
@@ -278,6 +278,20 @@ public class LocalExecutor {
             return out.toString();
         };
         String goal = inWords.apply(plan.goal());
+        // A result of the task that a call names is the local model's to read too, when it goes on
+        // from the calls with a goal: it is shown the calls, with "result 4" in them
+        // (renderPlanned), and "send Jana the same reminder" has to have that reminder.
+        if (!plan.goal().isBlank()) {
+            for (var call : plan.calls()) {
+                var m = ArtifactRef.TOKEN.matcher(String.valueOf(call.params()));
+                while (m.find()) {
+                    ArtifactRef ref = ArtifactRef.parse(m.group());
+                    if (ref != null && ref.handle() <= results.size()) {
+                        named.putIfAbsent(ref.handle(), results.get(ref.handle() - 1));
+                    }
+                }
+            }
+        }
         var steps = new ArrayList<DelegationPlan.Step>();
         for (var st : plan.steps()) {
             steps.add(new DelegationPlan.Step(inWords.apply(st.description()), st.tool(), st.params()));
@@ -351,7 +365,8 @@ public class LocalExecutor {
      * "call" followed by digits is no text's name ({@link #texts}).
      */
     static final java.util.regex.Pattern CALL_REF = java.util.regex.Pattern.compile(
-            "\\{\\{[\\s\\u00A0\\u200B\\u200C\\u200D\\u2060\\uFEFF]*call(\\d{1,9})((?:\\.[^{}]*)?)\\}\\}");
+            "\\{\\{[\\s\\u00A0\\u200B\\u200C\\u200D\\u2060\\uFEFF]*\\$?[\\s\\u00A0\\u200B\\u200C\\u200D\\u2060\\uFEFF]*(?i:call)(\\d{1,9})"
+                    + "((?:\\.[^{}]*?)?)[\\s\\u00A0\\u200B\\u200C\\u200D\\u2060\\uFEFF]*\\}\\}");
 
     /**
      * {@code v} with each {@code {{callK}}} in it, at any depth, written as the task's handle of
@@ -370,7 +385,7 @@ public class LocalExecutor {
                     return v;
                 }
                 m.appendReplacement(sb, java.util.regex.Matcher.quoteReplacement(
-                        "{{" + ran.get(k - 1).n() + m.group(2) + "}}"));
+                        "{{" + ran.get(k - 1).n() + m.group(2).strip() + "}}"));
                 any = true;
             }
             if (!any) return s;
@@ -505,7 +520,7 @@ public class LocalExecutor {
             // reads its own, and fold like them.
             messages.add(LlmMessage.user("The orchestrator's exact calls were run for you first, in its "
                     + "order. What they returned follows; then work toward the goal from there."));
-            messages.add(LlmMessage.assistant(renderPlanned(plan.calls())));
+            messages.add(LlmMessage.assistant(renderPlanned(plan.calls())));   // in its own numbering
             var replies = new ArrayList<String>();
             for (int i = 0; i < ran.size(); i++) {
                 Artifact a = ran.get(i);
@@ -792,17 +807,91 @@ public class LocalExecutor {
                 + (result.succeeded() ? "SUCCESS" : "FAILED") + ":\n" + result.output();
     }
 
-    /** The plan's calls written as the model's own turn, as {@link #renderCalls} writes its calls. */
+    /**
+     * The plan's calls written as the model's own turn, as {@link #renderCalls} writes its calls --
+     * in its numbering, not the cloud's: a call's result, {{call2}}, is its own {{2}}, and a
+     * result of the task, {{4}} to the cloud, is "result 4", one it was given ({@link #given}).
+     * Shown as the cloud wrote them, the model copied "{{1.text}}" into a call of its own and sent
+     * its own first result -- the weather -- where the cloud had sent the task's first, a note.
+     */
     private static String renderPlanned(List<DelegationPlan.Call> calls) {
         var lines = new ArrayList<String>();
         for (DelegationPlan.Call call : calls) {
             try {
-                lines.add(TextCalls.MAPPER.writeValueAsString(Map.of("tool", call.tool(), "params", call.params())));
+                lines.add(TextCalls.MAPPER.writeValueAsString(Map.of("tool", call.tool(),
+                        "params", inOwnNumbering(call.params()))));
             } catch (Exception e) {
                 lines.add("{\"tool\": \"" + call.tool() + "\"}");
             }
         }
         return String.join("\n", lines);
+    }
+
+    /** A value of a call the cloud wrote, as the local model numbers: see {@link #renderPlanned}. */
+    private static Object inOwnNumbering(Object v) {
+        if (v instanceof String s) {
+            String words = TaskRecord.inWords(s);
+            var m = CALL_REF.matcher(words);
+            var sb = new StringBuilder();
+            while (m.find()) {
+                m.appendReplacement(sb, java.util.regex.Matcher.quoteReplacement(
+                        "{{" + Integer.parseInt(m.group(1)) + m.group(2).strip() + "}}"));
+            }
+            m.appendTail(sb);
+            return sb.toString();
+        }
+        if (v instanceof Map<?, ?> map) {
+            var out = new LinkedHashMap<String, Object>();
+            map.forEach((k, x) -> out.put(String.valueOf(k), inOwnNumbering(x)));
+            return out;
+        }
+        if (v instanceof Collection<?> list) {
+            var out = new ArrayList<Object>();
+            for (Object x : list) out.add(inOwnNumbering(x));
+            return out;
+        }
+        return v;
+    }
+
+    /**
+     * {@code {{call2}}} in a call the LOCAL model wrote, as its own {{2}}: the calls ran first, so
+     * call K's result is its result K. One naming no call of the plan sets {@code bad[0]}.
+     */
+    static Object callsAsOwn(Object v, int calls, String[] bad) {
+        if (v instanceof String s) {
+            var m = CALL_REF.matcher(s);
+            var sb = new StringBuilder();
+            boolean any = false;
+            while (m.find()) {
+                int k = Integer.parseInt(m.group(1));
+                if (k < 1 || k > calls) {
+                    bad[0] = m.group().strip();
+                    return v;
+                }
+                m.appendReplacement(sb, java.util.regex.Matcher.quoteReplacement("{{" + k + m.group(2).strip() + "}}"));
+                any = true;
+            }
+            if (!any) return s;
+            m.appendTail(sb);
+            return sb.toString();
+        }
+        if (v instanceof Map<?, ?> map) {
+            var out = new LinkedHashMap<String, Object>();
+            for (var e : map.entrySet()) {
+                out.put(String.valueOf(e.getKey()), callsAsOwn(e.getValue(), calls, bad));
+                if (bad[0] != null) return v;
+            }
+            return out;
+        }
+        if (v instanceof Collection<?> list) {
+            var out = new ArrayList<Object>();
+            for (Object x : list) {
+                out.add(callsAsOwn(x, calls, bad));
+                if (bad[0] != null) return v;
+            }
+            return out;
+        }
+        return v;
     }
 
     /** read_result as a delegation's local model is offered it, once a result of it has folded. */
@@ -1009,6 +1098,24 @@ public class LocalExecutor {
         // It was once computed twice, which is how a guard and the thing it guards drift
         // apart. The texts the cloud handed the delegation are put in here too, by name: retyped,
         // a 33-line script install came back with a line broken in five calls of seven (2026-10-08).
+        // The local model's {{call2}} is its own {{2}}: the calls ran first (callsAsOwn).
+        if (!byCode && !plan.calls().isEmpty()) {
+            String[] bad = {null};
+            @SuppressWarnings("unchecked")
+            Map<String, Object> own = (Map<String, Object>) callsAsOwn(action.params, plan.calls().size(), bad);
+            if (bad[0] != null) {
+                return "Not run: '" + bad[0] + "' names no call: the calls that ran for you are your results "
+                        + ArtifactRef.handle(1) + " to " + ArtifactRef.handle(plan.calls().size()) + ".";
+            }
+            action = new ExecutorAction(action.done, action.summary, action.tool, own);
+        } else if (!byCode) {
+            String[] bad = {null};
+            callsAsOwn(action.params, 0, bad);
+            if (bad[0] != null) {
+                return "Not run: '" + bad[0] + "' names a call, and no calls ran for you: write a result as "
+                        + "{{N}}, N one of your results.";
+            }
+        }
         // A call the cloud wrote is resolved as it writes everything: {{N}} is the task's result N,
         // at any depth, and a reference that cannot be filled in refuses the call (resolveExactly).
         References.Resolved refs = byCode
@@ -1294,13 +1401,21 @@ public class LocalExecutor {
                         + "lowercase letter, then lowercase letters, digits and underscores, as in "
                         + "watchdog_script -- never a number, which is a result's handle.");
             }
-            if (name.matches("call\\d+")) {
+            if (name.matches("(?i)call\\d+")) {
                 throw new IllegalArgumentException("'" + name + "' cannot name a text: {{" + name
                         + "}} is how a call's result is named.");
             }
             if (!(e.getValue() instanceof String text)) {
                 throw new IllegalArgumentException("texts." + name + " must be a string: the exact "
                         + "text, as it is to be inserted.");
+            }
+            // A text goes in exactly as written, and nothing inside it is filled in.
+            var inText = CALL_REF.matcher(text);
+            if (inText.find()) {
+                throw new IllegalArgumentException("texts." + name + " holds a call's result ("
+                        + inText.group().strip() + "), and a text is put in exactly as written, with "
+                        + "nothing in it filled in. Put the reference in the call's own argument, as the "
+                        + "whole value or inside its text.");
             }
             texts.put(name, text);
         }
@@ -1764,19 +1879,25 @@ public class LocalExecutor {
 
     /**
      * A text as written, but for what no reader of it depends on: line ends (CRLF), blanks at the
-     * end of a line, blank lines, and Unicode's two spellings of one character (NFC). Line breaks,
-     * indentation and case stay: a YAML file and a script are broken by changing them, and a copy
-     * that changed them is a copy that lost something.
+     * end of a line, how many blank lines stand between two others, and Unicode's two spellings of
+     * one character (NFC). Line breaks, indentation, case, and that a blank line is there at all
+     * -- a paragraph break -- stay: a YAML file, a script and an email are changed by changing them,
+     * and a copy that changed them is a copy that lost something.
      */
     static String light(String s) {
         String t = java.text.Normalizer.normalize(s, java.text.Normalizer.Form.NFC)
                 .replace("\r\n", "\n").replace('\r', '\n');
         var sb = new StringBuilder();
+        boolean blank = false;
         for (String line : t.split("\n", -1)) {
             String l = line.stripTrailing();
-            if (l.isEmpty()) continue;
-            if (sb.length() > 0) sb.append('\n');
+            if (l.isEmpty()) {
+                blank = sb.length() > 0;
+                continue;
+            }
+            if (sb.length() > 0) sb.append(blank ? "\n\n" : "\n");
             sb.append(l);
+            blank = false;
         }
         return sb.toString();
     }
@@ -1812,6 +1933,10 @@ public class LocalExecutor {
         long[] smallRuns = runs(small);
         var first = new HashMap<Long, Integer>(smallRuns.length * 2);
         for (int i = 0; i < smallRuns.length; i++) first.putIfAbsent(smallRuns[i], i);
+        // With the argument indexed, each of its runs is placed in the text once: a run that the
+        // text repeats -- a line every block of a configuration shares -- would otherwise cover
+        // every place it occurs, and a new block written into a repetitive file "covered" 80% of it.
+        boolean[] placed = indexText ? null : new boolean[smallRuns.length];
         boolean[] copied = new boolean[argument.length()];
         boolean[] covered = new boolean[text.length()];
         long top = 1;
@@ -1826,17 +1951,17 @@ public class LocalExecutor {
         int to = -1;
         for (int p = 0; p + w <= large.length(); p++) {
             if (p > 0) h = (h - large.charAt(p - 1) * top) * RUN_BASE + large.charAt(p + w - 1);
-            if (own.test(h)) {
-                last = -1;
-                continue;
-            }
             Integer q = last >= 0 && last + 1 < smallRuns.length && smallRuns[last + 1] == h
                     ? Integer.valueOf(last + 1) : first.get(h);
-            // A hash is checked against the text it stands for.
-            if (q == null || !large.regionMatches(p, small, q, w)) {
+            // A hash is checked against the text it stands for; a run the model had from
+            // elsewhere is its own, and asked only of a run that matched -- asked of every window,
+            // it cost a binary search per text the model wrote, on every window of every result.
+            if (q == null || !large.regionMatches(p, small, q, w) || own.test(h)
+                    || placed != null && placed[q]) {
                 last = -1;
                 continue;
             }
+            if (placed != null) placed[q] = true;
             int a = indexText ? p : q;
             int t = indexText ? q : p;
             java.util.Arrays.fill(copied, a, a + w, true);

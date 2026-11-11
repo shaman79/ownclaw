@@ -84,4 +84,21 @@ class DelegationCallsLoopTest {
         assertTrue(String.join("\n", LoopRig.userParts(rig.cloud.calls("think").get(1)))
                 .contains("Not started: a call holds a removed secret."), "and the cloud is told why");
     }
+
+    @Test
+    @DisplayName("calls refused before any of them ran are steps that ran nothing: three in a row end the task")
+    void callsThatRanNothingAreCounted(@TempDir Path tmp) throws Exception {
+        var sent = new CopyOnWriteArrayList<Map<String, Object>>();
+        var rig = new LoopRig(tmp, List.of(recording("smtp_send_email", sent, "Sent")));
+        for (int i = 0; i < 8; i++) {
+            rig.cloud.think.add(call(AgentAction.DELEGATE, Map.of("calls",
+                    List.of(Map.of("tool", "smtp_send_email", "params", Map.of("body", "{{7.body}}"))))));
+        }
+
+        AgentResult r = rig.turn(session(rig), "mail me result seven");
+
+        assertEquals(AgentResult.TerminationReason.FAILURE_LIMIT, r.terminationReason(), r.response());
+        assertEquals(3, rig.cloud.calls("think").size(), "three, then the task ends");
+        assertTrue(sent.isEmpty());
+    }
 }

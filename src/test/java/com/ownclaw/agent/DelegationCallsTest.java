@@ -408,6 +408,62 @@ class DelegationCallsTest {
     }
 
     @Test
+    @DisplayName("every spelling of a call's result is filled in or refused, never sent as braces")
+    void callSpellings() {
+        var level = new FakeTool("battery_level", false, List.of(), p -> ToolResult.success("{\"ok\":true,\"level\":41}"));
+        var notify = new FakeTool("notify", true, List.of(), p -> ToolResult.success("ok"));
+        for (String written : List.of("{{ call1 }}", "{{call1 }}", "{{Call1}}", "{{$call1.level}}", "{{ call1.level }}")) {
+            var outcome = executor(new Scripted(), new Usage(), level, notify).execute(calls("",
+                    c("battery_level", Map.of()), c("notify", Map.of("message", "Battery at " + written))), task(), UNCOUNTED);
+            assertTrue(outcome.ok(), written + ": " + outcome.text());
+            String sent = String.valueOf(notify.calls.get(notify.calls.size() - 1).get("message"));
+            assertFalse(sent.contains("{{"), written + " went out as " + sent);
+        }
+        int before = notify.calls.size();
+        for (var args : List.<Map<String, Object>>of(Map.of("message", "{{call1}}.level"),
+                Map.of("data", Map.of("{{call1.level}}", "x")), Map.of("data", Map.of("{{1}}", "x")))) {
+            var outcome = executor(new Scripted(), new Usage(), level, notify).execute(calls("",
+                    c("battery_level", Map.of()), c("notify", args)), task(), UNCOUNTED);
+            assertFalse(outcome.ok(), args + " should be refused: " + outcome.text());
+        }
+        assertEquals(before, notify.calls.size(), "a field outside the braces, a reference in a key: refused");
+    }
+
+    @Test
+    @DisplayName("a text cannot hold a call's result: it is put in exactly, nothing in it filled in")
+    void aTextCannotHoldACallsResult() {
+        var e = assertThrows(IllegalArgumentException.class, () -> LocalExecutor.parsePlan(Map.of(
+                "calls", List.of(Map.of("tool", "daily_menu_fetcher")),
+                "texts", Map.of("email", "Dobrý den,\n\ndnešní menu:\n{{call1.body_text}}\n\nPetr"))));
+        assertTrue(e.getMessage().contains("texts.email holds a call's result ({{call1.body_text}})"), e.getMessage());
+    }
+
+    @Test
+    @DisplayName("after calls and a goal the local model is shown them in its own numbering, given the task's results they named")
+    void theModelReadsTheCallsInItsOwnNumbering() {
+        var weather = new FakeTool("weather", false, List.of(), p -> ToolResult.success("{\"ok\":true,\"text\":\"Rain, 7 C\"}"));
+        var smtp = new FakeTool("smtp_send_email", true, List.of(), p -> ToolResult.success("Sent"));
+        var ctx = task();
+        ctx.addArtifact("note", Map.of(), Map.of(), "{\"ok\":true,\"text\":\"Pick up the kids at 15:30.\"}", true,
+                new Artifact.Decision(com.ownclaw.privacy.Label.PUBLIC, List.of()));
+        // The local model sends Jana what its first call returned, by the cloud's {{call1}} spelling.
+        var llm = new Scripted(call("smtp_send_email", Map.of("to", "jana@example.com", "body", "{{call1.text}}")),
+                done("sent"));
+
+        var outcome = executor(llm, new Usage(), weather, smtp).execute(calls("Send Jana the same reminder you sent Petr.",
+                c("weather", Map.of()),
+                c("smtp_send_email", Map.of("to", "petr@example.com", "body", "{{1.text}}"))), ctx, UNCOUNTED);
+
+        assertTrue(outcome.ok(), outcome.text());
+        assertEquals("Pick up the kids at 15:30.", smtp.calls.get(0).get("body"), "Petr got the task's note");
+        assertEquals("Rain, 7 C", smtp.calls.get(1).get("body"), "{{call1}} is the model's own result 1");
+        var first = llm.calls.get(0);
+        assertTrue(first.get(2).content().contains("\"body\":\"result 1.text\""), first.get(2).content());
+        assertFalse(first.get(2).content().contains("{{1.text}}"), "the cloud's handle would be the model's own result 1");
+        assertTrue(first.get(0).content().contains("Pick up the kids at 15:30."), "the note it named is given to read");
+    }
+
+    @Test
     @DisplayName("a delegation the calls ended is no failed delegation: the cloud keeps orchestrating")
     void theValveStaysShut() {
         var ctx = task();

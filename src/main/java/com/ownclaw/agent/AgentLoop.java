@@ -1218,6 +1218,18 @@ public class AgentLoop {
                         work -> lane.foreground(context, work));
                 long durationMs = System.currentTimeMillis() - startMs;
                 String result = outcome.text();
+                // Calls that ran none of themselves -- the first refused, a name or a field the cloud
+                // got wrong -- are a step that ran nothing, as a delegation refused before it started
+                // is: three in a row end the task. Such a stop no longer opens the valve (byCode),
+                // and the critic does not judge delegations, so without this the cloud could send
+                // the same wrong call for as long as it liked.
+                if (outcome.byCode() && outcome.stepCount() == 0) {
+                    var ranNone = new LinkedHashMap<String, Object>(asked);
+                    ranNone.put(BY_CODE, true);
+                    AgentResult end = stepRanNothing(context, action, result, null, step, nothing, ranNone);
+                    if (end != null) return end;
+                    continue;
+                }
                 // Zero tools ran is not a success, whatever the summary says -- unless the goal
                 // gave it results to read, and it wrote what it read (LocalExecutor.completed).
                 // A local model that fetched nothing and called done with a confident paragraph
