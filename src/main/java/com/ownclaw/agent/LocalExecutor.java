@@ -121,6 +121,9 @@ public class LocalExecutor {
         for (var st : plan.steps()) {
             if (st.tool() != null && !st.tool().isBlank()) wanted.add(st.tool());
         }
+        // The calls ran before the model was given anything; it goes on from their results, and
+        // may need the same tools again.
+        for (var call : plan.calls()) wanted.add(call.tool());
         String asked = (plan.goal() == null ? "" : plan.goal()) + "\n"
                 + (context.isUnattended() && context.originalMessage() != null ? context.originalMessage() : "");
         var named = all.stream()
@@ -155,11 +158,30 @@ public class LocalExecutor {
      */
     public Outcome execute(DelegationPlan plan, AgentContext parentContext,
                            java.util.function.BiConsumer<LlmProvider, LlmResponse> billed) {
+        return execute(plan, parentContext, billed, java.util.function.Supplier::get);
+    }
+
+    /**
+     * As above, the local model taken through {@code lane} for the part of the delegation that
+     * needs it: the plan's exact calls run first, by code, outside it ({@link #runCalls}). The
+     * local model works on one task at a time and a task keeps it once taken, so a delegation of
+     * calls alone that waited for it waited behind another chat's whole task -- 66 minutes on
+     * 2026-11-10 -- for work that needs no model at all.
+     *
+     * @param lane runs the local model's part, once the local model is this task's
+     */
+    public Outcome execute(DelegationPlan plan, AgentContext parentContext,
+                           java.util.function.BiConsumer<LlmProvider, LlmResponse> billed,
+                           java.util.function.Function<java.util.function.Supplier<Outcome>, Outcome> lane) {
         // The earlier results the goal names are given to the delegation, whole: reading what the
         // cloud is shown only as a description is what the local model is for. A name that is no
         // result is taken out, and the cloud is told.
         Given given = given(plan, parentContext.artifacts());
-        Outcome outcome = run(given.plan(), given.results(), parentContext, billed);
+        List<Artifact> ran = new ArrayList<>();
+        Outcome outcome = runCalls(given.plan(), given.results(), parentContext, ran);
+        if (outcome == null) {
+            outcome = lane.apply(() -> run(given.plan(), given.results(), parentContext, billed, ran));
+        }
         String notes = "";
         if (given.missing() > 0) {
             log.warn("Delegation goal named {} result(s) that do not exist; taken out.", given.missing());
@@ -231,17 +253,99 @@ public class LocalExecutor {
         }
         var checkpoints = plan.checkpoints() == null ? List.<String>of()
                 : plan.checkpoints().stream().map(inWords).toList();
-        return new Given(new DelegationPlan(goal, steps, checkpoints, plan.tools(), plan.texts()),
+        // The calls' arguments are left alone, as the steps' are: {{1}} there is the first call's
+        // result, which is exactly how the delegation numbers.
+        return new Given(new DelegationPlan(goal, steps, checkpoints, plan.tools(), plan.texts(), plan.calls()),
                 List.copyOf(named.values()), missing[0]);
     }
 
-    /** @param given the earlier results the goal names, which the local model reads in its prompt */
+    /**
+     * The plan's exact calls, run by code in their order before the local model is given anything,
+     * each through the same guards as a call the local model makes ({@link #act}) but the one
+     * against retyping: the cloud wrote it whole, so nothing of it was copied by hand. The results
+     * are the delegation's first, {@code {{1}}} on.
+     * <p>
+     * The local model used to type every call itself, at a few tokens a second, even one the cloud
+     * had written out exactly -- most delegations' goals were such a list in prose. The daily news
+     * run did 22 seconds of work in four minutes or more, and a copied JSON argument came back
+     * broken twice on 2026-11-10. Run by code, the call is the one the cloud wrote.
+     * <p>
+     * They stop at the first that fails or is refused: a later call can need its result, and what
+     * the cloud planned on no longer holds. The cloud is told what ran, what stopped them, and
+     * that the rest did not run; the local model is not given the goal.
+     *
+     * @param mine the delegation's results, which the calls' join
+     * @return how the delegation ends: with the calls when they are all of it, or when one of them
+     *         stopped it; null when the local model is to go on with the goal
+     */
+    private Outcome runCalls(DelegationPlan plan, List<Artifact> given, AgentContext parentContext,
+                             List<Artifact> mine) {
+        List<DelegationPlan.Call> calls = plan.calls();
+        if (calls.isEmpty()) return null;
+        for (int i = 0; i < calls.size(); i++) {
+            if (parentContext.isCancelled()) return partial("Task cancelled during delegation.", mine);
+            DelegationPlan.Call call = calls.get(i);
+            int had = mine.size();
+            String reply = act(new ExecutorAction(false, null, call.tool(), call.params()), parentContext,
+                    mine, given, true, plan, i + 1, null, true);
+            if (mine.size() == had) {
+                return callsStopped(plan, i, "call " + (i + 1) + " (" + call.tool() + ") was not run. " + reply, mine);
+            }
+            if (!mine.get(mine.size() - 1).succeeded()) {
+                return callsStopped(plan, i, "call " + (i + 1) + " (" + call.tool() + ") failed: its error is "
+                        + "under the failed steps below.", mine);
+            }
+        }
+        if (!plan.goal().isBlank()) return null;
+        log.info("Delegation completed: {} call(s) run by code, no goal for the local model.", calls.size());
+        return completed("", callsRun(calls.size()), List.of(), mine, null);
+    }
+
+    /**
+     * What of the calls already succeeded, first, as {@link #completed} puts it: a send that went
+     * out must not be sent again by a cloud told the calls stopped. Empty when none did.
+     */
+    private static String alreadyDone(List<Artifact> ran) {
+        String done = ran.stream().filter(Artifact::succeeded).map(Artifact::tool).distinct()
+                .collect(Collectors.joining(", "));
+        return done.isBlank() ? "" : "ALREADY DONE — these succeeded and must NOT be repeated: " + done
+                + ". What failed or did not run is what is left to do.\n\n";
+    }
+
+    /** What a delegation of calls alone was for, as its report names it. */
+    private static String callsRun(int calls) {
+        return (calls == 1 ? "the call" : "the " + calls + " calls") + " you gave, run in your order by code";
+    }
+
+    /**
+     * The calls stopped at call {@code at} (from 0): what already succeeded first, so it is not
+     * done twice ({@link #completed}), then why they stopped, what did not run, and every result.
+     */
+    private static Outcome callsStopped(DelegationPlan plan, int at, String why, List<Artifact> ran) {
+        int after = plan.calls().size() - at - 1;
+        String rest = after == 0 ? "" : " The " + (after == 1 ? "call" : after + " calls") + " after it did not run.";
+        if (!plan.goal().isBlank()) rest += " The local model was not given the goal.";
+        String text = alreadyDone(ran) + "Delegation stopped at call " + (at + 1) + " of " + plan.calls().size()
+                + ": " + why + rest + "\n\n"
+                + (ran.isEmpty() ? "" : "Results of the calls that ran:\n\n" + resultsForCloud(ran))
+                + ledger(ran) + verbatimFailures(ran);
+        log.warn("Delegation stopped at call {} of {}.", at + 1, plan.calls().size());
+        return new Outcome(text, toolNames(ran), ran.size(), false, List.copyOf(ran));
+    }
+
+    /**
+     * @param given the earlier results the goal names, which the local model reads in its prompt
+     * @param ran   the results of the plan's calls, run by code before this ({@link #runCalls}):
+     *              the local model's first results, {@code {{1}}} on, as if it had made the calls
+     */
     private Outcome run(DelegationPlan plan, List<Artifact> given, AgentContext parentContext,
-                        java.util.function.BiConsumer<LlmProvider, LlmResponse> billed) {
+                        java.util.function.BiConsumer<LlmProvider, LlmResponse> billed, List<Artifact> ran) {
         LlmProvider localProvider = llmRouter.local();
         if (!localProvider.isAvailable()) {
-            return Outcome.failed(
-                    "ERROR: Local LLM (Ollama) is not available. Cannot execute delegation.");
+            return ran.isEmpty()
+                    ? Outcome.failed("ERROR: Local LLM (Ollama) is not available. Cannot execute delegation.")
+                    : partial("the local model is not available, so the goal was not worked on. "
+                            + "Your calls ran; their results are below.", ran);
         }
         // Reading a private result is reading private data: from here every result of the task's
         // delegations is PRIVATE (AgentContext.decide), and what the local model writes reaches
@@ -272,25 +376,47 @@ public class LocalExecutor {
         // this delegation or in an earlier one of this task, which may have written what it read
         // into a file or a note that this one reads back. From then on every result is PRIVATE
         // and not indexed; see AgentContext.decide.
-        List<Artifact> mine = new ArrayList<>();
+        List<Artifact> mine = new ArrayList<>(ran);
         // The whole conversation, every turn of it, every result in full: nothing is dropped to
         // make room. A turn that outgrows the model's context window gets a plain error saying so
         // (Ollama is asked never to drop messages itself); the largest results are then folded
         // and the turn asked again (Fit), and only when nothing is left to fold does the
         // delegation fail like any other -- the cloud takes the work back.
         List<LlmMessage> messages = new ArrayList<>();
+        // Fitting the conversation to the model's window (Fit): this delegation's results fold
+        // as the task's do, read back with read_result.
+        var fit = new Fit();
 
         // System prompt with plan and tools
         messages.add(LlmMessage.system(buildExecutorSystemPrompt(plan, given, parentContext,
                 nativeTools, fileTask)));
 
-        // Initial instruction. "Start with step 1" makes no sense without a step list.
-        String opening = readsWhatItWasGiven(plan, given)
-                ? "Read the results you were given and answer the goal with done."
-                : plan.steps().isEmpty()
-                ? "Begin. Make the first tool call that moves toward the goal."
-                : "Begin executing the plan. Start with step 1.";
-        messages.add(LlmMessage.user(opening));
+        if (ran.isEmpty()) {
+            // Initial instruction. "Start with step 1" makes no sense without a step list.
+            String opening = readsWhatItWasGiven(plan, given)
+                    ? "Read the results you were given and answer the goal with done."
+                    : plan.steps().isEmpty()
+                    ? "Begin. Make the first tool call that moves toward the goal."
+                    : "Begin executing the plan. Start with step 1.";
+            messages.add(LlmMessage.user(opening));
+        } else {
+            // The calls as the model's own first turn, and what they returned as that turn's
+            // results: the shape of every later turn, so they are its {{1}} on, read the way it
+            // reads its own, and fold like them.
+            messages.add(LlmMessage.user("The orchestrator's exact calls were run for you first, in its "
+                    + "order. What they returned follows; then work toward the goal from there."));
+            messages.add(LlmMessage.assistant(renderPlanned(plan.calls())));
+            var replies = new ArrayList<String>();
+            for (int i = 0; i < ran.size(); i++) {
+                Artifact a = ran.get(i);
+                String reply = toldResult(a, i + 1);
+                replies.add(ran.size() == 1 ? reply
+                        : "[call " + (i + 1) + " of " + ran.size() + ": " + a.tool() + "] " + reply);
+                fit.replied(a, i + 1, reply);
+            }
+            messages.add(LlmMessage.user(String.join("\n\n", replies) + "\n\n" + goOn(fileTask, nativeTools)));
+            fit.told(messages.size() - 1);
+        }
 
         // A line for the owner, not the goal: that is the cloud's instructions to the local model,
         // which the task page shows whole, under the step.
@@ -322,9 +448,6 @@ public class LocalExecutor {
         // Turns in a row that ran nothing: no tool ran in them -- the reply was empty, held no tool
         // call, or every call it held was refused.
         int nothingInARow = 0;
-        // Fitting the conversation to the model's window (Fit): this delegation's results fold
-        // as the task's do, read back with read_result.
-        var fit = new Fit();
         for (int turn = 1; ; turn++) {
             if (parentContext.isCancelled()) {
                 // Partial work is not worthless: it is the only record of what the local model
@@ -514,7 +637,7 @@ public class LocalExecutor {
                     read = true;
                 } else {
                     int had = mine.size();
-                    reply = act(action, parentContext, mine, given, nativeTools, plan, turn, words);
+                    reply = act(action, parentContext, mine, given, nativeTools, plan, turn, words, false);
                     if (mine.size() == had) didNotRun = i + 1;
                     else {
                         words = null;   // said once, above the call that ran
@@ -538,24 +661,48 @@ public class LocalExecutor {
                 nothingInARow = 0;
             }
             String told = String.join("\n\n", replies);
-            if (mine.size() > before) {
-                // "Passed on verbatim" is false for a private result: the user sees it only
-                // through the summary, so the summary is where it has to be written.
-                told += "\n\n" + (fileTask
-                        ? "Continue, or " + (nativeTools
-                                ? "call done with the answer for the user"
-                                : "output {\"done\": true, \"summary\": \"the answer for the user\"}")
-                                + " — what the tools return here is private and reaches the user "
-                                + "only through your summary."
-                        : "Continue with the next step, or if all steps are done, " + (nativeTools
-                                ? "call done and say what you did — every result above is passed "
-                                        + "on verbatim, so do not retype it."
-                                : "output {\"done\": true, \"summary\": \"what you did\"}."));
-            }
+            if (mine.size() > before) told += "\n\n" + goOn(fileTask, nativeTools);
             messages.add(LlmMessage.assistant(raw));
             messages.add(LlmMessage.user(told));
             fit.told(messages.size() - 1);
         }
+    }
+
+    /**
+     * What the model is told after a turn whose calls ran. "Passed on verbatim" is false for a
+     * private result: the user sees it only through the summary, so the summary is where it has
+     * to be written.
+     */
+    private static String goOn(boolean fileTask, boolean nativeTools) {
+        return fileTask
+                ? "Continue, or " + (nativeTools
+                        ? "call done with the answer for the user"
+                        : "output {\"done\": true, \"summary\": \"the answer for the user\"}")
+                        + " — what the tools return here is private and reaches the user "
+                        + "only through your summary."
+                : "Continue with the next step, or if all steps are done, " + (nativeTools
+                        ? "call done and say what you did — every result above is passed "
+                                + "on verbatim, so do not retype it."
+                        : "output {\"done\": true, \"summary\": \"what you did\"}.");
+    }
+
+    /** A result as the model is told it, under its handle every time ({@link #act}). */
+    private static String toldResult(Artifact result, int handle) {
+        return "Tool result " + ArtifactRef.handle(handle) + " [" + result.tool() + "] "
+                + (result.succeeded() ? "SUCCESS" : "FAILED") + ":\n" + result.output();
+    }
+
+    /** The plan's calls written as the model's own turn, as {@link #renderCalls} writes its calls. */
+    private static String renderPlanned(List<DelegationPlan.Call> calls) {
+        var lines = new ArrayList<String>();
+        for (DelegationPlan.Call call : calls) {
+            try {
+                lines.add(TextCalls.MAPPER.writeValueAsString(Map.of("tool", call.tool(), "params", call.params())));
+            } catch (Exception e) {
+                lines.add("{\"tool\": \"" + call.tool() + "\"}");
+            }
+        }
+        return String.join("\n", lines);
     }
 
     /** read_result as a delegation's local model is offered it, once a result of it has folded. */
@@ -713,10 +860,16 @@ public class LocalExecutor {
     /**
      * One call of the model's turn, through every guard, and run if none refuses it. Returns what
      * the model is told about it: the result, or why the call did not run.
+     *
+     * @param turn   the model's turn, or for a call run by code its number among the plan's calls
+     * @param byCode one of the plan's calls, which the cloud wrote whole and code runs as written
+     *               ({@link #runCalls}): nothing of it was typed by the local model, so it is not
+     *               held to the rule against retyping, and the owner's chat shows it as the call
+     *               it is
      */
     private String act(ExecutorAction action, AgentContext parentContext, List<Artifact> mine,
                        List<Artifact> given, boolean nativeTools, DelegationPlan plan, int turn,
-                       String words) {
+                       String words, boolean byCode) {
         if (action.tool == null || action.tool.isBlank()) {
             // Local LLM produced something unparseable — tell it, so it can recover
             return nativeTools
@@ -739,9 +892,11 @@ public class LocalExecutor {
         // reading private data can carry what it read. Only the model itself is told it.
         Tool target = toolRegistry.find(action.tool).orElse(null);
         if (target == null) {
-            log.warn("Delegation turn {}: a call to a tool that does not exist — refused.", turn);
-            return "Not run: there is no tool named '" + action.tool + "'. Call one of the tools "
-                    + "you were given, by its exact name.";
+            log.warn("Delegation {} {}: a call to a tool that does not exist — refused.",
+                    byCode ? "call" : "turn", turn);
+            return "Not run: there is no tool named '" + action.tool + "'. " + (byCode
+                    ? "Use the exact name, as find_tools lists it."
+                    : "Call one of the tools you were given, by its exact name.");
         }
 
         // A secret the filter removed from the cloud's view, copied from its goal into a call.
@@ -794,26 +949,32 @@ public class LocalExecutor {
 
         // One thing neither guard catches: a result typed out again by hand instead of passed
         // on by its reference -- which is where a date, a line or a whole section goes missing,
-        // and the model cannot see what it dropped. Text it composes itself is its own to send.
-        // A result it was given is read in its prompt and has no reference: typing it out is the
-        // only way to pass it on, so a copy of one is held to the same rule.
-        String copied = retyped(target, action.params, readBy(given, mine), planText(plan));
+        // and the model cannot see what it dropped. Text it composes itself is its own to send,
+        // quotes of what it read included. A result it was given is read in its prompt and has
+        // no reference: typing it out is the only way to pass it on, so a copy of one is held to
+        // the same rule. A call the cloud wrote was typed by nobody here.
+        Retyped copied = byCode ? null : retyped(target, action.params, readBy(given, mine), planText(plan));
         if (copied != null) {
-            log.warn("Delegation step {}: '{}' repeats part of an earlier result without being "
-                    + "all of it — refused.", mine.size() + 1, copied);
-            return "Not run: the '" + copied + "' value repeats part of an earlier result "
-                    + "without being all of it — a copy typed out by hand, which is how a date, a "
-                    + "line or a section goes missing. To pass one of your results on, make the "
-                    + "WHOLE value its reference: it is substituted exactly. "
-                    + References.available(mine)
+            log.warn("Delegation step {}: '{}' is most of an earlier result typed out by hand — refused.",
+                    mine.size() + 1, copied.param());
+            int own = mine.indexOf(copied.of());
+            String of = own >= 0 ? "your result " + ArtifactRef.handle(own + 1)
+                    : "result " + copied.of().n() + ", which you were given,";
+            return "Not run: the '" + copied.param() + "' value is most of " + of
+                    + " typed out again by hand, which is how a date, a line or a section goes "
+                    + "missing unseen. To pass a result of yours on unchanged, make the WHOLE value "
+                    + "its reference: it is substituted exactly. " + References.available(mine)
                     + (given.isEmpty() ? "" : " A result you were given has no reference: pass it "
                             + "on whole, exactly as given, or not at all.")
-                    + " Text you compose yourself is fine; a partial copy of a result is not.";
+                    + " To change part of it, change only that part -- with the tool's own way to "
+                    + "replace or add a part, if it has one. Text you write yourself is fine, "
+                    + "quotes of what you read included.";
         }
 
         // ACT: execute the tool -- said in the owner's chat first, with the model's words and
         // the call as it wrote it, so the work on the local tier is seen as it happens.
-        parentContext.chat().localTurn(turn, target.name(), words, action.params);
+        if (byCode) parentContext.chat().ranCall(turn, target.name(), action.params);
+        else parentContext.chat().localTurn(turn, target.name(), words, action.params);
         statusEmitter.emitForTask(parentContext.userId(), parentContext.taskId(), StatusMessage.Type.PROGRESS,
                 "Delegate: running " + action.tool + "...");
 
@@ -924,7 +1085,69 @@ public class LocalExecutor {
                 : toolsObj instanceof String s ? s : "";
         for (String name : listed.split("[^A-Za-z0-9_-]+")) if (!name.isBlank()) tools.add(name);
 
-        return new DelegationPlan(goal, steps, checkpoints, tools, texts(params.get("texts")));
+        return new DelegationPlan(goal, steps, checkpoints, tools, texts(params.get("texts")),
+                calls(params.get("calls")));
+    }
+
+    /**
+     * The exact calls of a delegate action, in their order: a list of {@code {"tool": name,
+     * "params": {...}}} -- or that list written as a JSON string, as a model will sometimes send
+     * one. A call is run exactly as written, so one that is not in that shape is refused, never
+     * guessed at: arguments under another key, or a tool named nowhere, would run a call nobody
+     * wrote.
+     */
+    static List<DelegationPlan.Call> calls(Object value) {
+        if (value == null) return List.of();
+        Object list = value;
+        if (value instanceof String s) {
+            if (s.isBlank()) return List.of();
+            try {
+                list = TextCalls.MAPPER.readValue(s, Object.class);
+            } catch (Exception e) {
+                list = s;
+            }
+        }
+        if (!(list instanceof List<?> items)) {
+            throw new IllegalArgumentException("'calls' must be a list of calls, as in \"calls\": "
+                    + "[{\"tool\": \"daily_news_digest\", \"params\": {}}, {\"tool\": \"smtp_send_email\", "
+                    + "\"params\": {\"body\": \"{{1.body_text}}\"}}].");
+        }
+        var calls = new ArrayList<DelegationPlan.Call>();
+        for (int i = 0; i < items.size(); i++) {
+            String which = "call " + (i + 1);
+            if (!(items.get(i) instanceof Map<?, ?> call)) {
+                throw new IllegalArgumentException(which + " must be an object: {\"tool\": \"exact_name\", "
+                        + "\"params\": {...}}.");
+            }
+            if (!(call.get("tool") instanceof String tool) || tool.isBlank()) {
+                throw new IllegalArgumentException(which + " names no tool: write its exact name under \"tool\".");
+            }
+            Object args = call.get("params");
+            if (args == null) {
+                for (String other : List.of("arguments", "parameters", "args", "input")) {
+                    if (call.containsKey(other)) {
+                        throw new IllegalArgumentException(which + "'s arguments go under \"params\", not \""
+                                + other + "\".");
+                    }
+                }
+            }
+            if (args instanceof String s && !s.isBlank()) {
+                try {
+                    args = TextCalls.MAPPER.readValue(s, Object.class);
+                } catch (Exception notJson) {
+                    // Refused just below, as any params that are not an object.
+                }
+            }
+            var params = new LinkedHashMap<String, Object>();
+            if (args instanceof Map<?, ?> map) {
+                for (var e : map.entrySet()) params.put(String.valueOf(e.getKey()), e.getValue());
+            } else if (args != null && !(args instanceof String s && s.isBlank())) {
+                throw new IllegalArgumentException(which + "'s \"params\" must be an object of argument "
+                        + "names to values.");
+            }
+            calls.add(new DelegationPlan.Call(tool.strip(), params));
+        }
+        return calls;
     }
 
     /**
@@ -1015,6 +1238,18 @@ public class LocalExecutor {
         sb.append("## Plan\n");
         sb.append("**Goal:** ").append(plan.goal()).append("\n\n");
         texts(sb, plan.texts());
+        if (!plan.calls().isEmpty()) {
+            int n = plan.calls().size();
+            sb.append("**Already run for you:** the orchestrator's exact calls, in its order, before you\n");
+            sb.append("started. What each returned is in the conversation below, as your result")
+              .append(n == 1 ? " " + ArtifactRef.handle(1)
+                      : "s " + ArtifactRef.handle(1) + " to " + ArtifactRef.handle(n))
+              .append(":\n");
+            for (int i = 0; i < n; i++) {
+                sb.append(i + 1).append(". ").append(plan.calls().get(i).tool()).append("\n");
+            }
+            sb.append("\n");
+        }
 
         // Whole, on this machine: reading what the cloud is shown only as a description is what
         // the local model is for. Named in words, as the goal names them, so a handle never means
@@ -1245,67 +1480,156 @@ public class LocalExecutor {
         return ExecutorAction.done(str(summary));
     }
 
+    /** An argument that is most of an earlier result typed out again by hand ({@link #retyped}). */
+    record Retyped(String param, Artifact of) {}
+
     /**
-     * The argument of a side-effecting call that repeats part of an earlier result without being
-     * all of it, or null.
+     * A result shorter than this (normalised) is a value to use -- a path, an id, a line -- not a
+     * text to pass on, so a copy of it is no retyping: the model picking a path out of a short
+     * listing is quoting it. A digest, a menu, a configuration file is a text.
+     */
+    static final int TEXT_LENGTH = 200;
+
+    /** The share of an argument that, copied from one result, makes it that result's copy. */
+    static final double MOSTLY_COPIED = 0.5;
+
+    /** The share of a result a copy covers that makes it the result passed on, not quoted. */
+    static final double MUCH_OF_IT = 0.4;
+
+    /**
+     * The argument of a side-effecting call that is most of an earlier result typed out again by
+     * hand, and not all of it exactly -- or null.
      * <p>
-     * That is a result typed out again by hand, the way a line or a date goes missing: on 23
-     * September the news digest went out as 2,073 characters the local model had written itself
-     * from a 2,745-character source. "Repeats" is the canary's own notion -- a
-     * {@link PrivateIndex#WINDOW}-character run of a result's text, normalised the way the canary
-     * normalises it -- applied to every result this delegation has read: the earlier results it
-     * was given, which have no reference and can only be passed on typed out, and its own. An
-     * argument byte-equal to a result is a perfect copy and passes, however wasteful. Checked on
-     * the arguments as the model WROTE them, where a reference is a short token that repeats
-     * nothing, and only where a partial copy can do harm: a top-level string of a tool that
-     * changes something, against results that succeeded.
+     * That is how a line or a date goes missing: on 23 September the news digest went out as
+     * 2,073 characters the local model had typed itself from a 2,745-character source. A copy is
+     * runs of {@link PrivateIndex#WINDOW} characters of a result's text, normalised the way the
+     * canary normalises it. An argument is that result's copy when at least half of it is such
+     * runs ({@link #MOSTLY_COPIED}) and they cover a large part of the result ({@link #MUCH_OF_IT})
+     * -- and it is refused unless it holds the whole result exactly, which loses nothing however
+     * much is around it. Checked against every text this delegation has read
+     * ({@link #TEXT_LENGTH}): the earlier results it was given, which have no reference and can
+     * only be passed on typed out, and its own; on the arguments as the model WROTE them, where a
+     * reference is a short token that copies nothing; and only where a copy can do harm: a
+     * top-level string of a tool that changes something, against results that succeeded.
+     * <p>
+     * It used to refuse any one run of a result, and that refused every edit: a script naming a
+     * path and an entity it had read, an API body holding an entity id, a configuration change
+     * written as the text to find and the text to put in its place. Four delegations of
+     * 2026-11-08 to 2026-11-10 ended on three such refusals in a row, the battery's "stop the
+     * charging" among them, and one reasoned itself into a loop trying to write an edit that
+     * quoted nothing. Composed text passes, quotes of what was read included; a lossy copy of a
+     * whole text does not.
      * <p>
      * A run is a result's only when the model had it from nowhere else. One it wrote itself, in
      * an argument of an earlier call, or was given in the plan, is its own however many results
      * echo it -- the allowance the canary makes for the cloud's own arguments
      * (AgentContext's Excuses), made here: a send echoes the subject it was given and a write
-     * the path, and the same subject to a second recipient, or the file just written as an
-     * attachment, was refused as a copy of the echo. The arguments of the call that made a
-     * result it was given are excused the same way: whoever wrote them, they are not that
-     * result's data. An earlier argument that is a whole result typed out is that result, not
-     * the model's words, and excuses nothing. So text the model composed passes, of any length,
-     * and only a partial or altered copy of a result is refused.
+     * the path. The arguments of the call that made a result it was given are excused the same
+     * way: whoever wrote them, they are not that result's data. An earlier argument that is a
+     * whole result typed out is that result, not the model's words, and excuses nothing.
      *
      * @param done  the results the model has read: those it was given, then its own
      * @param given what the model was given to work from ({@link #planText})
      */
-    static String retyped(Tool tool, Map<String, Object> written, List<Artifact> done,
-                          List<String> given) {
+    static Retyped retyped(Tool tool, Map<String, Object> written, List<Artifact> done,
+                           List<String> given) {
         if (tool == null || !tool.hasSideEffects() || written == null) return null;
         List<Artifact> forwardable = done.stream().filter(Artifact::succeeded).toList();
-        // The canary's index as the matcher, over results of a whole window or more: a shorter
-        // one is registered as a whole string, and a run shorter than a window is not a repeat.
-        var index = new PrivateIndex();
-        for (int i = 0; i < forwardable.size(); i++) {
-            String out = forwardable.get(i).output();
-            if (PrivateIndex.normalise(out).length() >= PrivateIndex.WINDOW) {
-                index.addPrivate(i + 1, out);
-            }
-        }
-        if (index.isEmpty()) return null;
-        var own = new ArrayList<String>();
-        for (String text : given) own.add(PrivateIndex.normalise(text));
+        List<Artifact> texts = forwardable.stream()
+                .filter(r -> PrivateIndex.normalise(r.output()).length() >= TEXT_LENGTH).toList();
+        if (texts.isEmpty()) return null;
+        // Every run the model had from elsewhere, by its hash: checked once per window, a scan
+        // of every text it wrote was a scan per window.
+        var own = new HashSet<Long>();
+        for (String text : given) addRuns(own, PrivateIndex.normalise(text));
         for (Artifact a : done) {
             for (Object value : a.written().values()) {
                 String text = String.valueOf(value);
                 if (forwardable.stream().noneMatch(r -> text.equals(r.output()))) {
-                    own.add(PrivateIndex.normalise(text));
+                    addRuns(own, PrivateIndex.normalise(text));
                 }
             }
         }
         for (var e : written.entrySet()) {
             if (!(e.getValue() instanceof String v)) continue;
             if (forwardable.stream().anyMatch(r -> v.equals(r.output()))) continue;
-            if (index.firstLeakIn(v, (n, run) -> own.stream().anyMatch(o -> o.contains(run))) != null) {
-                return e.getKey();
+            String argument = PrivateIndex.normalise(v);
+            if (argument.length() < PrivateIndex.WINDOW) continue;
+            for (Artifact r : texts) {
+                if (copiedMostOf(argument, PrivateIndex.normalise(r.output()), own)) return new Retyped(e.getKey(), r);
             }
         }
         return null;
+    }
+
+    /**
+     * Whether {@code argument} is mostly a copy of {@code result} that is not all of it, both
+     * normalised: at least {@link #MOSTLY_COPIED} of the argument is runs of the result the model
+     * did not have from elsewhere ({@code own}), they cover at least {@link #MUCH_OF_IT} of the
+     * result, and the argument does not hold the whole result exactly.
+     */
+    static boolean copiedMostOf(String argument, String result, Set<Long> own) {
+        if (argument.contains(result)) return false;
+        int w = PrivateIndex.WINDOW;
+        long[] resultRuns = runs(result);
+        var at = new HashMap<Long, Integer>(resultRuns.length * 2);
+        for (int i = 0; i < resultRuns.length; i++) at.putIfAbsent(resultRuns[i], i);
+        long[] argumentRuns = runs(argument);
+        boolean[] copied = new boolean[argument.length()];
+        boolean[] covered = new boolean[result.length()];
+        // Where the last copied run was in the result: a copy goes on from there, so a run that
+        // occurs more than once in the result -- a repeated line -- is placed where the copy is,
+        // not at its first occurrence, which would count a copy of a repetitive text as a small one.
+        int last = -1;
+        for (int p = 0; p < argumentRuns.length; p++) {
+            long h = argumentRuns[p];
+            // An own run is the model's.
+            if (own.contains(h)) {
+                last = -1;
+                continue;
+            }
+            Integer q = last >= 0 && last + 1 < resultRuns.length && resultRuns[last + 1] == h ? Integer.valueOf(last + 1)
+                    : at.get(h);
+            // A hash is checked against the text it stands for.
+            if (q == null || !argument.regionMatches(p, result, q, w)) {
+                last = -1;
+                continue;
+            }
+            java.util.Arrays.fill(copied, p, p + w, true);
+            java.util.Arrays.fill(covered, q, q + w, true);
+            last = q;
+        }
+        return count(copied) >= MOSTLY_COPIED * argument.length() && count(covered) >= MUCH_OF_IT * result.length();
+    }
+
+    private static final long RUN_BASE = 1_000_003L;
+
+    /** The hash of each {@link PrivateIndex#WINDOW}-character run of {@code text}, by its offset. */
+    private static long[] runs(String text) {
+        int w = PrivateIndex.WINDOW;
+        int n = text.length() - w + 1;
+        if (n <= 0) return new long[0];
+        long top = 1;
+        for (int i = 1; i < w; i++) top *= RUN_BASE;
+        long h = 0;
+        for (int i = 0; i < w; i++) h = h * RUN_BASE + text.charAt(i);
+        long[] out = new long[n];
+        out[0] = h;
+        for (int i = 1; i < n; i++) {
+            h = (h - text.charAt(i - 1) * top) * RUN_BASE + text.charAt(i + w - 1);
+            out[i] = h;
+        }
+        return out;
+    }
+
+    private static void addRuns(Set<Long> into, String text) {
+        for (long h : runs(text)) into.add(h);
+    }
+
+    private static int count(boolean[] marks) {
+        int n = 0;
+        for (boolean m : marks) if (m) n++;
+        return n;
     }
 
     /** What the local model is given to work from: the plan's text, and the texts it is handed. */
@@ -1320,6 +1644,10 @@ public class LocalExecutor {
             }
         }
         if (plan.checkpoints() != null) given.addAll(plan.checkpoints());
+        // What the cloud wrote into its calls is given too, whether or not a result echoes it.
+        for (var call : plan.calls()) {
+            for (Object value : call.params().values()) given.add(String.valueOf(value));
+        }
         return given;
     }
 
@@ -1388,7 +1716,7 @@ public class LocalExecutor {
      */
     /** A delegation handed results to read that names no tool, in its list or in a step. */
     static boolean readsWhatItWasGiven(DelegationPlan plan, List<Artifact> given) {
-        return !given.isEmpty() && plan.tools().isEmpty()
+        return !given.isEmpty() && plan.tools().isEmpty() && plan.calls().isEmpty()
                 && plan.steps().stream().allMatch(st -> st.tool() == null || st.tool().isBlank());
     }
 

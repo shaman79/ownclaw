@@ -878,7 +878,7 @@ class DelegationBehaviourTest {
 
         assertEquals(1, smtp.calls.size());
         assertEquals(composed, smtp.calls.get(0).get("body"));
-        assertTrue(llm.allSeen().contains("repeats part of an earlier result"), llm.allSeen());
+        assertTrue(llm.allSeen().contains("is most of your result {{1}} typed out again by hand"), llm.allSeen());
     }
 
     @Test

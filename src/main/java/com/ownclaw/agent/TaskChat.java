@@ -88,7 +88,7 @@ public final class TaskChat {
      * the page shows too, and as data ({@link #data}) in the row's metadata and its live frame,
      * whose actor styles the chip the page draws in place of the line's emoji.
      *
-     * @param kind  "step", "turn" or "result"
+     * @param kind  "step", "turn", "call" or "result"
      * @param skill the skill a skill_create writes, or null
      */
     record Header(Actor actor, String kind, int n, String tool, String skill, long elapsedMs,
@@ -195,6 +195,19 @@ public final class TaskChat {
         if (!call.isEmpty()) owner.add(call);
         post(header(Actor.LOCAL, "turn", turn, tool, null), "", owner.isEmpty() ? null
                 : Redactor.scrubVault(String.join("\n\n", owner), task.secretValues()).text());
+    }
+
+    /**
+     * Before a call of a delegation runs that the cloud wrote whole and code runs on this machine
+     * as written (LocalExecutor#runCalls): "🏠 Call 2 · smtp_send_email", and for the owner alone
+     * the call ({@link #readable}), the row's private content as a turn's is. No model wrote it
+     * here, so there are no words beside it.
+     */
+    void ranCall(int call, String tool, Map<String, Object> args) {
+        if (sessionId == null) return;
+        String shown = readable(args);
+        post(header(Actor.LOCAL, "call", call, tool, null), "", shown.isEmpty() ? null
+                : Redactor.scrubVault(shown, task.secretValues()).text());
     }
 
     /**

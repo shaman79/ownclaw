@@ -1168,10 +1168,20 @@ public class AgentLoop {
                 if (!local) {
                     asked.put("goal", plan.goal());
                     if (!plan.texts().isEmpty()) asked.put("texts", plan.texts());
+                    if (!plan.calls().isEmpty()) {
+                        asked.put("calls", plan.calls().stream().map(c -> {
+                            var call = new LinkedHashMap<String, Object>();
+                            call.put("tool", c.tool());
+                            call.put("params", c.params());
+                            return call;
+                        }).toList());
+                    }
                 }
-                if (plan.goal().isBlank()) {
+                // Exact calls with no goal are a delegation too: code runs them, and their results
+                // come back with nothing for the local model to do (LocalExecutor#runCalls).
+                if (plan.goal().isBlank() && plan.calls().isEmpty()) {
                     AgentResult end = notStarted(context, action,
-                            "ERROR: 'goal' parameter is required for delegate action.", asked, step, nothing);
+                            "ERROR: delegate needs a 'goal', or exact 'calls' to run.", asked, step, nothing);
                     if (end != null) return end;
                     continue;
                 }
@@ -1187,20 +1197,25 @@ public class AgentLoop {
                     continue;
                 }
                 // A text is inserted exactly, so one holding a secret the filter removed would
-                // write the marker in the secret's place -- in every call that uses it.
-                if (Redactor.holdsRemovedSecret(plan.texts())) {
-                    AgentResult end = notStarted(context, action, "Not started: a text holds a removed "
-                            + "secret. " + REMOVED_SECRET, asked, step, nothing);
+                // write the marker in the secret's place -- in every call that uses it. A call is
+                // run exactly as written, so one holding it would write the marker, and the calls
+                // before it would already have run: refused before any of them does.
+                boolean textHolds = Redactor.holdsRemovedSecret(plan.texts());
+                if (textHolds || plan.calls().stream().anyMatch(c -> Redactor.holdsRemovedSecret(c.params()))) {
+                    AgentResult end = notStarted(context, action, "Not started: " + (textHolds ? "a text"
+                            : "a call") + " holds a removed secret. " + REMOVED_SECRET, asked, step, nothing);
                     if (end != null) return end;
                     continue;
                 }
 
-                log.info("Task {} step {}: delegating to local LLM — goal: {}, steps: {}",
-                        context.taskId(), step + 1, truncate(plan.goal(), 100), plan.steps().size());
+                log.info("Task {} step {}: delegating to local LLM — goal: {}, steps: {}, calls: {}",
+                        context.taskId(), step + 1, truncate(plan.goal(), 100), plan.steps().size(),
+                        plan.calls().size());
 
-                // Work the task waits on: the local model's background work makes way for it.
-                LocalExecutor.Outcome outcome = lane.foreground(context,
-                        () -> localExecutor.execute(plan, context, accountOf(context)));
+                // Work the task waits on: the local model's background work makes way for it. The
+                // local model is taken for the part that needs it, after the exact calls have run.
+                LocalExecutor.Outcome outcome = localExecutor.execute(plan, context, accountOf(context),
+                        work -> lane.foreground(context, work));
                 long durationMs = System.currentTimeMillis() - startMs;
                 String result = outcome.text();
                 // Zero tools ran is not a success, whatever the summary says -- unless the goal

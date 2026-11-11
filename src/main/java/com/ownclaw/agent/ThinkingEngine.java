@@ -936,8 +936,14 @@ public class ThinkingEngine {
         sb.append("  handle to pass on when it quotes private data.\n");
         sb.append("  Speed: it reads about 100 tokens a second and writes about 8, so reading a\n");
         sb.append("  long result or writing a long answer takes minutes.\n");
-        sb.append("  goal* — what to achieve, stated fully, with the handle of each earlier\n");
-        sb.append("    result it should read; the local model works out the steps.\n");
+        sb.append("  goal — what to achieve, stated fully, with the handle of each earlier\n");
+        sb.append("    result it should read; the local model works out the steps. Leave it out\n");
+        sb.append("    when the calls are all there is to do.\n");
+        sb.append("  calls: [{tool, params}] exact calls, run by code in your order before anything\n");
+        sb.append("    else, exactly as written -- seconds, where the local model types each call it\n");
+        sb.append("    makes at a few tokens a second. In params {{1}} is the first call's result,\n");
+        sb.append("    {{1.field}} a field of it. They stop at the first that fails; with no goal\n");
+        sb.append("    their results come back to you.\n");
         sb.append("  steps (optional): [{description, tool, params}] only when the order matters\n");
         sb.append("    and you already know it. Omit it rather than guess at params.\n");
         sb.append("  tools: comma-separated exact names of the tools it will need. Only these,\n");
