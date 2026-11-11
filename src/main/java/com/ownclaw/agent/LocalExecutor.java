@@ -1066,17 +1066,22 @@ public class LocalExecutor {
             log.warn("Delegation step {}: '{}' is most of an earlier result typed out by hand — refused.",
                     mine.size() + 1, copied.param());
             int own = mine.indexOf(copied.of());
-            String of = own >= 0 ? "your result " + ArtifactRef.handle(own + 1)
+            String handle = own < 0 ? null : copied.field() == null ? ArtifactRef.handle(own + 1)
+                    : "{{" + (own + 1) + "." + copied.field() + "}}";
+            String of = handle != null ? "your result " + handle
                     : "result " + copied.of().n() + ", which you were given,";
             return "Not run: the '" + copied.param() + "' value is most of " + of
-                    + " typed out again by hand, which is how a date, a line or a section goes "
-                    + "missing unseen. To pass a result of yours on unchanged, make the WHOLE value "
-                    + "its reference: it is substituted exactly. " + References.available(mine)
+                    + " typed out again by hand, and not all of it exactly -- which is how a date, a "
+                    + "line or a section goes missing unseen. To pass a result of yours on unchanged, "
+                    + "write its reference instead: as the whole value, or inside your own text, as in "
+                    + "\"Good morning!\\n\\n{{1.body_text}}\" -- it is put there exactly. "
+                    + References.available(mine)
                     + (given.isEmpty() ? "" : " A result you were given has no reference: pass it "
                             + "on whole, exactly as given, or not at all.")
-                    + " To change part of it, change only that part -- with the tool's own way to "
-                    + "replace or add a part, if it has one. Text you write yourself is fine, "
-                    + "quotes of what you read included.";
+                    + " To change part of it, change only that part, with the tool's own way to "
+                    + "replace or add a part. If the tool has none, do not write it out by hand: "
+                    + "call done and say so. Text you write yourself is fine, quotes of what you "
+                    + "read included.";
         }
 
         // ACT: execute the tool -- said in the owner's chat first, with the model's words and
@@ -1593,37 +1598,61 @@ public class LocalExecutor {
         return ExecutorAction.done(str(summary));
     }
 
-    /** An argument that is most of an earlier result typed out again by hand ({@link #retyped}). */
-    record Retyped(String param, Artifact of) {}
+    /**
+     * An argument that is most of a text the model read typed out again by hand ({@link #retyped}).
+     *
+     * @param param the argument
+     * @param of    the result the text is, or is in
+     * @param field the top-level field of a JSON result the text is, or null
+     */
+    record Retyped(String param, Artifact of, String field) {}
 
     /**
-     * A result shorter than this (normalised) is a value to use -- a path, an id, a line -- not a
+     * A text shorter than this (normalised) is a value to use -- a path, an id, a line -- not a
      * text to pass on, so a copy of it is no retyping: the model picking a path out of a short
      * listing is quoting it. A digest, a menu, a configuration file is a text.
      */
     static final int TEXT_LENGTH = 200;
 
-    /** The share of an argument that, copied from one result, makes it that result's copy. */
+    /**
+     * The share of an argument, over the stretch from its first run copied from a text to its
+     * last, that makes it that text's copy. Over the stretch, not the whole argument: words around
+     * a copy -- an introduction, a second text -- do not make it less of one.
+     */
     static final double MOSTLY_COPIED = 0.5;
 
-    /** The share of a result a copy covers that makes it the result passed on, not quoted. */
+    /** The share of a text a copy covers that makes it the text passed on, not quoted. */
     static final double MUCH_OF_IT = 0.4;
 
     /**
-     * The argument of a side-effecting call that is most of an earlier result typed out again by
-     * hand, and not all of it exactly -- or null.
+     * One text the model read: a result, or each string of a JSON result long enough to be one
+     * ({@link #TEXT_LENGTH}) -- a digest's body_text, one message of a mail listing -- each judged
+     * on its own. Judged as the raw JSON line, a lossy copy of one field was measured against the
+     * whole envelope, escapes and an HTML twin included, and passed.
+     *
+     * @param field  the top-level field the text is the whole value of, or null
+     * @param light  as written, but for line ends, trailing blanks and blank lines ({@link #light})
+     * @param normal as the canary reads it ({@link PrivateIndex#normalise}), for finding its runs
+     */
+    private record Text(Artifact of, String field, String light, String normal) {}
+
+    /**
+     * The argument of a side-effecting call that is most of a text the model read typed out again
+     * by hand, and not all of it exactly -- or null.
      * <p>
      * That is how a line or a date goes missing: on 23 September the news digest went out as
      * 2,073 characters the local model had typed itself from a 2,745-character source. A copy is
-     * runs of {@link PrivateIndex#WINDOW} characters of a result's text, normalised the way the
-     * canary normalises it. An argument is that result's copy when at least half of it is such
-     * runs ({@link #MOSTLY_COPIED}) and they cover a large part of the result ({@link #MUCH_OF_IT})
-     * -- and it is refused unless it holds the whole result exactly, which loses nothing however
-     * much is around it. Checked against every text this delegation has read
-     * ({@link #TEXT_LENGTH}): the earlier results it was given, which have no reference and can
-     * only be passed on typed out, and its own; on the arguments as the model WROTE them, where a
-     * reference is a short token that copies nothing; and only where a copy can do harm: a
-     * top-level string of a tool that changes something, against results that succeeded.
+     * runs of {@link PrivateIndex#WINDOW} characters of a text, normalised the way the canary
+     * normalises it. An argument is that text's copy when at least half of it is such runs where
+     * the copy is ({@link #MOSTLY_COPIED}) and they cover a large part of the text
+     * ({@link #MUCH_OF_IT}) -- and it is refused unless it holds the whole text exactly
+     * ({@link #light}: line breaks, indentation and case as written, which a YAML file and a
+     * script depend on), which loses nothing however much is around it. Checked against every
+     * text this delegation has read ({@link Text}): those of the results it was given, which have
+     * no reference and can only be passed on typed out, and of its own; on the arguments as the
+     * model WROTE them, where a reference is a short token that copies nothing; and only where a
+     * copy can do harm: a top-level string of a tool that changes something, against results that
+     * succeeded.
      * <p>
      * It used to refuse any one run of a result, and that refused every edit: a script naming a
      * path and an entity it had read, an API body holding an entity id, a configuration change
@@ -1633,13 +1662,13 @@ public class LocalExecutor {
      * quoted nothing. Composed text passes, quotes of what was read included; a lossy copy of a
      * whole text does not.
      * <p>
-     * A run is a result's only when the model had it from nowhere else. One it wrote itself, in
-     * an argument of an earlier call, or was given in the plan, is its own however many results
-     * echo it -- the allowance the canary makes for the cloud's own arguments
-     * (AgentContext's Excuses), made here: a send echoes the subject it was given and a write
-     * the path. The arguments of the call that made a result it was given are excused the same
-     * way: whoever wrote them, they are not that result's data. An earlier argument that is a
-     * whole result typed out is that result, not the model's words, and excuses nothing.
+     * A run is a text's only when the model had it from nowhere else. One it wrote itself, in an
+     * argument of an earlier call, or was given in the plan, is its own however many results echo
+     * it -- the allowance the canary makes for the cloud's own arguments (AgentContext's
+     * Excuses), made here: a send echoes the subject it was given and a write the path. The
+     * arguments of the call that made a result it was given are excused the same way: whoever
+     * wrote them, they are not that result's data. An earlier argument that held a text whole is
+     * that text typed out, not the model's words, and excuses none of it.
      *
      * @param done  the results the model has read: those it was given, then its own
      * @param given what the model was given to work from ({@link #planText})
@@ -1648,19 +1677,19 @@ public class LocalExecutor {
                            List<String> given) {
         if (tool == null || !tool.hasSideEffects() || written == null) return null;
         List<Artifact> forwardable = done.stream().filter(Artifact::succeeded).toList();
-        List<Artifact> texts = forwardable.stream()
-                .filter(r -> PrivateIndex.normalise(r.output()).length() >= TEXT_LENGTH).toList();
+        var texts = new ArrayList<Text>();
+        for (Artifact r : forwardable) texts.addAll(textsOf(r));
         if (texts.isEmpty()) return null;
-        // Every run the model had from elsewhere, by its hash: checked once per window, a scan
-        // of every text it wrote was a scan per window.
-        var own = new HashSet<Long>();
-        for (String text : given) addRuns(own, PrivateIndex.normalise(text));
+        var plan = new ArrayList<Runs>();
+        for (String text : given) plan.add(Runs.of(PrivateIndex.normalise(text)));
+        // The model's earlier arguments, each with what it holds whole.
+        var earlierLight = new ArrayList<String>();
+        var earlierRuns = new ArrayList<Runs>();
         for (Artifact a : done) {
             for (Object value : a.written().values()) {
                 String text = String.valueOf(value);
-                if (forwardable.stream().noneMatch(r -> text.equals(r.output()))) {
-                    addRuns(own, PrivateIndex.normalise(text));
-                }
+                earlierLight.add(light(text));
+                earlierRuns.add(Runs.of(PrivateIndex.normalise(text)));
             }
         }
         for (var e : written.entrySet()) {
@@ -1668,51 +1697,156 @@ public class LocalExecutor {
             if (forwardable.stream().anyMatch(r -> v.equals(r.output()))) continue;
             String argument = PrivateIndex.normalise(v);
             if (argument.length() < PrivateIndex.WINDOW) continue;
-            for (Artifact r : texts) {
-                if (copiedMostOf(argument, PrivateIndex.normalise(r.output()), own)) return new Retyped(e.getKey(), r);
+            String lightArgument = light(v);
+            // The texts it holds whole: nothing of them is lost, and their runs are no lossy copy of
+            // another text that shares them -- a digest's body_text exactly is no copy of its
+            // body_html twin with the tags gone.
+            var whole = new ArrayList<Runs>();
+            for (Text t : texts) if (lightArgument.contains(t.light())) whole.add(Runs.of(t.normal()));
+            for (Text t : texts) {
+                // The whole text exactly, as written: nothing of it is lost.
+                if (lightArgument.contains(t.light())) continue;
+                // Too short to cover MUCH_OF_IT of it: a copied run covers at most a window of it.
+                if ((long) PrivateIndex.WINDOW * (argument.length() - PrivateIndex.WINDOW + 1)
+                        < MUCH_OF_IT * t.normal().length()) {
+                    continue;
+                }
+                var own = new ArrayList<>(plan);
+                own.addAll(whole);
+                for (int i = 0; i < earlierLight.size(); i++) {
+                    if (!earlierLight.get(i).contains(t.light())) own.add(earlierRuns.get(i));
+                }
+                if (copiedMostOf(argument, t.normal(), h -> {
+                    for (Runs r : own) if (r.has(h)) return true;
+                    return false;
+                })) {
+                    return new Retyped(e.getKey(), t.of(), t.field());
+                }
             }
         }
         return null;
     }
 
+    /** The texts of a result ({@link Text}): its strings when it is JSON, else the whole of it. */
+    private static List<Text> textsOf(Artifact r) {
+        var texts = new ArrayList<Text>();
+        com.fasterxml.jackson.databind.JsonNode json = null;
+        String out = r.output();
+        try {
+            if (out != null && !out.isBlank()) json = TextCalls.MAPPER.readTree(out);
+        } catch (Exception notJson) {
+            // A text, whole.
+        }
+        if (json != null && (json.isObject() || json.isArray())) {
+            if (json.isObject()) {
+                json.fields().forEachRemaining(f -> {
+                    if (f.getValue().isTextual()) addText(texts, r, f.getKey(), f.getValue().asText());
+                    else collectTexts(f.getValue(), r, texts);
+                });
+            } else {
+                collectTexts(json, r, texts);
+            }
+        } else if (out != null) {
+            addText(texts, r, null, out);
+        }
+        return texts;
+    }
+
+    private static void collectTexts(com.fasterxml.jackson.databind.JsonNode node, Artifact r, List<Text> into) {
+        if (node.isTextual()) addText(into, r, null, node.asText());
+        else for (var x : node) collectTexts(x, r, into);
+    }
+
+    private static void addText(List<Text> into, Artifact r, String field, String text) {
+        String normal = PrivateIndex.normalise(text);
+        if (normal.length() >= TEXT_LENGTH) into.add(new Text(r, field, light(text), normal));
+    }
+
     /**
-     * Whether {@code argument} is mostly a copy of {@code result} that is not all of it, both
-     * normalised: at least {@link #MOSTLY_COPIED} of the argument is runs of the result the model
-     * did not have from elsewhere ({@code own}), they cover at least {@link #MUCH_OF_IT} of the
-     * result, and the argument does not hold the whole result exactly.
+     * A text as written, but for what no reader of it depends on: line ends (CRLF), blanks at the
+     * end of a line, blank lines, and Unicode's two spellings of one character (NFC). Line breaks,
+     * indentation and case stay: a YAML file and a script are broken by changing them, and a copy
+     * that changed them is a copy that lost something.
      */
-    static boolean copiedMostOf(String argument, String result, Set<Long> own) {
-        if (argument.contains(result)) return false;
+    static String light(String s) {
+        String t = java.text.Normalizer.normalize(s, java.text.Normalizer.Form.NFC)
+                .replace("\r\n", "\n").replace('\r', '\n');
+        var sb = new StringBuilder();
+        for (String line : t.split("\n", -1)) {
+            String l = line.stripTrailing();
+            if (l.isEmpty()) continue;
+            if (sb.length() > 0) sb.append('\n');
+            sb.append(l);
+        }
+        return sb.toString();
+    }
+
+    /** Runs of a text the model had from elsewhere, as sorted hashes: one array per text, looked up per window. */
+    private record Runs(long[] sorted) {
+        static Runs of(String normalised) {
+            long[] r = runs(normalised);
+            java.util.Arrays.sort(r);
+            return new Runs(r);
+        }
+
+        boolean has(long h) {
+            return java.util.Arrays.binarySearch(sorted, h) >= 0;
+        }
+    }
+
+    /**
+     * Whether {@code argument} is mostly a copy of {@code text}, both normalised: over the stretch
+     * from its first run copied from the text to its last, at least {@link #MOSTLY_COPIED} is runs
+     * of the text the model did not have from elsewhere ({@code own}), and they cover at least
+     * {@link #MUCH_OF_IT} of the text. Whether it holds the text whole is the caller's question.
+     * <p>
+     * The shorter of the two is indexed and the longer read through window by window, so a large
+     * result is never held as a table of its windows: a 10 MB one was a gigabyte of them.
+     */
+    static boolean copiedMostOf(String argument, String text, java.util.function.LongPredicate own) {
         int w = PrivateIndex.WINDOW;
-        long[] resultRuns = runs(result);
-        var at = new HashMap<Long, Integer>(resultRuns.length * 2);
-        for (int i = 0; i < resultRuns.length; i++) at.putIfAbsent(resultRuns[i], i);
-        long[] argumentRuns = runs(argument);
+        if (argument.length() < w || text.length() < w) return false;
+        boolean indexText = text.length() <= argument.length();
+        String small = indexText ? text : argument;
+        String large = indexText ? argument : text;
+        long[] smallRuns = runs(small);
+        var first = new HashMap<Long, Integer>(smallRuns.length * 2);
+        for (int i = 0; i < smallRuns.length; i++) first.putIfAbsent(smallRuns[i], i);
         boolean[] copied = new boolean[argument.length()];
-        boolean[] covered = new boolean[result.length()];
-        // Where the last copied run was in the result: a copy goes on from there, so a run that
-        // occurs more than once in the result -- a repeated line -- is placed where the copy is,
-        // not at its first occurrence, which would count a copy of a repetitive text as a small one.
+        boolean[] covered = new boolean[text.length()];
+        long top = 1;
+        for (int i = 1; i < w; i++) top *= RUN_BASE;
+        long h = 0;
+        for (int i = 0; i < w; i++) h = h * RUN_BASE + large.charAt(i);
+        // Where the last copied run was on the indexed side: a copy goes on from there, so a run
+        // that occurs more than once -- a repeated line -- is placed where the copy is, not at its
+        // first occurrence, which would count a copy of a repetitive text as a small one.
         int last = -1;
-        for (int p = 0; p < argumentRuns.length; p++) {
-            long h = argumentRuns[p];
-            // An own run is the model's.
-            if (own.contains(h)) {
+        int from = Integer.MAX_VALUE;
+        int to = -1;
+        for (int p = 0; p + w <= large.length(); p++) {
+            if (p > 0) h = (h - large.charAt(p - 1) * top) * RUN_BASE + large.charAt(p + w - 1);
+            if (own.test(h)) {
                 last = -1;
                 continue;
             }
-            Integer q = last >= 0 && last + 1 < resultRuns.length && resultRuns[last + 1] == h ? Integer.valueOf(last + 1)
-                    : at.get(h);
+            Integer q = last >= 0 && last + 1 < smallRuns.length && smallRuns[last + 1] == h
+                    ? Integer.valueOf(last + 1) : first.get(h);
             // A hash is checked against the text it stands for.
-            if (q == null || !argument.regionMatches(p, result, q, w)) {
+            if (q == null || !large.regionMatches(p, small, q, w)) {
                 last = -1;
                 continue;
             }
-            java.util.Arrays.fill(copied, p, p + w, true);
-            java.util.Arrays.fill(covered, q, q + w, true);
+            int a = indexText ? p : q;
+            int t = indexText ? q : p;
+            java.util.Arrays.fill(copied, a, a + w, true);
+            java.util.Arrays.fill(covered, t, t + w, true);
+            from = Math.min(from, a);
+            to = Math.max(to, a + w);
             last = q;
         }
-        return count(copied) >= MOSTLY_COPIED * argument.length() && count(covered) >= MUCH_OF_IT * result.length();
+        return to > 0 && count(copied) >= MOSTLY_COPIED * (to - from)
+                && count(covered) >= MUCH_OF_IT * text.length();
     }
 
     private static final long RUN_BASE = 1_000_003L;
@@ -1733,10 +1867,6 @@ public class LocalExecutor {
             out[i] = h;
         }
         return out;
-    }
-
-    private static void addRuns(Set<Long> into, String text) {
-        for (long h : runs(text)) into.add(h);
     }
 
     private static int count(boolean[] marks) {
