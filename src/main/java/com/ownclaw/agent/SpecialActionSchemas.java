@@ -241,11 +241,14 @@ public final class SpecialActionSchemas {
     @SuppressWarnings("unchecked")
     private static ToolSpec withCallsAsCalls(ToolSpec spec) {
         var properties = (Map<String, Map<String, Object>>) spec.inputSchema().get("properties");
+        // In insertion order, as every map of a schema is: Map.of iterates in an order seeded anew
+        // in every JVM, so the tools' JSON -- the front of every request's cached prompt -- came out
+        // different on some restarts, and every chat's hour-long cache was missed.
         var call = new java.util.LinkedHashMap<String, Object>();
         call.put("type", "object");
-        call.put("properties", Map.of(
-                "tool", Map.of("type", "string", "description", "The tool's exact name."),
-                "params", Map.of("type", "object", "description", "Its arguments, as the tool takes them.")));
+        call.put("properties", ordered(
+                "tool", ordered("type", "string", "description", "The tool's exact name."),
+                "params", ordered("type", "object", "description", "Its arguments, as the tool takes them.")));
         call.put("required", List.of("tool"));
         properties.get("calls").put("items", call);
         return spec;
@@ -256,6 +259,13 @@ public final class SpecialActionSchemas {
      * to say: OpenAI rejects an array schema with no items, and one bad schema fails every request
      * that carries it.
      */
+    /** A map of these keys and values, in this order. */
+    static Map<String, Object> ordered(Object... pairs) {
+        var m = new LinkedHashMap<String, Object>();
+        for (int i = 0; i < pairs.length; i += 2) m.put((String) pairs[i], pairs[i + 1]);
+        return m;
+    }
+
     @SuppressWarnings("unchecked")
     private static ToolSpec withStringItems(ToolSpec spec, String param) {
         var properties = (Map<String, Map<String, Object>>) spec.inputSchema().get("properties");
