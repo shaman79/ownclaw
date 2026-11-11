@@ -1,11 +1,14 @@
 package com.ownclaw.agent;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.ownclaw.agent.tools.ToolParam;
+import com.ownclaw.agent.tools.ToolSchemas;
 import com.ownclaw.llm.ToolSpec;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -53,5 +56,25 @@ class SchemaOrderTest {
         assertTrue(json.contains("\"properties\":{\"tool\":{\"type\":\"string\",\"description\":\"The tool's exact name.\"},"
                 + "\"params\":{\"type\":\"object\""), json);
         // Mutation: build the call schema with Map.of again -> this names it.
+    }
+
+    @SuppressWarnings("unchecked")
+    private static List<String> propertyNames(Map<String, Object> schema) {
+        return new ArrayList<>(((Map<String, Object>) schema.get("properties")).keySet());
+    }
+
+    @Test
+    @DisplayName("tool parameters go in written order; handed over in a map of no order of its own, in sorted order -- the same on every run")
+    void parametersInAStableOrder() {
+        assertEquals(List.of("result", "from", "length", "find"), propertyNames(LocalExecutor.READ_RESULT.inputSchema()),
+                "a delegation's read_result, as written");
+        var p = ToolParam.optional("string", "a parameter");
+        var salted = Map.of("zeta", p, "alpha", p, "mu", p, "delta", p, "omega", p, "beta", p);
+        assertEquals(List.of("alpha", "beta", "delta", "mu", "omega", "zeta"), propertyNames(ToolSchemas.toJsonSchema(salted)));
+        var written = new LinkedHashMap<String, ToolParam>();
+        for (String name : List.of("zeta", "alpha", "mu")) written.put(name, p);
+        assertEquals(List.of("zeta", "alpha", "mu"), propertyNames(ToolSchemas.toJsonSchema(written)));
+        // Mutation: read_result's parameters by Map.of again -> sorted, not as written; take a
+        // Map.of's own order -> it differs from run to run (here, from the sorted one).
     }
 }
