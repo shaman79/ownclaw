@@ -6839,7 +6839,7 @@
             if (!allowedAttrs) {
                 // Not on the allowlist. Drop the element but keep its text, so a message that
                 // merely mentions "<script>" still reads correctly instead of silently vanishing.
-                el.replaceWith(document.createTextNode(el.textContent || ''));
+                el.replaceWith(root.ownerDocument.createTextNode(el.textContent || ''));
                 continue;
             }
             var attrs = Array.prototype.slice.call(el.attributes);
@@ -6860,12 +6860,20 @@
     }
 
     function renderMarkdown(text) {
-        var holder = document.createElement('div');
+        var html;
         try {
-            holder.innerHTML = marked.parse(text);
+            html = marked.parse(text);
         } catch (e) {
             return '<p>' + escapeHtml(text) + '</p>';
         }
+        // Parsed and cleaned in a document of its own, which runs nothing and loads nothing. Made in
+        // this page, an element runs its handlers as it is made: <details open ontoggle>, <audio
+        // src=x onerror> and <svg><image onerror> ran before mdSanitize could take them out -- in
+        // every answer and progress row, a quoted web page or mail included, with the session's
+        // token in reach (review, 2026-11-11). Only what the allowlist keeps comes back, as text.
+        var inert = new DOMParser().parseFromString('<!doctype html><body><div></div></body>', 'text/html');
+        var holder = inert.body.firstChild;
+        holder.innerHTML = html;
         return mdSanitize(holder).innerHTML;
     }
 
