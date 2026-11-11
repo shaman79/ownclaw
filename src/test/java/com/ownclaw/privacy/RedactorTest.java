@@ -429,6 +429,35 @@ class RedactorTest {
     }
 
     @Test
+    @DisplayName("a private key ends at the next private key's END line, its defects forgiven -- never a certificate's or a signature's; with none, at the end of its own lines")
+    void privateKeysEnd() {
+        var redactor = new Redactor(null);
+        String body = "fakeKEYbody0123456789abcdefABCDEF\nfakeKEYtail0123456789==\n";
+        for (String end : List.of("-----END PRIVATE KEY-----", "-----END RSA PRIVATE KEY", "-----END RSA  PRIVATE KEY-----",
+                "----END RSA PRIVATE KEY-----")) {
+            assertEquals(Redactor.SECRET_REMOVED + "\nexit code 0", redactor.filter("u1",
+                    "-----BEGIN RSA PRIVATE KEY-----\nProc-Type: 4,ENCRYPTED\nDEK-Info: AES-128-CBC,FAKE01\n\n" + body + end
+                            + "\nexit code 0", Map.of(), new Redactor.Tally()), "through " + end);
+        }
+        // No END line of a private key after it: through its own lines, not on to the end of the text.
+        for (String after : List.of("-----BEGIN CERTIFICATE-----\nMIIBcertFAKE0123456789\n-----END CERTIFICATE-----\nexit code 0",
+                "-----BEGIN PGP SIGNATURE-----\niQEzBAEBCAAdFAKE0123\n-----END PGP SIGNATURE-----\nexit code 0",
+                "exit code 0")) {
+            assertEquals(Redactor.SECRET_REMOVED + "\n" + after, redactor.filter("u1",
+                    "-----BEGIN OPENSSH PRIVATE KEY-----\n" + body + after, Map.of(), new Redactor.Tally()));
+        }
+        // Its own header lines go with it when it was cut off after them; an escaped key goes with its line.
+        assertEquals("key:\n" + Redactor.SECRET_REMOVED + "\nthat is all", redactor.filter("u1",
+                "key:\n-----BEGIN RSA PRIVATE KEY-----\nProc-Type: 4,ENCRYPTED\nDEK-Info: AES-128-CBC,FAKE01\nthat is all",
+                Map.of(), new Redactor.Tally()));
+        String escaped = redactor.filter("u1", "{\"private_key\": \"-----BEGIN PRIVATE KEY-----\\nRkFLRUhBTEZLRVk0123\"}\nnext line",
+                Map.of(), new Redactor.Tally());
+        assertTrue(!escaped.contains("RkFLRUhBTEZLRVk") && escaped.endsWith("\nnext line"), escaped);
+        // Mutations: take any END line -> the certificate and the signature go with the key; run
+        // on to the end of the text -> "exit code 0" goes too.
+    }
+
+    @Test
     @DisplayName("counting what the filter would take adds nothing to the table")
     void countingAddsNothing(@TempDir Path tmp) throws Exception {
         var db = MigratedDatabase.at(tmp.resolve("t.db"));
@@ -460,7 +489,8 @@ class RedactorTest {
         var redactor = new Redactor(null);
         for (String unit : List.of("a@", "a:", "a=", "\"a\":", "1 ", "+1", "$1$", "eyJ", "DE89", "aa:bb:",
                 "1.1.1.", "-----BEGIN ", "'", "::", "f:", "WIFI:S:", "a://b:", "--password ", "DHCPA(",
-                "a%40", "x (1.2.3.4) at ", "password=x ", "<a_1>", "bot1234567:")) {
+                "a%40", "x (1.2.3.4) at ", "password=x ", "<a_1>", "bot1234567:",
+                "-----BEGIN RSA PRIVATE KEY-----\n", "-----BEGIN RSA PRIVATE KEY-----\nfakeKEYbody0123456789\n")) {
             String text = unit.repeat(1_000_000 / unit.length());
             assertTimeoutPreemptively(Duration.ofSeconds(10),
                     () -> redactor.filter("u1", text, Map.of(), new Redactor.Tally()),

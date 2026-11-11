@@ -341,7 +341,7 @@ class CloudGatewayTest {
         assertFalse(out.contains("fakeHEAD"), out);
         assertEquals(markers(chatThenTask(List.of("x", "y"), "z")), markers(out), "every marker, as the engine wrote it");
         assertTrue(out.startsWith("## Prior Context\n### The conversation so far\nUSER: what does this key do?\n"
-                + Redactor.SECRET_REMOVED + LlmMessage.HISTORY_BLOCK + rest + LlmMessage.HISTORY_END
+                + Redactor.SECRET_REMOVED + "\n" + LlmMessage.HISTORY_BLOCK + rest + LlmMessage.HISTORY_END
                 + "\n## Task\nwhich router is down?" + LlmMessage.CACHE_BOUNDARY + "\n\n---\n## Environment"), out);
         // Mutation: no stops for the engine's message -> it ends "what does this key do?\n«secret
         // removed»", and every later turn has lost its task.
@@ -399,7 +399,7 @@ class CloudGatewayTest {
         String out = sent(List.of("USER: what is this?\n-----BEGIN OPENSSH PRIVATE KEY-----\n", cert),
                 "check both, the certificate too");
         assertTrue(out.startsWith("## Prior Context\n### The conversation so far\nUSER: what is this?\n"
-                + Redactor.SECRET_REMOVED + LlmMessage.HISTORY_BLOCK + cert + LlmMessage.HISTORY_END
+                + Redactor.SECRET_REMOVED + "\n" + LlmMessage.HISTORY_BLOCK + cert + LlmMessage.HISTORY_END
                 + "\n## Task\ncheck both, the certificate too" + LlmMessage.CACHE_BOUNDARY), out);
         // Mutation: take any END line for the key's -> the certificate and everything before it
         // go, the task too when the certificate is in it, on every later turn.
@@ -433,26 +433,47 @@ class CloudGatewayTest {
     }
 
     @Test
-    @DisplayName("markers act only in the engine's marked message: in any other, marker bytes inside a key are its text, and the key is removed to its end")
+    @DisplayName("markers act only in the engine's marked message: in any other, marker bytes are its text -- a key's lines on both sides of them go, and what follows the key stays")
     void markersElsewhereStopNothing() {
-        // The same bytes the engine's message holds, in a message it did not mark -- an OpenAI
-        // think call's, a fetched page: a key with no END line runs on to the end of the text.
+        // The bytes the engine's message holds, in a message it did not mark -- an OpenAI think
+        // call's first one: the key's lines on either side go, the task and the step's context stay.
         String unmarked = chatThenTask(List.of("USER: the key:\n" + KEY_HEAD,
                 "USER: AAAAC3NzaC1lZDI1NTE5AAAAIGfakeTAILfakeTAILfake\n"), "go");
         String out = sent(LlmMessage.user(unmarked), new Redactor(null));
-        assertFalse(out.contains("fakeHEAD") || out.contains("fakeTAIL") || out.contains("## Task"), out);
-        assertTrue(out.endsWith("USER: the key:\n" + Redactor.SECRET_REMOVED), out);
+        assertFalse(out.contains("fakeHEAD") || out.contains("fakeTAIL"), out);
+        assertTrue(out.contains("## Task\ngo") && out.contains("## Environment"),
+                "run on to the end of the text, a key took the task and the step's context every turn: " + out);
 
         var provider = new Recording();
         var gw = new CloudGateway(provider, new Recording(), config("anthropic", CloudGateway.Mode.ENFORCE), new Rows(), null);
-        String page = "the page\n-----BEGIN PRIVATE KEY-----\nMIIfake" + LlmMessage.HISTORY_BLOCK + "secondhalf"
-                + LlmMessage.HISTORY_END + "thirdpart" + LlmMessage.CACHE_BOUNDARY + "fourth";
+        String page = "the page\n-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0fakeONE" + LlmMessage.HISTORY_BLOCK
+                + "MIIEvQIBADANBgkqhkiG9w0fakeTWO" + LlmMessage.HISTORY_END + "MIIEvQIBADANfakeTHREE\nAbCd=="
+                + LlmMessage.CACHE_BOUNDARY + "\nthe page ends here";
         gw.chat(List.of(LlmMessage.authoredSystem("SYSTEM"), LlmMessage.marked("## Task\nfetch it" + LlmMessage.CACHE_BOUNDARY),
                 LlmMessage.assistant("{\"tool\":\"web_fetch\"}"), LlmMessage.user(page)), new LlmRequestConfig(null, null, false)
                 .withEgress(egress(new PrivateIndex(), Map.of(), (h, w) -> false)));
-        assertEquals("the page\n" + Redactor.SECRET_REMOVED, provider.calls.get(0).get(3).content(),
-                "nothing of the key after a marker it holds");
-        // Mutation: act on marker bytes in any message -> "secondhalf", "thirdpart" and "fourth" are sent.
+        String fetched = provider.calls.get(0).get(3).content();
+        assertTrue(fetched.startsWith("the page\n" + Redactor.SECRET_REMOVED + LlmMessage.CACHE_BOUNDARY)
+                && fetched.endsWith("\nthe page ends here"), "the key's lines through the marker bytes it holds, "
+                + "nothing after it: " + fetched);
+        assertFalse(fetched.contains("fake") || fetched.contains("AbCd=="), fetched);
+        // Mutation: act on marker bytes in any message -> the key ends at the first of them, and
+        // fakeTWO and fakeTHREE are sent.
+    }
+
+    @Test
+    @DisplayName("a key whose END line in the next message has another label, its headers first, is removed through it; and through an END line missing its dashes or with a doubled space")
+    void aKeyEndsAtAnyPrivateKeysEnd() {
+        String encrypted = "USER: and the rest:\nProc-Type: 4,ENCRYPTED\nDEK-Info: AES-128-CBC,FAKE0123456789ABCDEFFAKE\n\n"
+                + "fakeENCRYPTEDbody0123456789abcdefABCDEF\nfakeENCRYPTEDtail0123456789==\n";
+        for (String end : List.of("-----END PRIVATE KEY-----", "-----END RSA PRIVATE KEY", "-----END RSA  PRIVATE KEY-----")) {
+            String out = sent(List.of("USER: my key:\n-----BEGIN RSA PRIVATE KEY-----\n", encrypted + end + "\nthanks\n"),
+                    "is it safe?");
+            assertFalse(out.contains("DEK-Info") || out.contains("fakeENCRYPTED") || out.contains("Proc-Type"), end + ": " + out);
+            assertTrue(out.contains(LlmMessage.HISTORY_BLOCK + Redactor.SECRET_REMOVED + "\nthanks\n" + LlmMessage.HISTORY_END
+                    + "\n## Task\nis it safe?"), end + ": " + out);
+        }
+        // Mutation: only the BEGIN line's own label ends a key -> DEK-Info and the body are sent.
     }
 
     @Test

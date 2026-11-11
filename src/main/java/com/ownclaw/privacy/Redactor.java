@@ -1021,12 +1021,14 @@ public final class Redactor {
         return Character.isLetterOrDigit(c) || c == '_';
     }
 
-    // PEM private keys: from -----BEGIN ...PRIVATE KEY----- to its -----END ...-----, or to the
-    // end of the text when it was cut off -- half a key is still a key. In a text with stops
-    // (filter with stops), one cut off ends at the next stop instead, but for the lines of its body
-    // after it (keyBodyAfter); and a key is removed around every stop it crosses, the stop kept.
+    // PEM private keys: from -----BEGIN ...PRIVATE KEY----- to the next END line of a private key
+    // (privateEnd) -- or, when there is none after it, through its lines: what was cut off (keyEnd).
+    // In a text with stops (filter with stops) a key is removed around every stop it crosses, the
+    // stop kept.
     private static void pemBlocks(String s, List<Finding> out, List<int[]> stops) {
         int from = 0, at;
+        java.util.regex.Matcher ends = PRIVATE_END.matcher(s);
+        int endAt = -1, endTo = -1;   // the next private key's END line found so far; -2: none left
         while ((at = s.indexOf("-----BEGIN ", from)) >= 0) {
             int label = at + "-----BEGIN ".length();
             int close = label;
@@ -1036,24 +1038,16 @@ public final class Redactor {
                 from = label;
                 continue;
             }
-            // Its own END line: "-----END " and the same label. Any END line would do, and a
-            // certificate pasted later -- its "-----END CERTIFICATE-----" -- became the key's end:
-            // everything between went, the task too when the certificate was in it, every turn.
-            String endLine = "-----END " + s.substring(label, close) + "-----";
-            int end = s.indexOf(endLine, close + 5);
-            int stop;
-            if (end < 0) {
-                int[] next = null;
-                for (int[] st : stops) {
-                    if (st[0] >= close) {
-                        next = st;
-                        break;
-                    }
+            // One search forward through the text, whatever the number of keys in it.
+            if (endAt != -2 && endAt < close + 5) {
+                if (ends.find(close + 5)) {
+                    endAt = ends.start();
+                    endTo = ends.end();
+                } else {
+                    endAt = -2;
                 }
-                stop = next == null ? s.length() : keyBodyAfter(s, next, stops);
-            } else {
-                stop = end + endLine.length();
             }
+            int stop = endAt >= 0 ? endTo : keyEnd(s, lineEnd(s, close + 5), stops);
             int cut = at;
             for (int[] st : stops) {
                 if (st[1] <= cut || st[0] >= stop) continue;
@@ -1065,72 +1059,102 @@ public final class Redactor {
         }
     }
 
+    /**
+     * A private key's END line, any of them: "-----END ", a label holding PRIVATE KEY -- its own or
+     * another key's, as a key pasted from two files has -- and the closing dashes, its defects
+     * forgiven: dashes missing or short, a doubled space. Never a certificate's or a signature's:
+     * a lone key header in one message and a certificate pasted later removed everything between.
+     */
+    private static final java.util.regex.Pattern PRIVATE_END = java.util.regex.Pattern.compile(
+            "-{3,}[ \\t]*END[ \\t]+(?:[A-Za-z0-9]+[ \\t]+)*PRIVATE[ \\t]+KEY(?:[ \\t]+[A-Za-z0-9]+)*[ \\t]*-*",
+            java.util.regex.Pattern.CASE_INSENSITIVE);
+
+    /** Where the line holding {@code at} ends: its line break, or the end of the text. */
+    private static int lineEnd(String s, int at) {
+        int nl = s.indexOf('\n', at);
+        return nl < 0 ? s.length() : nl;
+    }
+
     /** A line of a key's body: base64, nothing else. */
     private static final java.util.regex.Pattern KEY_BODY = java.util.regex.Pattern.compile("[A-Za-z0-9+/]+=*");
 
-    /** What a speaker's line starts with in a chat the engine marked: "USER: ", "ASSISTANT: ". */
+    /** What a speaker's line starts with in a chat: "USER: ", "ASSISTANT: ". */
     private static final java.util.regex.Pattern SPEAKER = java.util.regex.Pattern.compile("^[A-Z][A-Za-z]*: ");
 
+    /** A PEM header line of an encrypted key: "Proc-Type: 4,ENCRYPTED", "DEK-Info: AES-128-CBC,...". */
+    private static final java.util.regex.Pattern PEM_HEADER = java.util.regex.Pattern.compile("[A-Za-z][A-Za-z0-9-]*: .*");
+
     /**
-     * Where a private key that has no END line ends, its text having reached the stop
-     * {@code stop}: at the stop -- what follows is the next part, not the key -- unless what follows
-     * is the rest of the key: lines of nothing but base64, a short one only after a full one in the
-     * same part, as a key's last line is -- across the stops between. A part may open with lines
-     * that lead into its text, and they are passed over to find it: a speaker's "USER: ", blank
-     * lines, a header ("## Task"), a rule ("---"), a line ending with a colon ("Message from the
-     * user while you were working:"). A key pasted in parts -- the second without its END line,
-     * in the next message, in the task, told while the task worked -- is thus removed whole, as it
-     * was when the removal ran on to the end of the text.
+     * Where a private key with no END line after it ends, its BEGIN line ending at
+     * {@code beginLineEnd}: through the lines that are the key's -- its body, lines of nothing but
+     * base64, a short one only straight after a full one, as a key's last line is -- however they
+     * are led into: past the lines between them that only lead on to more of it, a speaker's
+     * "USER: " opening a message, a header line of an encrypted key, a blank line, a heading
+     * ("## Task"), a rule, a line ending with a colon ("Message from the user while you were
+     * working:"), a stop. The first other line ends the key, and what follows is not removed: run
+     * on to the end of the text, a key cut off in one chat message took the rest of the chat, the
+     * task and the step's context with it on every later turn, and a key in a tool's output the
+     * rest of that output. A key pasted in parts -- the next in the next message, in the task,
+     * told while the task worked -- is removed whole.
      */
-    private static int keyBodyAfter(String s, int[] stop, List<int[]> stops) {
-        int end = stop[0];
-        int i = stop[1];
-        boolean opening = true;     // no line of the part's own text read yet
-        boolean firstLine = true;   // the part's first line, which a speaker's name can open
-        boolean afterBody = false;
-        while (i < s.length()) {
-            // A part ends its last line, and the next stop starts a line of its own: crossed only
-            // when the key's lines go on after it.
-            int[] here = stopAt(stops, i);
+    private static int keyEnd(String s, int beginLineEnd, List<int[]> stops) {
+        int end = beginLineEnd;   // the BEGIN line, whole: an escaped key's body is on it
+        if (beginLineEnd >= s.length()) return end;
+        boolean afterBody = true;    // a short line straight under the BEGIN line is the key's too
+        boolean ownHeaders = true;   // straight under the BEGIN line: the key's own header lines
+        int p = beginLineEnd + 1;
+        // The BEGIN line's own break may be a stop's: the key's message ends with that line.
+        int[] first = stopAt(stops, beginLineEnd);
+        if (first != null) {
+            p = first[1];
+            ownHeaders = false;
+        }
+        while (p < s.length()) {
+            int[] here = stopAt(stops, p);
             if (here != null) {
-                i = here[1];
-                opening = true;
-                firstLine = true;
+                p = here[1];
                 afterBody = false;   // a short line opening the next part is no key's last line
+                ownHeaders = false;
                 continue;
             }
-            int nl = s.indexOf('\n', i);
-            int le = nl < 0 ? s.length() : nl;
-            String line = s.substring(i, le);
-            if (firstLine) line = SPEAKER.matcher(line).replaceFirst("");
-            firstLine = false;
-            String t = line.strip();
-            boolean body = KEY_BODY.matcher(t).matches() && (t.length() >= 16 || afterBody);
-            if (!body) {
-                if (!opening || !leadIn(t) || nl < 0) break;
-            } else {
-                end = le;
-                opening = false;
-                afterBody = true;
-                if (nl < 0) break;
+            int le = lineEnd(s, p);
+            String line = s.substring(p, le);
+            var speaker = SPEAKER.matcher(line);
+            if (speaker.find()) {
+                line = line.substring(speaker.end());
+                afterBody = false;   // nor is a short line opening a message
             }
-            // A stop whose line break ends this line: on past it, as above.
-            int[] next = stopAt(stops, le);
-            if (next != null) {
-                i = next[1];
-                opening = true;
-                firstLine = true;
+            String t = line.strip();
+            if (KEY_BODY.matcher(t).matches() && (t.length() >= 16 || afterBody)) {
+                end = le;
+                afterBody = true;
+                ownHeaders = false;
+            } else if (ownHeaders && PEM_HEADER.matcher(t).matches()) {
+                end = le;   // its cipher and salt: the key's own, removed with it
+            } else if (leadsOn(t)) {
                 afterBody = false;
+                ownHeaders = ownHeaders && t.isEmpty();
             } else {
-                i = nl + 1;
+                break;
+            }
+            if (le >= s.length()) break;
+            int[] next = stopAt(stops, le);
+            p = next != null ? next[1] : le + 1;
+            if (next != null) {
+                afterBody = false;
+                ownHeaders = false;
             }
         }
         return end;
     }
 
-    /** A line that leads into a part's text rather than being it: blank, a header, a rule, "...:". */
-    private static boolean leadIn(String t) {
-        return t.isEmpty() || t.startsWith("#") || t.equals("---") || t.endsWith(":");
+    /**
+     * A line between a key's lines that only leads on to more of it: blank, a header of an
+     * encrypted key, a heading, a rule, a line ending with a colon, or control characters alone.
+     */
+    private static boolean leadsOn(String t) {
+        return t.isEmpty() || t.startsWith("#") || t.equals("---") || t.endsWith(":")
+                || PEM_HEADER.matcher(t).matches() || t.chars().allMatch(c -> c < 0x20);
     }
 
     /** The stop that starts at {@code at}, or null. */
