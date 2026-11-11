@@ -3352,7 +3352,7 @@ public class AgentLoop {
         sb.append("**Prompt messages** (").append(result.promptMessages().size()).append("):\n");
         for (var msg : result.promptMessages()) {
             sb.append("\n---\n**[").append(msg.role().name()).append("]**\n");
-            sb.append(msg.content()).append('\n');
+            sb.append(LlmMessage.asRead(msg.content())).append('\n');
         }
 
         sb.append("\n---\n**Raw LLM output** (").append(result.totalTokens()).append(" tokens):\n```json\n");
