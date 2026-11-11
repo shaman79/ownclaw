@@ -565,6 +565,22 @@ public class SkillManager {
      * Check Python code for syntax errors without writing to the skill directory.
      * @return error message if syntax error found, null if code is valid.
      */
+    /** The system Python's version, once known: "Python 3.12.3". */
+    private volatile String pythonVersion;
+
+    /**
+     * The version of the Python skills run on, "Python 3.12.3", asked of it once; empty when it
+     * cannot be asked, and asked again then.
+     */
+    java.util.Optional<String> pythonVersion() {
+        String known = pythonVersion;
+        if (known != null) return java.util.Optional.of(known);
+        if (pythonEnv == null) return java.util.Optional.empty();
+        java.util.Optional<String> asked = pythonEnv.getPythonVersion();
+        asked.ifPresent(v -> pythonVersion = v);
+        return asked;
+    }
+
     /**
      * What a failed syntax check returns when the check itself could not run -- no Python, a
      * sandbox that refused, a timeout: nothing about the code, which no repair can fix.

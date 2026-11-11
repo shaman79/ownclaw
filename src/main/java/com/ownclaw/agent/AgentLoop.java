@@ -2804,7 +2804,7 @@ public class AgentLoop {
                 return new Codegen(enhanced, null);
             }
             boolean newCode = triedCode.add(code);
-            boolean newError = seenErrors.add(errorKey(syntaxError));
+            boolean newError = seenErrors.add(errorKey(syntaxError, code));
             if (!newCode || !newError) {
                 log.error("Skill '{}': attempt {} brought back {} already seen, so the repairs are not getting past "
                         + "it: {}", name, attempt + 1, !newCode ? "code" : "an error", syntaxError);
@@ -2824,14 +2824,25 @@ public class AgentLoop {
      * line moved down by a line added above it, or under a comment changed each round, is the same
      * error again, and the repairs are not getting past it; a different broken line is progress.
      */
-    static String errorKey(String syntaxError) {
+    static String errorKey(String syntaxError, String code) {
         String[] lines = syntaxError.strip().split("\n");
-        String what = lines[lines.length - 1].strip();
+        // Without its own numbers too: "(detected at line 6)", "... opening parenthesis '[' on line 6".
+        String what = lines[lines.length - 1].strip().replaceAll("line \\d+", "line ?");
         for (int i = 0; i + 1 < lines.length; i++) {
             String line = lines[i].strip();
             if (line.startsWith("File ") && line.contains(", line ")) return lines[i + 1].strip() + " | " + what;
         }
-        return syntaxError.strip().replaceAll("line \\d+", "line ?");
+        // One line, as py_compile writes an IndentationError or a TabError -- "Sorry: IndentationError:
+        // unexpected indent (skill.py, line 7)" -- with the line it names read from the code, so two
+        // such errors in different places are two errors.
+        var at = java.util.regex.Pattern.compile("\\(skill\\.py, line (\\d{1,9})\\)").matcher(syntaxError);
+        String where = "";
+        if (at.find() && code != null) {
+            String[] source = code.split("\n", -1);
+            int n = Integer.parseInt(at.group(1));
+            if (n >= 1 && n <= source.length) where = source[n - 1].strip() + " | ";
+        }
+        return where + syntaxError.strip().replaceAll("line \\d+", "line ?");
     }
 
     /**
@@ -2996,6 +3007,10 @@ public class AgentLoop {
         sys.append("Expert Python developer. Production-quality, first try.\n\n");
         sys.append("Contract: `def run(params)` → `{'output': str, 'success': bool}`, never a 'type' key. No unhandled exceptions.\n");
         sys.append("Always `def run(params):` — never keyword args. Use `params.get('key')`.\n");
+        // What the code runs on: syntax newer than it fails the check however the code is varied,
+        // and a repair that varies it is progress to the repairs, round after round.
+        skillManager.pythonVersion().ifPresent(v -> sys.append("The skill runs on ").append(v)
+                .append(": use nothing a newer Python needs.\n"));
         sys.append("```python\ndef run(params):\n    url = params.get('url', '')\n    resp = requests.get(url, timeout=30)\n    return {'success': True, 'output': resp.text}\n```\n");
         sys.append("Credentials as env vars. system_packages on PATH. Keep anything that must last "
                 + "in the current directory (the skill's own). /tmp is shared by this account's "

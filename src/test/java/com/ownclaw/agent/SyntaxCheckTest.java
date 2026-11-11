@@ -52,14 +52,44 @@ class SyntaxCheckTest {
 
         String shifted = skills.checkPythonSyntax("# a comment the repair added\n" + BROKEN);
         assertNotEquals(first, shifted, "the line's number moved");
-        assertEquals(AgentLoop.errorKey(first), AgentLoop.errorKey(shifted), "and it is the same error");
+        assertEquals(AgentLoop.errorKey(first, BROKEN), AgentLoop.errorKey(shifted, "# a comment the repair added\n" + BROKEN),
+                "and it is the same error");
 
-        String other = skills.checkPythonSyntax(BROKEN.replace("def broken(:", "x = = 1"));
-        assertNotEquals(AgentLoop.errorKey(first), AgentLoop.errorKey(other), "a different broken line is progress");
+        String otherCode = BROKEN.replace("def broken(:", "x = = 1");
+        String other = skills.checkPythonSyntax(otherCode);
+        assertNotEquals(AgentLoop.errorKey(first, BROKEN), AgentLoop.errorKey(other, otherCode),
+                "a different broken line is progress");
 
         assertEquals("Missing required function: def run(params)",
                 skills.checkPythonSyntax("import json\n").strip());
         assertNull(skills.checkPythonSyntax("import json\n\ndef run(params):\n    return {'output': '', 'success': True}\n"));
         // Mutation: drop dfile='skill.py' -> the two checks of the same code differ.
+    }
+
+    @Test
+    @DisplayName("numbers inside Python's own message do not make a moved error new; indentation errors are told apart by their line")
+    void theMessagesOwnNumbers(@TempDir Path tmp) throws Exception {
+        SkillManager skills = manager(tmp);
+        String head = "import json\n\ndef run(params):\n    return {'output': '', 'success': True}\n\n";
+        for (String broken : java.util.List.of("x = \"abc\n", "DOC = \"\"\"abc\n\ndef later():\n    pass\n",
+                "x = [1,\n2)\n")) {
+            String code = head + broken;
+            String moved = head + "# the repair added a line\n" + broken;
+            String a = skills.checkPythonSyntax(code);
+            String b = skills.checkPythonSyntax(moved);
+            assertNotNull(a, broken);
+            assertEquals(AgentLoop.errorKey(a, code), AgentLoop.errorKey(b, moved), "moved down a line: " + a + " / " + b);
+        }
+        String indented = head + "def f():\nreturn 1\n";
+        String elsewhere = head + "def g():\n    pass\n\ndef f2():\nx = 2\n";
+        String i1 = skills.checkPythonSyntax(indented);
+        String i2 = skills.checkPythonSyntax(elsewhere);
+        assertTrue(i1.contains("IndentationError"), i1);
+        assertNotEquals(AgentLoop.errorKey(i1, indented), AgentLoop.errorKey(i2, elsewhere),
+                "two indentation errors in different places are two errors: " + i1 + " / " + i2);
+        String i1moved = head + "# moved\n" + "def f():\nreturn 1\n";
+        assertEquals(AgentLoop.errorKey(i1, indented), AgentLoop.errorKey(skills.checkPythonSyntax(i1moved), i1moved));
+        assertTrue(skills.pythonVersion().orElseThrow().startsWith("Python 3."), "the version the code runs on is known");
+        // Mutation: keep the message's own line numbers -> the unterminated string, moved, is a new error.
     }
 }
