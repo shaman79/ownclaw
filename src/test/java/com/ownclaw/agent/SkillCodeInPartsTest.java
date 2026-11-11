@@ -226,6 +226,8 @@ class SkillCodeInPartsTest {
 
         var between = new LoopRig(tmp.resolve("between"), List.of());
         var stopped = task();
+        stopped.setChat(new TaskChat(stopped, between.chat.createSession("u1", "Routers"), TaskChat.Channel.WEB,
+                between.chat, between.emitter, null, null, null));
         var cancellation = new TaskCancellationService();
         stopped.setExternalCancel(() -> cancellation.isCancelled("u1", stopped.taskId(), stopped.startTimeMs()));
         between.cloud.codegen.add(c -> {
@@ -235,7 +237,22 @@ class SkillCodeInPartsTest {
         between.cloud.codegen.add(ends(PART2 + PART3));
         assertEquals(STOPPED, between.loop.generateSkillCode(spec(), stopped).error());
         assertEquals(1, between.cloud.calls("codegen").size(), "a part was asked for after Stop");
-        // Mutation: no stop check before a part -> part 2 is asked for after Stop.
+        assertEquals(List.of(), LiveCallTaskTest.rows(between), "the chat told of a part that was never asked for");
+
+        // Stop, then the connection breaks off: the part is not asked of the cloud once more.
+        var retry = new LoopRig(tmp.resolve("retry"), List.of());
+        var stoppedThen = task();
+        var cancelled = new TaskCancellationService();
+        stoppedThen.setExternalCancel(() -> cancelled.isCancelled("u1", stoppedThen.taskId(), stoppedThen.startTimeMs()));
+        retry.cloud.codegen.add(cutOff(PART1));
+        retry.cloud.codegen.add(c -> {
+            cancelled.requestAll("u1", "you pressed Stop");
+            return LocalModeTest.noInternet().answer(c);
+        });
+        retry.cloud.codegen.add(ends(PART2 + PART3));
+        assertEquals(STOPPED, retry.loop.generateSkillCode(spec(), stoppedThen).error());
+        assertEquals(2, retry.cloud.calls("codegen").size(), "a part was asked again after Stop");
+        // Mutation: no stop check before a part -> part 2 is asked for after Stop, and asked again.
     }
 
     @Test
@@ -324,6 +341,18 @@ class SkillCodeInPartsTest {
         List<Call> calls = rig.cloud.calls("codegen");
         assertEquals(3, calls.size());
         assertEquals(calls.get(1).messages(), calls.get(2).messages(), "the same continuation, asked once more");
+
+        // A part cut off at the maximum output is the cloud answering: a connection that fails after it
+        // is the first in a row again, asked once more -- not the second, which hands the task over.
+        var again = new LoopRig(tmp.resolve("again"), List.of(), 600, LocalModeTest.localModel());
+        again.cloud.codegen.add(LocalModeTest.noInternet());
+        again.cloud.codegen.add(cutOff(PART1));
+        again.cloud.codegen.add(LocalModeTest.noInternet());
+        again.cloud.codegen.add(ends(PART2 + PART3));
+        var onCloud = task();
+        assertEquals(CODE, again.loop.generateSkillCode(spec(), onCloud).params().get("code"));
+        assertFalse(onCloud.onLocal(), "handed to the local model after one failure following a reply");
+        assertEquals(4, again.cloud.calls("codegen").size());
 
         var local = LocalModeTest.localModel();
         var away = new LoopRig(tmp.resolve("away"), List.of(), 600, local);
