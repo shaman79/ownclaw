@@ -199,6 +199,59 @@ class AnthropicImagesTest {
     }
 
     @Test
+    @DisplayName("a request at the image budget is written once, as bytes: the heap it takes is about twice its size -- through a String it took eleven times")
+    void theBodyIsWrittenOnce() throws Exception {
+        // Ten images of 9.6 MB as base64 -- the 96 MB one request may carry -- and a line of Czech,
+        // which made a String of the body UTF-16: two bytes a character.
+        var images = new ArrayList<LlmMessage.Image>();
+        var content = new StringBuilder("## Task\n");
+        for (int k = 0; k < 10; k++) {
+            byte[] data = new byte[7_200_000];
+            java.util.Arrays.fill(data, (byte) k);
+            images.add(new LlmMessage.Image("f" + k, 2576, 1932, data.length,
+                    new LlmMessage.Sent("image/jpeg", data, CloudGateway.sha256(data).substring(0, 16))));
+            content.append(LlmMessage.image(k));
+        }
+        content.append("co je na obrázcích? Příliš žluťoučký kůň").append(MARK).append("step");
+        var body = (com.fasterxml.jackson.databind.node.ObjectNode) body(List.of(LlmMessage.system("SYSTEM"),
+                LlmMessage.marked(content.toString(), images)));
+        byte[][] out = new byte[1][];
+        long peak = heapPeak(() -> out[0] = provider.utf8(body));
+        long size = out[0].length;
+        assertTrue(size > 96_000_000L, "the budget's worth: " + size);
+        assertTrue(new String(out[0], StandardCharsets.UTF_8).contains("Příliš žluťoučký kůň"));
+        assertTrue(peak < 3 * size, (peak >> 20) + " MB of heap to write " + (size >> 20) + " MB");
+        // Measured: 187 MB to write 91 MB. Mutation: a String first, then its bytes -> 1,017 MB.
+    }
+
+    /** The most of the heap {@code run} takes above what was in use when it started, in bytes. */
+    static long heapPeak(Runnable run) throws InterruptedException {
+        var memory = java.lang.management.ManagementFactory.getMemoryMXBean();
+        System.gc();
+        long base = memory.getHeapMemoryUsage().getUsed();
+        var peak = new java.util.concurrent.atomic.AtomicLong(base);
+        var sampler = new Thread(() -> {
+            while (!Thread.currentThread().isInterrupted()) {
+                peak.accumulateAndGet(memory.getHeapMemoryUsage().getUsed(), Math::max);
+                try {
+                    Thread.sleep(2);
+                } catch (InterruptedException e) {
+                    return;
+                }
+            }
+        });
+        sampler.setDaemon(true);
+        sampler.start();
+        try {
+            run.run();
+        } finally {
+            sampler.interrupt();
+            sampler.join();
+        }
+        return peak.get() - base;
+    }
+
+    @Test
     @DisplayName("the window is asked of the Models API before a request is shaped, when this process does not know it yet")
     void theWindowBeforeTheFirstRequest() {
         var http = new FakeHttp().json(AnthropicStreamingTest.MODELS, 200, AnthropicStreamingTest.LIMITS);

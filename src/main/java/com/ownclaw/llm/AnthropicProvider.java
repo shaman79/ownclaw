@@ -685,7 +685,7 @@ class AnthropicProvider implements LlmProvider {
     static final String IMAGE_NOT_SENT = LlmMessage.notShown(NOT_SENT_WHY);
 
     /** {@code body} as the UTF-8 bytes the request sends, written straight: a String of it first held it twice more. */
-    private byte[] utf8(ObjectNode body) {
+    byte[] utf8(ObjectNode body) {
         try {
             return mapper.writeValueAsBytes(body);
         } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
