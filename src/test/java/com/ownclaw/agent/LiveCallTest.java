@@ -5,7 +5,6 @@ import com.ownclaw.llm.LlmProgress.Part;
 import com.ownclaw.llm.LlmProvider;
 import com.ownclaw.llm.LlmRequestConfig;
 import com.ownclaw.llm.LlmResponse;
-import com.ownclaw.llm.RepeatedOutput;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -139,42 +138,24 @@ class LiveCallTest {
         assertEquals(0, again.get("reasoningChars"));
         assertEquals(List.of(), again.get("toolCalls"));
         assertFalse(again.containsKey("line"));
-        // ...and the guard counts this reply alone: four attempts that wrote the same text are not
-        // four copies of it.
-        for (int attempt = 0; attempt < 4; attempt++) {
-            call.calling(() -> { });
-            assertDoesNotThrow(() -> stream(call, Part.REASONING, distinct("same", 60), 41));
-        }
-        // Mutation: keep the text across requests -> the fourth attempt is ended as a loop.
+        // Mutation: keep the text across requests -> the reasoning is counted twice.
     }
 
     @Test
-    @DisplayName("a reasoning that has become a loop is ended, saying what was seen, soon after it can be seen")
-    void aReasoningLoopIsEnded() {
+    @DisplayName("a reasoning is never ended for what it holds: a script drafted with a grid of zeros, a paragraph thought 60 times")
+    void aReasoningIsNeverEnded() {
         var ctx = task(6);
         LiveCall call = ctx.call(OLLAMA, true, ctx.atStep("delegation turn 1"));
-        String preamble = distinct("thought", 30);
-        String reply = preamble + LOOP.repeat(60);
-        int fed = 0;
-        RepeatedOutput looped = null;
-        try {
-            for (int i = 0; i < reply.length(); i += 23) {
-                String piece = reply.substring(i, Math.min(reply.length(), i + 23));
-                fed += piece.length();
-                call.received(Part.REASONING, piece);
-            }
-        } catch (RepeatedOutput e) {
-            looped = e;
-        }
-        assertNotNull(looped, "a loop of " + LOOP.length() + " characters, 60 times, went on");
-        assertTrue(fed <= preamble.length() + LiveCall.LOOP_REPEATS * LOOP.length() + LiveCall.LOOP_CHECK_EVERY + 23,
-                "ended within a check of being seen: " + fed + " characters fed");
-        assertTrue(looped.seen().matches("the local model repeated the same 300 characters 4 times, after 0s and "
-                + "[0-9,]+ characters of reasoning"), looped.seen());
-        assertTrue(looped.seen().contains(String.format(java.util.Locale.ROOT, "%,d characters", fed)),
-                "the count is the text so far: " + looped.seen() + " / " + fed);
-        assertEquals("ollama", looped.getProvider());
-        // Mutation: LOOP_REPEATS 400 -> the loop is never ended.
+        // The review's probe: the model drafts the script in its reasoning before it calls, and a
+        // 30-row grid of zeros was enough to end it.
+        var draft = new StringBuilder("Let me draft the script before I call shell_exec:\n```python\nGRID = [\n");
+        for (int i = 0; i < 2_000; i++) draft.append("    [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],\n");
+        String reasoning = draft + "]\n```\n" + LOOP.repeat(60);
+        assertDoesNotThrow(() -> stream(call, Part.REASONING, reasoning, 23));
+        assertEquals(reasoning.length(), call.shown().data().get("reasoningChars"));
+        assertTrue(call.shown().text().contains(String.format(java.util.Locale.ROOT, "%,d characters so far",
+                reasoning.length())), "the owner sees it grow: " + call.shown().text());
+        // Mutation: end a reasoning whose last 300 characters appear 4 times -> the grid ends it.
     }
 
     @Test
@@ -194,55 +175,19 @@ class LiveCallTest {
     }
 
     @Test
-    @DisplayName("a long reply that quotes a config file whose blocks repeat once or twice goes on, however it streams; a fourth copy is a loop")
+    @DisplayName("a reply that quotes a config whose block repeats goes on, however often it repeats and however it streams")
     void aRepeatedBlockIsNoLoop() {
-        // A stanza of some 500 characters, the same three times: written once and repeated twice,
-        // as a router's config can hold the same block for three networks. Around it, some 30,000
-        // characters of lines no stretch of which repeats. The last copy ends where the text is
-        // checked, so the check reads the end of the block -- in the text three times -- as the
-        // last characters it looks for.
         String block = "config interface 'guest'\n\toption proto 'static'\n\toption ipaddr '192.0.2.1'\n"
                 + "\toption netmask '255.255.255.0'\n\toption type 'bridge'\n\toption ifname 'eth0.3'\n"
-                + "\toption mtu '1500'\n\toption ip6assign '60'\n\toption delegate '0'\n\n"
-                + "config dhcp 'guest'\n\toption interface 'guest'\n\toption start '100'\n\toption limit '150'\n"
-                + "\toption leasetime '12h'\n\toption dhcpv4 'server'\n\tlist dhcp_option '6,192.0.2.53'\n\n"
-                + "config zone\n\toption name 'guest'\n\tlist network 'guest'\n\toption input 'REJECT'\n"
-                + "\toption output 'ACCEPT'\n\toption forward 'REJECT'\n\n";
-        assertTrue(block.length() > LiveCall.LOOP_WINDOW, "the last characters lie wholly inside a copy: " + block.length());
-        String thrice = endingAtACheck(distinct("line", 20) + block + distinct("route", 30) + block
-                + distinct("rule", 25), block) + distinct("zone", 400);
-        String fourTimes = endingAtACheck(distinct("line", 20) + block + distinct("route", 30) + block
-                + distinct("rule", 25) + block + distinct("host", 12), block) + distinct("zone", 400);
-        // Pieces that divide 2,000, so the checks fall where the copies end; and some that do not.
+                + "\toption mtu '1500'\n\toption ip6assign '60'\n\toption delegate '0'\n\n";
+        String config = distinct("line", 20) + block.repeat(12) + distinct("zone", 40);
         for (int size : new int[] {1, 8, 40, 400, 2_000, 7, 61, 997}) {
-            for (Part part : new Part[] {Part.ANSWER, Part.REASONING}) {
+            for (Part part : new Part[] {Part.ANSWER, Part.REASONING, Part.ARGUMENTS}) {
                 var ctx = task(1);
                 LiveCall call = ctx.call(OLLAMA, true, ctx.atStep(null));
-                assertDoesNotThrow(() -> stream(call, part, thrice, size),
-                        "a block three times is no loop: in pieces of " + size);
+                assertDoesNotThrow(() -> stream(call, part, config, size), part + " in pieces of " + size);
             }
         }
-        for (int size : new int[] {1, 8, 40, 400, 2_000}) {
-            var ctx = task(1);
-            LiveCall call = ctx.call(OLLAMA, true, ctx.atStep(null));
-            assertThrows(RepeatedOutput.class, () -> stream(call, Part.REASONING, fourTimes, size),
-                    "the same block a fourth time in a reasoning is: in pieces of " + size);
-            LiveCall written = ctx.call(OLLAMA, true, ctx.atStep(null));
-            assertDoesNotThrow(() -> stream(written, Part.ANSWER, fourTimes, size),
-                    "written out, it is output: in pieces of " + size);
-        }
-        // Mutation: LOOP_REPEATS 3 -> the check at the end of the third copy ends the reasoning.
-    }
-
-    /**
-     * {@code text}, padded with characters that repeat nothing so that, with {@code last} after
-     * it, it ends where the text is checked for a loop: a multiple of {@link LiveCall#LOOP_CHECK_EVERY}.
-     */
-    static String endingAtACheck(String text, String last) {
-        int pad = LiveCall.LOOP_CHECK_EVERY - (text.length() + last.length()) % LiveCall.LOOP_CHECK_EVERY;
-        var unique = new StringBuilder();
-        for (int i = 0; unique.length() < pad; i++) unique.append('#').append(i).append(' ');
-        return text + unique.substring(0, pad) + last;
     }
 
     @Test
@@ -338,23 +283,15 @@ class LiveCallTest {
         return sb.toString();
     }
 
-    /** {@code text} as a call's arguments, 40 characters a piece: how much was told when it was ended, or -1. */
+    /** {@code text} as a call's arguments, 40 characters a piece: how much of it was kept. */
     static int asACall(String text) {
         var ctx = task(3);
         LiveCall call = ctx.call(OLLAMA, true, ctx.atStep("delegation turn 2"));
         call.received(Part.CALL, "ha_api");
-        int fed = 0;
-        try {
-            for (int i = 0; i < text.length(); i += 40) {
-                String piece = text.substring(i, Math.min(text.length(), i + 40));
-                call.received(Part.ARGUMENTS, piece);
-                fed += piece.length();
-            }
-        } catch (RepeatedOutput e) {
-            return fed;
+        for (int i = 0; i < text.length(); i += 40) {
+            call.received(Part.ARGUMENTS, text.substring(i, Math.min(text.length(), i + 40)));
         }
-        assertEquals(text.length(), call.shown().data().get("answerChars"), "all of it kept and counted");
-        return -1;
+        return (int) call.shown().data().get("answerChars");
     }
 
     static final String HEAD = "<tool_call>\n<function=ha_api>\n<parameter=ws_commands>\n";
@@ -364,41 +301,33 @@ class LiveCallTest {
     void aCallsDataRunsWholeAtAnyLength() {
         var grid = new StringBuilder(HEAD).append("GRID = [\n");
         for (int i = 0; i < 2_000; i++) grid.append("    [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],\n");
-        assertEquals(-1, asACall(grid + "]\n" + unique(0, 100)), "a 2,000-row grid of zeros, some 140,000 characters");
+        { String t = grid + "]\n" + unique(0, 100); assertEquals(t.length(), asACall(t), "a 2,000-row grid of zeros, some 140,000 characters"); }
         String row = "2026-11-11,router-1,eth0,up,1500,0,0,0,0,0,0,0,0,0,0,ok,ok,ok,ok\n";
-        assertEquals(-1, asACall(HEAD + row.repeat(5_000)), "5,000 identical rows, some 330,000 characters");
-        assertEquals(-1, asACall(rounds(HEAD, LiveCallTest::card, 300_000)), "700 dashboard cards that differ in one line");
+        { String t = HEAD + row.repeat(5_000); assertEquals(t.length(), asACall(t), "5,000 identical rows, some 330,000 characters"); }
+        { String t = rounds(HEAD, LiveCallTest::card, 300_000); assertEquals(t.length(), asACall(t), "700 dashboard cards that differ in one line"); }
         String body = "status: ok, checked by the nightly job, nothing to report; ".repeat(7).substring(0, 380);
         var records = new StringBuilder(HEAD);
         for (int i = 0; records.length() < 200_000; i++) {
             records.append(String.format(java.util.Locale.ROOT, "id %05d: ", i)).append(body).append('\n');
         }
-        assertEquals(-1, asACall(records.toString()), "200,000 characters of records alike but for their ids");
+        { String t = records.toString(); assertEquals(t.length(), asACall(t), "200,000 characters of records alike but for their ids"); }
         // The same paragraph again and again is a loop to the eye -- and output all the same: the
-        // owner sees it grow and stops it, or the model's own limits end it. Only the reasoning is
-        // judged (aReasoningLoopIsEnded).
-        assertEquals(-1, asACall(rounds(HEAD, i -> LOOP, 300_000)), "300,000 characters of one paragraph");
+        // owner sees it grow and stops it, or the model's own limits end it.
+        { String t = rounds(HEAD, i -> LOOP, 300_000); assertEquals(t.length(), asACall(t), "300,000 characters of one paragraph"); }
         // Mutation: bring back LOOP_CALL_CHECKS 10 -> the records are ended near 18,000 characters.
     }
 
     @Test
-    @DisplayName("a check costs the same whatever the text holds: a million characters of runs of spaces stream in seconds")
-    void aCheckCostsTheSameWhateverTheTextHolds() {
-        // Runs of 280 to 285 spaces, each after a marker that differs from every other: nearly all of
-        // every window the same character, and a whole marker in each, so no window repeats. Looked
-        // for with indexOf, each check read most of each window at every place -- 258 seconds for
-        // such a text, half a second a check.
+    @DisplayName("a million characters of reasoning stream in moments and are all counted")
+    void aMillionCharactersStream() {
         var text = new StringBuilder();
-        for (int i = 0; text.length() < 1_000_000; i++) {
-            text.append(" ".repeat(280 + i % 6)).append(new StringBuilder(String.format(java.util.Locale.ROOT, "%07d", i)).reverse())
-                    .append('\n');
-        }
-        // As a reasoning: the text the check reads.
+        for (int i = 0; text.length() < 1_000_000; i++) text.append(" ".repeat(290 + i % 7)).append(i).append('\n');
         var ctx = task(1);
         LiveCall call = ctx.call(OLLAMA, true, ctx.atStep(null));
         long t0 = System.nanoTime();
-        assertDoesNotThrow(() -> stream(call, Part.REASONING, text.toString(), 40), "no stretch of it repeats");
+        assertDoesNotThrow(() -> stream(call, Part.REASONING, text.toString(), 40));
         long ms = (System.nanoTime() - t0) / 1_000_000;
+        assertEquals(text.length(), call.shown().data().get("reasoningChars"));
         assertTrue(ms < 30_000, "streamed in " + ms + " ms");
     }
 }

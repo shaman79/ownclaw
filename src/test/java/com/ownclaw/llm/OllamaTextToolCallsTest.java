@@ -25,7 +25,7 @@ import static org.junit.jupiter.api.Assertions.*;
  * The local provider with a model whose template writes tool calls as text ({@link TextToolCalls}):
  * no tools field goes out, the tools are in the system message as the template puts them there, the
  * calls are read out of the streamed text, and every piece of a call reaches the progress hook while
- * it is written -- the loop guard's too.
+ * it is written, for the owner to see.
  */
 class OllamaTextToolCallsTest {
 

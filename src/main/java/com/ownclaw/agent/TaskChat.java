@@ -27,7 +27,7 @@ import java.util.function.BiConsumer;
  * of the loop, one before each tool call of a delegation, a note after a step whose result the
  * privacy filter changes before the cloud model reads it, a note when a step the provider stopped
  * as reasoning extraction is asked again, one when the task moves to the local model because its
- * cloud model cannot be reached, one when a model's reply is ended because it had become a loop,
+ * cloud model cannot be reached, one when a model's reply ran on until it filled the model's context window,
  * one when a delegation is not started because the local model would have had to retype a block
  * of its plan, the local model's summary of each
  * private result the cloud's own calls produced, and one when the task reads what the owner sent
@@ -268,18 +268,32 @@ public final class TaskChat {
     }
 
     /**
-     * A model call of the task was ended because its reply had become a verbatim loop
-     * ({@link LiveCall}): which call, what was seen -- figures only, nothing of the text -- and
-     * what follows. Said, because the owner watched the reply grow for minutes and would otherwise
-     * see it simply stop.
+     * A model call of the task ended because its reply ran on until it filled the model's context
+     * window ({@link com.ownclaw.llm.OutputTruncated#replyFilledTheWindow}): which call, how long
+     * it ran and how much it wrote -- figures only, nothing of the text -- and what follows. Said,
+     * because the owner watched the reply grow and would otherwise see it simply stop.
      *
      * @param then what follows, as a clause: "the cloud model takes over"
      */
-    void repeated(com.ownclaw.llm.RepeatedOutput looped, LiveCall call, String then) {
+    void ranOn(com.ownclaw.llm.OutputTruncated cut, LiveCall call, String then) {
         if (sessionId == null) return;
         String purpose = call.purpose();
-        note("🔁 " + Character.toUpperCase(purpose.charAt(0)) + purpose.substring(1) + ": " + looped.seen()
-                + ". It was repeating itself, so its reply was ended, and " + then + ".");
+        note("⏹️ " + Character.toUpperCase(purpose.charAt(0)) + purpose.substring(1) + ": "
+                + cut.getMessage().substring(cut.getMessage().indexOf(']') + 1).strip() + ", after "
+                + call.ranFor() + ". It ended there, and " + then + ".");
+    }
+
+    /**
+     * A model call of a task asked from Telegram has run long: said there once, with how long and
+     * how much so far, and how to stop it. The web chat shows every call as it runs (LiveCall);
+     * Telegram is told none of that, and nothing ends a call for its length.
+     */
+    void longCall(LiveCall call) {
+        if (sessionId == null || channel != Channel.TELEGRAM) return;
+        String purpose = call.purpose();
+        note((call.local() ? Actor.LOCAL : Actor.CLOUD).emoji + " " + Character.toUpperCase(purpose.charAt(0))
+                + purpose.substring(1) + ": the " + (call.local() ? "local" : "cloud") + " model is still writing, "
+                + call.ranFor() + " so far. /cancel stops it.");
     }
 
     /**

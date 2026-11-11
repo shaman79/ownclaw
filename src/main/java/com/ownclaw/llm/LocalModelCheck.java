@@ -244,6 +244,16 @@ public class LocalModelCheck {
                     !callsAsText.getOrDefault(model, false) ? "offered natively"
                             : config.getExecutor().isToolCallsAsText() ? "read as text as they stream"
                             : "offered natively (text calls switched off)");
+            if (toolsCapable && !(callsAsText.getOrDefault(model, false) && config.getExecutor().isToolCallsAsText())) {
+                // Offered natively, a tool call reaches this application only once it is written
+                // whole: the owner sees no progress while it is, and a call that takes longer to
+                // write than the read timeout allows is ended by it (TextToolCalls).
+                log.warn("Local model '{}': its tool calls cannot stream ({}): each arrives only once the model has "
+                        + "written all of it, with no progress shown meanwhile, and one that takes longer than the "
+                        + "read timeout to write is ended by it", model, !callsAsText.getOrDefault(model, false)
+                        ? "its chat template writes them in no format this application reads as text"
+                        : "text calls are switched off, OWNCLAW_EXECUTOR_TOOL_CALLS_AS_TEXT=false");
+            }
         } catch (Exception e) {
             log.warn("Could not inspect local model '{}' on {}: {}", model, url, e.getMessage());
         }

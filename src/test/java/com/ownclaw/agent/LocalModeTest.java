@@ -127,7 +127,10 @@ class LocalModeTest {
                     262_144, Replies.of("", 20_000, 242_144, 0, 0, "length"));
         });
         AgentResult r = rig.turn(session(rig), "summarise the old tasks");
-        assertEquals(AgentResult.TerminationReason.CONTEXT_WINDOW, r.terminationReason(), r.response());
+        assertEquals(AgentResult.TerminationReason.ERROR, r.terminationReason(), r.response());
+        assertTrue(r.response().contains("the reply ran on until it filled the model's 262,144-token context window, "
+                + "from a request of 20,000 tokens"), r.response());
+        assertFalse(r.response().contains("/new"), "a new chat would not help: " + r.response());
         assertEquals(1, local.calls("think").size(), "not asked again");
         // Mutation: fold whatever the cut -> the script has no second local reply.
     }

@@ -3,7 +3,6 @@ package com.ownclaw.agent;
 import com.ownclaw.llm.LlmProgress;
 import com.ownclaw.llm.LlmProvider;
 import com.ownclaw.llm.LlmResponse;
-import com.ownclaw.llm.RepeatedOutput;
 import com.ownclaw.privacy.Redactor;
 
 import java.util.ArrayList;
@@ -27,51 +26,21 @@ import java.util.Map;
  * event of the reply carried ({@link LlmProgress#received}). Made by {@link AgentContext#call},
  * and closed when the call has returned or failed.
  * <p>
- * And it ends a reply whose reasoning has become a verbatim loop ({@link #repeating}) -- never one
- * for what it writes out: an answer and a tool call's arguments are output, which neither their
- * length nor their repeating ends ({@link #LOOP_REPEATS}).
+ * It ends nothing. No reply is ended for its length or for what it holds -- its reasoning, its
+ * answer, a tool call's arguments: a runaway is seen as it grows, its characters so far in the
+ * owner's chat ({@link #shown}), and Stop ends it; otherwise the model's own limits do -- its
+ * maximum output, its context window ({@code OutputTruncated#replyFilledTheWindow}). It used to
+ * end a reply whose text repeated: four copies of any 300 characters, and for a tool call ten
+ * checks in a row that found some -- about 18,000 characters of records. Each ended data: a table,
+ * a grid of zeros, a dashboard's cards, a script the model drafts in its reasoning before calling.
+ * No length and no count of repeats tells data from a loop, and the owner ruled such caps out
+ * (2026-11-11).
  * <p>
  * What the counts and the texts describe is the reply under way: a request sent again -- after
  * an overload, or to the model a refusal names -- is answered by a reply of its own, and the
  * state starts again with it ({@link #calling}). The time is the call's, from its beginning.
  */
 public final class LiveCall implements LlmProgress, AutoCloseable {
-
-    /**
-     * How often a reply's reasoning is checked for a loop: each time it has grown by another 2,000
-     * characters since it was last checked. A check reads the whole text so far, so it is not made
-     * at every event; 2,000 characters are about a minute of the local model's writing and a few
-     * seconds of a cloud model's, which is how much longer a loop runs than it would have to.
-     */
-    static final int LOOP_CHECK_EVERY = 2_000;
-
-    /**
-     * How much of the end of the text a check looks for in what came before it: 300 characters,
-     * several sentences -- more than a line of a config file, a table row or a phrase a reply may
-     * well repeat, so that only a stretch the model has written out word for word again matches.
-     */
-    static final int LOOP_WINDOW = 300;
-
-    /**
-     * How many times those last characters must appear in the reasoning so far, none overlapping
-     * another, for the reply to be ended as a loop: 4. A model that has thought the same stretch
-     * four times word for word is in a loop, and would go on until its context window was full --
-     * hours, on the local model.
-     * <p>
-     * Only the reasoning is checked. What a reply writes out -- its answer, a tool call's arguments
-     * -- is output, and output repeats: a table's rows, a grid of zeros, a dashboard's cards, a
-     * config file's blocks. No length and no count of repeats tells such data from a loop, so every
-     * such check was a cap on output: four copies of any 300 characters ended an answer quoting a
-     * config, and a call was ended after some 18,000 characters of repeating records -- a limit the
-     * owner had ruled out (2026-11-11). Output streams, so a runaway is seen as it grows -- the
-     * owner's chat shows its characters so far ({@link #shown}) -- and Stop ends it.
-     * <p>
-     * Nothing else bounds a reply: this application sets no limit of its own on its length, and
-     * neither its length nor the time it takes ends a call that is not looping. Only the model's
-     * own limits -- its maximum output, its context window -- the provider's limit on silence
-     * between two events, and Stop do.
-     */
-    static final int LOOP_REPEATS = 4;
 
     /**
      * How much of the end of each text the ops API shows of a call under way ({@link #forOps}):
@@ -114,8 +83,6 @@ public final class LiveCall implements LlmProgress, AutoCloseable {
     // The reply under way, guarded by this.
     private final StringBuilder reasoning = new StringBuilder();
     private final StringBuilder answer = new StringBuilder();
-    /** How long the reasoning was when it was last checked for a loop. */
-    private int reasoningChecked;
     /** Where the reasoning's line that has not ended yet begins. */
     private int lineStart;
     /** The latest complete line of the reasoning, or null before one has ended. */
@@ -147,6 +114,12 @@ public final class LiveCall implements LlmProgress, AutoCloseable {
 
     public String purpose() { return purpose; }
 
+    /** "23m 5s and 41,200 characters": how long the call has run and how much it has written. */
+    public synchronized String ranFor() {
+        return elapsed(System.currentTimeMillis() - startedAt) + " and "
+                + String.format(Locale.ROOT, "%,d characters", reasoning.length() + answer.length());
+    }
+
     public boolean local() { return local; }
 
     @Override
@@ -164,7 +137,7 @@ public final class LiveCall implements LlmProgress, AutoCloseable {
             synchronized (this) {
                 reasoning.setLength(0);
                 answer.setLength(0);
-                reasoningChecked = lineStart = 0;
+                lineStart = 0;
                 line = null;
                 calls.clear();
                 last = null;
@@ -178,11 +151,7 @@ public final class LiveCall implements LlmProgress, AutoCloseable {
         hook.billed(usage);
     }
 
-    /**
-     * Kept, and the reasoning checked for a loop: a reply whose reasoning has become one is ended
-     * here, with {@link RepeatedOutput}. Its answer and its tool calls' arguments are kept and
-     * shown, never ended for what they hold ({@link #LOOP_REPEATS}).
-     */
+    /** Kept, to be shown: nothing a reply holds ends it. */
     @Override
     public synchronized void received(Part part, String text) {
         last = part;
@@ -195,10 +164,6 @@ public final class LiveCall implements LlmProgress, AutoCloseable {
             case ANSWER, ARGUMENTS -> answer.append(text);
             case CALL -> calls.add(text);
         }
-        if (reasoning.length() - reasoningChecked >= LOOP_CHECK_EVERY) {
-            reasoningChecked = reasoning.length();
-            if (repeating(reasoning)) throw looped(reasoning, "of reasoning");
-        }
     }
 
     /** The lines of the reasoning that a line break appended after {@code from} has ended. */
@@ -208,75 +173,6 @@ public final class LiveCall implements LlmProgress, AutoCloseable {
             if (!ended.isEmpty()) line = ended;
             lineStart = at + 1;
         }
-    }
-
-    /**
-     * Whether the last {@link #LOOP_WINDOW} characters of {@code text} appear in it
-     * {@link #LOOP_REPEATS} times or more, none overlapping another -- they themselves are one. One
-     * pass of a rolling hash over the text ({@link #hash}), each hit confirmed character by character
-     * and the next looked for past it, so a check costs the same whatever the text holds. Looked for
-     * with indexOf, the stretch was matched afresh at every place, and through nearly all of itself
-     * wherever the text is mostly one character -- runs of spaces: half a second a check, measured.
-     */
-    private static boolean repeating(StringBuilder text) {
-        int n = text.length();
-        if (n < LOOP_WINDOW) return false;
-        int last = n - LOOP_WINDOW;
-        long wanted = hash(text, last);
-        int times = 0;
-        int at = 0;
-        long h = hash(text, 0);
-        while (true) {
-            if (h == wanted && same(text, at, last)) {
-                if (++times >= LOOP_REPEATS) return true;
-                at += LOOP_WINDOW;   // the next copy may not overlap this one
-                if (at > last) return false;
-                h = hash(text, at);
-                continue;
-            }
-            if (at >= last) return false;
-            h = rolled(h, text, at);
-            at++;
-        }
-    }
-
-    /** The rolling hash's base: odd, so multiplying by it loses nothing modulo 2^64. */
-    private static final long BASE = 0x9E3779B97F4A7C15L;
-
-    /** {@link #BASE} to the power {@code LOOP_WINDOW - 1}: what a window's first character weighs. */
-    private static final long FIRST_WEIGHT;
-
-    static {
-        long w = 1;
-        for (int i = 1; i < LOOP_WINDOW; i++) w *= BASE;
-        FIRST_WEIGHT = w;
-    }
-
-    /** The hash of the {@link #LOOP_WINDOW} characters from {@code at}. */
-    private static long hash(CharSequence text, int at) {
-        long h = 0;
-        for (int i = at; i < at + LOOP_WINDOW; i++) h = h * BASE + text.charAt(i);
-        return h;
-    }
-
-    /** The hash of the window one character on from the one at {@code at}, whose hash is {@code h}. */
-    private static long rolled(long h, CharSequence text, int at) {
-        return (h - text.charAt(at) * FIRST_WEIGHT) * BASE + text.charAt(at + LOOP_WINDOW);
-    }
-
-    /** Whether the windows at {@code a} and {@code b} hold the same text. */
-    private static boolean same(CharSequence text, int a, int b) {
-        if (a == b) return true;
-        for (int i = 0; i < LOOP_WINDOW; i++) if (text.charAt(a + i) != text.charAt(b + i)) return false;
-        return true;
-    }
-
-    /** The reply's end, a loop: what was seen, in figures, and nothing of the text itself. */
-    private RepeatedOutput looped(StringBuilder text, String which) {
-        return new RepeatedOutput(provider, String.format(Locale.ROOT,
-                "the %s model repeated the same %,d characters %d times, after %s and %,d characters %s",
-                local ? "local" : "cloud", LOOP_WINDOW, LOOP_REPEATS, elapsed(System.currentTimeMillis() - startedAt),
-                text.length(), which));
     }
 
     /**

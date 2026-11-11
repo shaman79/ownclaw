@@ -2729,6 +2729,11 @@ public class AgentLoop {
                         + declined.getMessage() + "), so nothing was created.");
             } catch (OutputTruncated cutOff) {
                 account(context, local, provider, cutOff.reply());
+                if (cutOff.replyFilledTheWindow()) {
+                    context.chat().ranOn(cutOff, live, "the code of '" + name + "' was not written");
+                    return Codegen.failed("writing the code for '" + name + "' did not end: " + cutOff.getMessage()
+                            + ", so nothing was created.");
+                }
                 return Codegen.failed(cutOff.limit() == OutputTruncated.Limit.MAX_OUTPUT
                         ? "the code for '" + name + "' did not fit in one reply (" + cutOff.getMessage()
                                 + "). It was discarded, not repaired, and nothing was created. A "
@@ -2747,9 +2752,6 @@ public class AgentLoop {
                     // Written from the start on the local model, whose prompt is its own.
                     live.close();
                     return generateSkillCode(originalParams, context);
-                }
-                if (callFailed instanceof RepeatedOutput looped) {
-                    context.chat().repeated(looped, live, "the code of '" + name + "' was not written");
                 }
                 return Codegen.failed("the request for the code of '" + name + "' failed ("
                         + callFailed.getMessage() + "), so nothing was created.");
@@ -2885,7 +2887,10 @@ public class AgentLoop {
             String said = quotable(why.getMessage(), context);
             clause = said.equals(why.getMessage()) ? said : "the call to the model failed (" + said + ")";
         }
+        // A reply that ran on until it filled the window is no chat grown too long: a new chat would
+        // not help, and the ending says what happened, not to start one.
         return why instanceof OutputTruncated cut && cut.limit() == OutputTruncated.Limit.CONTEXT_WINDOW
+                && !cut.replyFilledTheWindow()
                 ? AgentResult.contextWindow(clause, context.trajectory(), context.elapsedMs())
                 : AgentResult.error(clause, context.trajectory(), context.elapsedMs());
     }
@@ -3569,6 +3574,17 @@ public class AgentLoop {
     volatile long liveEveryMs = LIVE_EVERY_MS;
 
     /**
+     * When a task asked from Telegram is told its model call is still running: once, after ten
+     * minutes (TaskChat#longCall). Telegram is sent none of the live frames the web chat shows,
+     * and nothing ends a call for its length; this is how the owner there learns one is long and
+     * can /cancel it. It ends nothing.
+     */
+    static final long LONG_CALL_MS = 10 * 60_000L;
+
+    /** When a long call is told: {@link #LONG_CALL_MS}, which a test shortens. */
+    volatile long longCallMs = LONG_CALL_MS;
+
+    /**
      * The task's {@link AgentContext#setCallWatch}: while {@code call} runs, its chat is sent the
      * call's live state ({@link LiveCall#shown}) as it begins and every {@link #liveEveryMs}, as a
      * LIVE status the page shows in place of the one before -- marked as unattended work's for a
@@ -3578,11 +3594,21 @@ public class AgentLoop {
      */
     private Runnable watch(AgentContext context, LiveCall call) {
         Object turn = new Object();
+        boolean[] toldLong = {false};
         showLive(context, call.shown());
         ScheduledFuture<?> beat = HEARTBEAT_SCHEDULER.scheduleAtFixedRate(() -> {
             synchronized (turn) {
                 LiveCall.Shown shown = call.shown();
                 if (!shown.ended()) showLive(context, shown);
+                if (!shown.ended() && !toldLong[0]
+                        && ((Number) shown.data().get("elapsedMs")).longValue() >= longCallMs) {
+                    toldLong[0] = true;
+                    try {
+                        context.chat().longCall(call);
+                    } catch (RuntimeException e) {
+                        log.warn("Task {}: a long call could not be told: {}", context.taskId(), e.getMessage());
+                    }
+                }
             }
         }, liveEveryMs, liveEveryMs, TimeUnit.MILLISECONDS);
         return () -> {

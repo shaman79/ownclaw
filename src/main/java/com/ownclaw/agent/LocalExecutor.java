@@ -535,8 +535,7 @@ public class LocalExecutor {
         // time (AgentContext#msSinceLastProgress), so neither a generation that runs for minutes
         // nor the model loading and reading a long prompt, sending nothing, is taken for a stall;
         // a Stop ends the call -- mid-reply, or before the model has sent anything -- rather than
-        // when the model finishes; the owner is shown the reply as it grows; and a reply that has
-        // become a loop is ended (LiveCall).
+        // when the model finishes; and the owner is shown the reply as it grows (LiveCall).
         // At the task's thinking effort: at low the local model answers without reasoning first,
         // on every turn of the delegation.
         LlmRequestConfig request = new LlmRequestConfig(null, null, !nativeTools, specs)
@@ -589,11 +588,12 @@ public class LocalExecutor {
                         continue;
                     }
                 }
-                // A reply that had become a loop was ended: the delegation fails, as it does on any
-                // failed call, and its work goes back to the model that delegated it -- the cloud's,
-                // unless the task runs on the local model. The owner is told so in the chat.
-                if (e instanceof RepeatedOutput looped) {
-                    parentContext.chat().repeated(looped, live,
+                // A reply that ran on until it filled the window ended there: the delegation fails,
+                // as it does on any failed call, and its work goes back to the model that delegated
+                // it -- the cloud's, unless the task runs on the local model. The owner, who watched
+                // it grow, is told why it stopped.
+                if (e instanceof OutputTruncated cut && cut.replyFilledTheWindow()) {
+                    parentContext.chat().ranOn(cut, live,
                             parentContext.options().localOnly() || parentContext.onLocal()
                                     ? "the delegation has failed" : "the cloud model takes over");
                 }
@@ -602,11 +602,9 @@ public class LocalExecutor {
                 String msg = String.valueOf(e.getMessage());
                 // After a private read the error can quote it -- a tool-call parse error echoes
                 // the model's raw output -- so then neither the cloud nor the log gets the
-                // message, only its type. The messages of OutputTruncated and RepeatedOutput are
-                // written by the code (a limit and its size; figures of the repeated text), nothing
-                // of the reply, so they are shown whatever was read.
-                if (parentContext.localTierReadPrivate()
-                        && !(e instanceof OutputTruncated || e instanceof RepeatedOutput)) {
+                // message, only its type. The message of OutputTruncated is written by the code (a
+                // limit and its size), nothing of the reply, so it is shown whatever was read.
+                if (parentContext.localTierReadPrivate() && !(e instanceof OutputTruncated)) {
                     String kept = e.getClass().getSimpleName()
                             + " (its text is kept out: this delegation had read private data)";
                     log.error("Local LLM call failed during delegation turn {}: {}", turn, kept);

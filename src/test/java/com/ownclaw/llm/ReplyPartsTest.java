@@ -87,20 +87,18 @@ class ReplyPartsTest {
         var stream = OllamaStreamingTest.line("", "Two and ") + OllamaStreamingTest.line("", "two.")
                 + OllamaStreamingTest.last("stop", 26, 12);
         var http = OllamaStreamingTest.ollama(stream);
-        var looped = new RepeatedOutput("ollama", "the local model repeated the same 300 characters 4 times");
+        // What a task's hook throws while a reply streams: Stop, pressed mid-reply.
+        var stop = new com.ownclaw.core.TaskCancellationService.TaskCancelledException("t1");
         LlmProgress hook = new LlmProgress() {
             @Override public void onProgress() { }
-            @Override public void received(Part part, String text) { throw looped; }
+            @Override public void received(Part part, String text) { throw stop; }
         };
 
-        var thrown = assertThrows(RepeatedOutput.class, () -> OllamaStreamingTest.provider(OllamaStreamingTest.config(), http)
-                .chat(OllamaStreamingTest.ASK, new LlmRequestConfig(null, null, false).withProgress(hook)));
+        var thrown = assertThrows(com.ownclaw.core.TaskCancellationService.TaskCancelledException.class,
+                () -> OllamaStreamingTest.provider(OllamaStreamingTest.config(), http)
+                        .chat(OllamaStreamingTest.ASK, new LlmRequestConfig(null, null, false).withProgress(hook)));
 
-        assertSame(looped, thrown, "not wrapped, not replaced");
-        assertEquals("[ollama] the local model repeated the same 300 characters 4 times", thrown.getMessage());
-        assertEquals("the local model repeated the same 300 characters 4 times", thrown.seen());
-        assertFalse(thrown.isRetryable() || thrown.unreachable() || thrown.connectionFailed(),
-                "a loop is no failure of the provider: nothing retries it, and the task does not move off it");
+        assertSame(stop, thrown, "not wrapped, not replaced");
         assertEquals(http.opened.get(), http.closed.get(), "the stream is closed behind it");
     }
 }

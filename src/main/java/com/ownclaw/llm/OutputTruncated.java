@@ -27,7 +27,7 @@ public final class OutputTruncated extends LlmException {
      *               before any reply
      */
     public OutputTruncated(String provider, Limit limit, Integer tokens, LlmResponse reply) {
-        super(provider, describe(limit, tokens), 0, null, reply);
+        super(provider, describe(limit, tokens, reply), 0, null, reply);
         this.limit = limit;
         this.tokens = tokens;
     }
@@ -37,7 +37,30 @@ public final class OutputTruncated extends LlmException {
     /** The limit's size in tokens, or null when the provider does not say what it is. */
     public Integer tokens() { return tokens; }
 
-    private static String describe(Limit limit, Integer tokens) {
+    /**
+     * Whether the reply filled the context window, not the request: the request was read whole,
+     * with room to spare -- under half the window, or shorter than the reply that came of it -- and
+     * the reply ran on until the window was full: a local generation, which is sent no output limit,
+     * that did not stop. Nothing of this application ends a reply for its length or for repeating,
+     * so this is where a runaway ends. Folding the request makes room only for the reply to run on
+     * again, each round a whole window of generation; and it is no conversation too long for the
+     * window, which a new chat would answer.
+     */
+    public boolean replyFilledTheWindow() {
+        return filledByReply(limit, tokens, reply());
+    }
+
+    private static boolean filledByReply(Limit limit, Integer tokens, LlmResponse reply) {
+        if (limit != Limit.CONTEXT_WINDOW || reply == null || tokens == null) return false;
+        int read = reply.billedInputTokens();
+        return read > 0 && (read < tokens / 2 || reply.completionTokens() > read);
+    }
+
+    private static String describe(Limit limit, Integer tokens, LlmResponse reply) {
+        if (filledByReply(limit, tokens, reply)) {
+            return String.format(Locale.ROOT, "the reply ran on until it filled the model's %,d-token context "
+                    + "window, from a request of %,d tokens", tokens, reply.billedInputTokens());
+        }
         return switch (limit) {
             case MAX_OUTPUT -> tokens == null
                     ? "the reply reached the model's maximum output and was cut off"

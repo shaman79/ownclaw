@@ -230,14 +230,12 @@ final class ContextFit {
     }
 
     /**
-     * Whether the reply filled the window, not the request: one of less than half the window was
-     * read whole, and the reply ran on until the window was full -- a local generation with no
-     * output limit. Folding the request then makes room for a reply that runs on again, each
-     * round a whole window of generation, so the task ends as before.
+     * Whether the reply filled the window, not the request ({@link com.ownclaw.llm.OutputTruncated#replyFilledTheWindow}):
+     * folding the request makes room only for a reply that runs on again, each round a whole window
+     * of generation, so nothing is folded and the call ends, saying so.
      */
     static boolean replyFilledIt(com.ownclaw.llm.OutputTruncated cut) {
-        return cut.reply() != null && cut.tokens() != null
-                && cut.reply().billedInputTokens() > 0 && cut.reply().billedInputTokens() < cut.tokens() / 2;
+        return cut.replyFilledTheWindow();
     }
 
     /** The size a round aims under, in characters. */

@@ -63,14 +63,15 @@ class LiveCallTaskTest {
             thinking.add("about the second router, so let me look at its configuration once more before I decide ");
             thinking.add("which command to run next. Actually, let me reconsider the whole thing.\n");
         }
-        return SilentOllama.reasons(thinking, "{\"done\": true, \"summary\": \"never reached\"}");
+        return SilentOllama.runsOn(thinking, 900);
     }
 
-    static final String SEEN = "the local model repeated the same 300 characters 4 times, after ";
+    static final String SEEN = "the reply ran on until it filled the model's 262,144-token context window, from a "
+            + "request of 900 tokens";
 
     @Test
-    @DisplayName("a local model that loops in a delegation is ended: the delegation fails, the cloud takes over, and the chat says so")
-    void aLoopingDelegationFailsOver(@TempDir Path tmp) throws Exception {
+    @DisplayName("a local reply that runs on until the window is full ends the delegation: the cloud takes over, and the chat says why")
+    void aRunawayDelegationFailsOver(@TempDir Path tmp) throws Exception {
         var ollama = new SilentOllama(0, loopingReply());
         var rig = new LoopRig(tmp, List.of(NOOP), 600, ollama.provider());
         rig.cloud.think.add(call(AgentAction.DELEGATE, Map.of("goal", "audit both routers")));
@@ -81,29 +82,28 @@ class LiveCallTaskTest {
 
         assertEquals(AgentResult.TerminationReason.COMPLETED, r.terminationReason(), r.response());
         assertEquals("Both routers answer; I checked them myself.", r.response());
-        assertEquals(1, ollama.chats(), "the looping call was ended, not asked again");
-        assertTrue(ollama.closedEveryReply(), "and its stream closed: Ollama stops generating");
+        assertEquals(1, ollama.chats(), "not folded and asked again: a reply that runs on would fill the window again");
+        assertTrue(ollama.closedEveryReply());
         String told = String.join("\n", userParts(rig.cloud.calls("think").get(1)));
         assertTrue(told.contains("Delegation incomplete: Local LLM call failed: [ollama] " + SEEN), told);
-        assertTrue(told.contains("characters of reasoning"), told);
+        assertFalse(told.contains("conversation is longer"), told);
 
-        var note = rows(rig).stream().filter(row -> row.startsWith("🔁")).toList();
+        var note = rows(rig).stream().filter(row -> row.startsWith("⏹️")).toList();
         assertEquals(1, note.size(), rows(rig).toString());
-        assertTrue(note.get(0).startsWith("🔁 Step 1, delegation turn 1: " + SEEN), note.get(0));
-        assertTrue(note.get(0).endsWith(" characters of reasoning. It was repeating itself, so its reply was "
-                + "ended, and the cloud model takes over."), note.get(0));
+        assertTrue(note.get(0).startsWith("⏹️ Step 1, delegation turn 1: " + SEEN + ", after "), note.get(0));
+        assertTrue(note.get(0).endsWith(" characters. It ended there, and the cloud model takes over."), note.get(0));
 
         var frames = live(statuses);
         var turn = frames.stream().filter(f -> "step 1, delegation turn 1".equals(state(f).get("purpose"))).toList();
         assertFalse(turn.isEmpty(), "the delegation's call was shown as it ran: " + frames);
         assertEquals(true, state(turn.get(turn.size() - 1)).get("ended"), "and as it ended");
-        // Mutation: let the delegation go on to its next turn after a loop -> the cloud is never
-        // told, and the script has no reply for the second local call.
+        // Mutation: replyFilledTheWindow false -> the turn is folded and asked again, and the
+        // script has no second reply.
     }
 
     @Test
-    @DisplayName("a task on the local model alone: the step whose reply looped runs nothing, the owner is told, and the step is asked again")
-    void aLoopingStepOnTheLocalModel(@TempDir Path tmp) throws Exception {
+    @DisplayName("a task on the local model alone whose reply runs on until the window is full ends, saying so -- not to start a new chat")
+    void aRunawayStepOnTheLocalModel(@TempDir Path tmp) throws Exception {
         var ollama = new SilentOllama(0, loopingReply(),
                 SilentOllama.says("{\"tool\": \"respond\", \"params\": {\"message\": \"Both routers answer.\"}}"));
         var rig = new LoopRig(tmp, List.of(NOOP), 600, ollama.provider());
@@ -111,17 +111,10 @@ class LiveCallTaskTest {
 
         AgentResult r = rig.turn(session(rig), "audit the routers");
 
-        assertEquals(AgentResult.TerminationReason.COMPLETED, r.terminationReason(), r.response());
-        assertTrue(r.response().contains("Both routers answer."), r.response());
-        assertEquals(2, ollama.chats(), "asked again after the loop");
-        String second = ollama.bodies().get(1);
-        assertTrue(second.contains("Your previous reply never came: the call to the model failed ([ollama] " + SEEN),
-                "the model is told why its step ran nothing: " + second);
-        var note = rows(rig).stream().filter(row -> row.startsWith("🔁")).toList();
-        assertEquals(1, note.size(), rows(rig).toString());
-        assertTrue(note.get(0).startsWith("🔁 Step 1: " + SEEN), note.get(0));
-        assertTrue(note.get(0).endsWith("It was repeating itself, so its reply was ended, and the step ran nothing."),
-                note.get(0));
+        assertEquals(AgentResult.TerminationReason.ERROR, r.terminationReason(), r.response());
+        assertTrue(r.response().contains(SEEN), r.response());
+        assertFalse(r.response().contains("/new"), "a new chat would not help: " + r.response());
+        assertEquals(1, ollama.chats(), "not asked again: it would run on again");
     }
 
     @Test
@@ -157,35 +150,27 @@ class LiveCallTaskTest {
     }
 
     @Test
-    @DisplayName("a cloud reply whose reasoning loops is ended the same way: the step runs nothing, the owner is told, the step is asked again")
-    void aLoopingCloudReply(@TempDir Path tmp) throws Exception {
+    @DisplayName("a cloud reply that thinks the same paragraph 40 times is not ended: its answer is given")
+    void aRepeatingCloudReasoningGoesOn(@TempDir Path tmp) throws Exception {
         var rig = new LoopRig(tmp, List.of(NOOP));
-        String looping = ("Wait, I need to check the configuration again. The interface eth0 has the address 192.0.2.1 "
+        String thought = ("Wait, I need to check the configuration again. The interface eth0 has the address 192.0.2.1 "
                 + "and the gateway is 192.0.2.254, so the route should be fine. But the user asked about the second "
                 + "router, so let me look at its configuration once more before I decide which command to run next. "
                 + "Actually, let me reconsider the whole thing.\n").repeat(40);
         rig.cloud.think.add(c -> {
-            for (int at = 0; at < looping.length(); at += 29) {
+            for (int at = 0; at < thought.length(); at += 29) {
                 c.progress().onProgress();
-                c.progress().received(Part.REASONING, looping.substring(at, Math.min(looping.length(), at + 29)));
+                c.progress().received(Part.REASONING, thought.substring(at, Math.min(thought.length(), at + 29)));
             }
-            return respond("never reached").answer(c);
+            return respond("Both routers answer.").answer(c);
         });
-        rig.cloud.think.add(respond("Both routers answer."));
 
         AgentResult r = rig.turn(session(rig), "audit the routers");
 
         assertEquals(AgentResult.TerminationReason.COMPLETED, r.terminationReason(), r.response());
         assertEquals("Both routers answer.", r.response());
-        String told = String.join("\n", userParts(rig.cloud.calls("think").get(1)));
-        assertTrue(told.contains("Your previous reply never came: the call to the model failed ([anthropic] the "
-                + "cloud model repeated the same 300 characters 4 times, after "), told);
-        var note = rows(rig).stream().filter(row -> row.startsWith("🔁")).toList();
-        assertEquals(1, note.size(), rows(rig).toString());
-        assertTrue(note.get(0).startsWith("🔁 Step 1: the cloud model repeated the same 300 characters 4 times"),
-                note.get(0));
-        assertTrue(note.get(0).endsWith("characters of reasoning. It was repeating itself, so its reply was ended, "
-                + "and the step ran nothing."), note.get(0));
+        assertEquals(1, rig.cloud.calls("think").size(), "asked once: nothing was ended");
+        // Mutation: end a reasoning whose last 300 characters appear 4 times -> the step is asked again.
     }
 
     @Test

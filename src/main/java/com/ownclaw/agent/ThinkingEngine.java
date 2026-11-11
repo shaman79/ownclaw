@@ -97,7 +97,7 @@ public class ThinkingEngine {
 
         // The task's progress hook keeps its stall watchdog from taking a long call for silence,
         // and lets its Stop end it; the call's own keeps what the owner is shown of it while it
-        // runs, and ends a reply that has become a loop (LiveCall).
+        // runs (LiveCall).
         LiveCall live = context.call(provider, mode.local(), context.atStep(null));
         try {
             LlmResponse response;
@@ -208,9 +208,6 @@ public class ThinkingEngine {
                 throw e;
             }
             log.error("ThinkingEngine LLM call failed: {}", e.getMessage());
-            // A reply that had become a loop was ended, and the owner is told, as he is shown the
-            // reply while it runs: a step that goes on for minutes and then runs nothing says why.
-            if (e instanceof RepeatedOutput looped) context.chat().repeated(looped, live, "the step ran nothing");
             return new ThinkResult(unusable("", "Your previous reply never came: the call to the "
                             + "model failed (" + e.getMessage() + "), so nothing was run.",
                     "Continue from where the task stands."), messages, "ERROR: " + e.getMessage(),

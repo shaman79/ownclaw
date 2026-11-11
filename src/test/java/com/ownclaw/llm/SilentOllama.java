@@ -45,6 +45,17 @@ public final class SilentOllama {
         return sb + says(content);
     }
 
+    /**
+     * A reply that reasons, one line of the stream for each of {@code thinking}, and is then ended
+     * by Ollama at the model's 262,144-token window: a request of {@code prompt} tokens, and a reply
+     * that ran on for the rest.
+     */
+    public static String runsOn(java.util.List<String> thinking, int prompt) {
+        var sb = new StringBuilder();
+        for (String piece : thinking) sb.append(OllamaStreamingTest.line("", piece));
+        return sb + OllamaStreamingTest.last("length", prompt, 262_144 - prompt);
+    }
+
     /** Whether every reply body handed out has been closed, however its call ended. */
     public boolean closedEveryReply() {
         return http.opened.get() == http.closed.get();
