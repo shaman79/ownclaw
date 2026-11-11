@@ -97,13 +97,13 @@ public class AgentContext {
      * ({@link #attachmentIds}). One list, so what a skill is given and what is labelled by cannot
      * drift apart: {@link #files} and {@link #pasted} are views of it.
      */
-    private final List<Pasted> attachments = new java.util.ArrayList<>();
+    private final List<Attachment> attachments = new java.util.ArrayList<>();
 
     /**
      * A file sent with this message, as registered: its artifact, and -- for an image the owner
      * pasted, shown to the cloud model -- the image; null for a private file.
      */
-    public record Pasted(Artifact artifact, com.ownclaw.conversation.FileStorageService.PastedImage image) {}
+    public record Attachment(Artifact artifact, com.ownclaw.conversation.FileStorageService.PastedImage image) {}
 
     // ── the task's results, and what may be said about them ──
 
@@ -410,7 +410,7 @@ public class AgentContext {
     public synchronized int fitImages(int maxImages, long maxBytes) {
         int count = 0;
         long bytes = 0;
-        for (Pasted p : pasted()) {
+        for (Attachment p : pasted()) {
             count++;
             bytes += com.ownclaw.llm.LlmMessage.Image.base64Bytes(p.image().bytes());
         }
@@ -719,7 +719,7 @@ public class AgentContext {
         Artifact a = addArtifact("attachment", Map.of("fileId", fileId), Map.of("fileId", fileId),
                 text == null ? "" : text, true,
                 new Artifact.Decision(com.ownclaw.privacy.Label.PRIVATE, why));
-        attachments.add(new Pasted(a, null));
+        attachments.add(new Attachment(a, null));
         return a;
     }
 
@@ -735,17 +735,17 @@ public class AgentContext {
                                                 List<String> why) {
         Artifact a = addArtifact("attachment", Map.of("fileId", image.fileId()), Map.of("fileId", image.fileId()),
                 "", true, new Artifact.Decision(com.ownclaw.privacy.Label.PUBLIC, why));
-        attachments.add(new Pasted(a, image));
+        attachments.add(new Attachment(a, image));
         return a;
     }
 
     /** The private files registered for this task, in order: what makes every result of it PRIVATE. */
     public synchronized List<Artifact> files() {
-        return attachments.stream().filter(p -> p.image() == null).map(Pasted::artifact).toList();
+        return attachments.stream().filter(p -> p.image() == null).map(Attachment::artifact).toList();
     }
 
     /** The images pasted with this message, shown to the cloud model, in order. */
-    public synchronized List<Pasted> pasted() {
+    public synchronized List<Attachment> pasted() {
         return attachments.stream().filter(p -> p.image() != null).toList();
     }
 

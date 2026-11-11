@@ -368,9 +368,11 @@ public final class CloudGateway implements LlmProvider {
             } else {
                 try {
                     CloudImages.Found found = images.copyOf(egress.userId(), image.fileId());
-                    if (found == null) why = "no answer from the image store";
-                    else if (found.copy() == null) why = found.withheld();
-                    else copy = found.copy();
+                    if (found == null || found.copy() == null) {
+                        why = found == null || found.withheld() == null ? "the image store found no copy" : found.withheld();
+                    } else {
+                        copy = found.copy();
+                    }
                 } catch (RuntimeException e) {
                     why = "its copy could not be read (" + e.getClass().getSimpleName() + ")";
                 }

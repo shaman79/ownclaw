@@ -3732,11 +3732,13 @@
             // An image the owner pasted: the cloud model is shown it, at the size it reads.
             if (a.kind === 'pasted image') {
                 item.appendChild(node('div', 'task-trace-line', a.handle + ' your pasted image'
-                        + (a.name != null ? ' "' + a.name + '"' : '') + ' · ' + (a.mediaType || 'image') + ', '
+                        + (a.name != null ? ' "' + a.name + '"' : '') + ' · ' + (a.contentType || 'image') + ', '
                         + a.imageWidth + '×' + a.imageHeight + ' px'));
                 item.appendChild(node('div', 'task-trace-line muted', 'Shown to the cloud model'
-                        + (a.width !== a.imageWidth || a.height !== a.imageHeight ? ' at ' + a.width + '×' + a.height + ' px,'
-                            + ' the size it reads' : '') + ', as it is: the privacy filter reads text, not pictures. '
+                        + (a.width !== a.imageWidth || a.height !== a.imageHeight ? ' at ' + a.width + '×' + a.height
+                            + ' px, the size it reads' : '')
+                        + (a.mediaType && a.mediaType !== a.contentType ? ', as ' + a.mediaType : '')
+                        + ' — not filtered: the privacy filter reads text, not pictures. '
                         + 'Skills were given the file as you pasted it.'));
                 panel.appendChild(item);
                 return;

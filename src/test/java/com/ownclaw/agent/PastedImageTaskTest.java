@@ -137,6 +137,36 @@ class PastedImageTaskTest {
     }
 
     @Test
+    @DisplayName("the task page names the image that went to the cloud, its copy and hash, and the pasted image among the task's files")
+    @SuppressWarnings("unchecked")
+    void theTaskPageShowsIt(@TempDir Path tmp) throws Exception {
+        var rig = new LoopRig(tmp, List.of(LocalModeTest.NOOP));
+        var image = paste(rig, 3840, 2160);
+        rig.cloud.think.add(respond("A router."));
+        AgentResult r = rig.turn(LocalModeTest.session(rig), "what is it?", List.of(image.id()));
+        var page = (Map<String, Object>) new com.ownclaw.interfaces.web.TaskTraceController(
+                new com.ownclaw.observability.TaskTraceService(rig.events), rig.files).trace("u1", r.taskId()).getBody();
+        var calls = (List<Map<String, Object>>) page.get("calls");
+        var sent = (List<Map<String, Object>>) calls.getFirst().get("images");
+        assertEquals(1, sent.size(), String.valueOf(calls));
+        assertEquals("pasted-image-120000.png", sent.getFirst().get("name"), "named for the owner, looked up by its id");
+        assertEquals("image/png", sent.getFirst().get("mediaType"));
+        assertEquals(2576, sent.getFirst().get("width"));
+        assertEquals(16, String.valueOf(sent.getFirst().get("sha256_16")).length());
+        assertEquals(1, ((Map<String, Object>) page.get("totals")).get("images"));
+        var artifact = ((List<Map<String, Object>>) page.get("artifacts")).getFirst();
+        assertEquals("pasted image", artifact.get("kind"));
+        assertEquals("PUBLIC", artifact.get("label"));
+        assertEquals("image/png", artifact.get("contentType"));
+        assertEquals(3840, artifact.get("imageWidth"));
+        assertEquals(2576, artifact.get("width"));
+        // The rows themselves hold the file's id, never its name: the ops API reads them.
+        var rows = rig.jdbc.queryForList("SELECT details FROM events WHERE task_id = ?", String.class, r.taskId());
+        assertTrue(rows.stream().noneMatch(d -> d.contains("pasted-image-120000")), String.valueOf(rows));
+        // Mutation: leave images out of the trace's calls -> the page cannot say an image went.
+    }
+
+    @Test
     @DisplayName("skills are handed the pasted image; it makes no result private -- a private file sent with it still does")
     void notPrivateStillAFile(@TempDir Path tmp) throws Exception {
         var rig = new LoopRig(tmp, List.of());

@@ -3594,6 +3594,7 @@ public class AgentLoop {
         d.put("kind", image != null ? "pasted image" : "private file");
         if (image != null) {
             d.put("shownToCloud", true);
+            d.put("contentType", image.contentType());
             d.put("mediaType", image.mediaType());
             d.put("width", image.width());
             d.put("height", image.height());

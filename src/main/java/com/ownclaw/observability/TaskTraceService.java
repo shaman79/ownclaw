@@ -416,6 +416,7 @@ public class TaskTraceService {
         if (d.hasNonNull("kind")) a.put("kind", d.path("kind").asText());
         if (d.path("shownToCloud").asBoolean(false)) {
             a.put("shownToCloud", true);
+            a.put("contentType", d.path("contentType").asText(null));
             a.put("mediaType", d.path("mediaType").asText(null));
             a.put("width", d.path("width").asInt());
             a.put("height", d.path("height").asInt());
