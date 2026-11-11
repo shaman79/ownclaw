@@ -631,6 +631,17 @@ class DelegationSafetyTest {
         com.ownclaw.privacy.PrivateIndex.normalise(marks.toString());
         LocalExecutor.light(marks.toString());
         assertTrue(System.nanoTime() - start < 5_000_000_000L, "about 90 seconds each before");
+        // Marks outside the first plane, two chars each, and a halfwidth voiced-sound mark that is
+        // a letter modifier until NFKC makes it a combining mark: neither may slip the count.
+        var astral = new StringBuilder("a");
+        for (int i = 0; i < 100_000; i++) astral.appendCodePoint(i % 2 == 0 ? 0x1D185 : 0x1D17B);
+        var halfwidth = new StringBuilder("a");
+        for (int i = 0; i < 100_000; i++) halfwidth.append('\u0334').append('\uFF9E');
+        start = System.nanoTime();
+        com.ownclaw.privacy.PrivateIndex.normalise(astral.toString());
+        LocalExecutor.light(astral.toString());
+        com.ownclaw.privacy.PrivateIndex.normalise(halfwidth.toString());
+        assertTrue(System.nanoTime() - start < 5_000_000_000L, "16 and 22 seconds before");
         assertEquals(com.ownclaw.privacy.PrivateIndex.normalise("Příliš žluťoučký kůň"),
                 com.ownclaw.privacy.PrivateIndex.normalise(java.text.Normalizer.normalize("Příliš žluťoučký kůň",
                         java.text.Normalizer.Form.NFD)), "ordinary text normalises as before");

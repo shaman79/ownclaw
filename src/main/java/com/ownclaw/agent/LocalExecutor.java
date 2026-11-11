@@ -828,7 +828,7 @@ public class LocalExecutor {
         for (var call : calls) {
             var t = ArtifactRef.TOKEN.matcher(String.valueOf(call.params()));
             while (t.find()) {
-                ArtifactRef ref = ArtifactRef.parse(t.group());
+                ArtifactRef ref = ArtifactRef.numberExpression(t.group()) ? null : ArtifactRef.parse(t.group());
                 if (ref != null) out.add(ref.handle());
             }
         }
@@ -845,7 +845,8 @@ public class LocalExecutor {
             var t = ArtifactRef.TOKEN.matcher(s);
             var marked = new StringBuilder();
             while (t.find()) {
-                ArtifactRef ref = ArtifactRef.parse(t.group());
+                // A template's number expression is the template's, shown as written.
+                ArtifactRef ref = ArtifactRef.numberExpression(t.group()) ? null : ArtifactRef.parse(t.group());
                 t.appendReplacement(marked, java.util.regex.Matcher.quoteReplacement(ref == null ? t.group()
                         : TASK_RESULT + ref.handle() + (ref.field() == null ? "" : "." + ref.field()) + "\u27E7"));
             }

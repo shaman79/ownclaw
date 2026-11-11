@@ -588,6 +588,34 @@ class DelegationCallsTest {
     }
 
     @Test
+    @DisplayName("a number template is text on every path: the local model's calls, the cloud's own, and the calls it is shown")
+    void numberTemplatesEverywhere() {
+        String wind = "{{ 3.6 * states('sensor.wind_speed')|float }}";
+        String gust = "{{ 3.6 * states('sensor.wind_gust')|float }}";
+        var ctx = withMail();
+        for (int i = 0; i < 3; i++) {
+            ctx.addArtifact("fetch", Map.of(), Map.of(), "{\"ok\":true}", true,
+                    new Artifact.Decision(com.ownclaw.privacy.Label.PUBLIC, List.of()));
+        }
+        // The shared resolver: the local model's calls and the cloud's own direct calls.
+        var whole = References.resolveInText(Map.of("value_template", gust), ctx.artifacts());
+        assertTrue(whole.ok(), whole.reason());
+        assertEquals(gust, whole.params().get("value_template"));
+        var inside = References.resolveInText(Map.of("content", "state: \"" + gust + "\""), ctx.artifacts());
+        assertTrue(inside.ok(), inside.reason());
+        // The calls the local model is shown keep the template as written, and its own copy runs.
+        var ha = new FakeTool("ha_config_file", true, List.of(), p -> ToolResult.success("{\"ok\":true}"));
+        var llm = new Scripted(call("ha_config_file", Map.of("value_template", gust)), done("added the gust sensor"));
+        var outcome = executor(llm, new Usage(), ha).execute(calls("Add a gust sensor the same way.",
+                c("ha_config_file", Map.of("value_template", wind))), ctx, UNCOUNTED);
+        assertTrue(outcome.ok(), outcome.text());
+        assertTrue(llm.calls.get(0).get(2).content().contains("3.6 * states('sensor.wind_speed')"),
+                llm.calls.get(0).get(2).content());
+        assertFalse(llm.calls.get(0).get(2).content().contains("⟦task result"), "no mark for a template");
+        assertEquals(List.of(wind, gust), ha.calls.stream().map(c -> c.get("value_template")).toList());
+    }
+
+    @Test
     @DisplayName("prose that mentions a task result is not the mark: only a result the model was shown as one is refused")
     void proseIsNotTheMark() {
         var smtp = new FakeTool("smtp_send_email", true, List.of(), p -> ToolResult.success("Sent"));

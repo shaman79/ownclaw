@@ -108,11 +108,15 @@ final class References {
                         ArtifactRef inner = ArtifactRef.parse(m.group());
                         if (inner == null || inner.handle() > namespace.size()) continue;   // text
                         Artifact a = namespace.get(inner.handle() - 1);
+                        String value = !a.succeeded() ? null
+                                : inner.field() == null ? a.output() : field(a.output(), inner);
+                        // A template's number expression -- {{ 3.6 * states('x') }} -- that cannot
+                        // be filled is text, as on a call the cloud wrote (resolveExactly).
+                        if (value == null && ArtifactRef.numberExpression(m.group())) continue;
                         if (!a.succeeded()) {
                             return refuse(written, e.getKey(), inner + " in it is a FAILED result — its "
                                     + "output is an error message, not something to pass on.");
                         }
-                        String value = inner.field() == null ? a.output() : field(a.output(), inner);
                         if (value == null) {
                             return refuse(written, e.getKey(), inner + " in it names a field that "
                                     + "result does not have.");
@@ -141,6 +145,12 @@ final class References {
                     }
                     continue;
                 }
+                // A template written as the whole value -- {{ 3.6 * states('x') }} for a
+                // value_template -- is text when it cannot be filled.
+                Artifact whole = ref.handle() > namespace.size() ? null : namespace.get(ref.handle() - 1);
+                String filled = whole == null || !whole.succeeded() ? null
+                        : ref.field() == null ? whole.output() : field(whole.output(), ref);
+                if (filled == null && ArtifactRef.numberExpression(s)) continue;
                 if (ref.handle() > namespace.size()) {
                     return refuse(written, e.getKey(), ref + " refers to a result that does not "
                             + "exist.");
@@ -150,7 +160,7 @@ final class References {
                     return refuse(written, e.getKey(), ref + " is a FAILED result — its output "
                             + "is an error message, not something to pass on.");
                 }
-                String value = ref.field() == null ? a.output() : field(a.output(), ref);
+                String value = filled;
                 if (value == null) {
                     return refuse(written, e.getKey(), ref + " names a field that result does "
                             + "not have.");
