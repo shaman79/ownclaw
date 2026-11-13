@@ -290,8 +290,9 @@ public class SkillSelfRepair {
             if (found.containsKey(e.getKey()) || !e.getValue().succeeded() || !isOwnSkill(e.getKey(), ctx.userId())) {
                 continue;
             }
-            jdbc.update("UPDATE skill_repairs SET cleared_at = datetime('now') WHERE skill_name = ? "
-                    + "AND cleared_at IS NULL AND outcome IN (?, ?)", e.getKey(), UNCHANGED, GAVE_UP);
+            // This account's repairs only: another's record is never touched by this one's runs.
+            jdbc.update("UPDATE skill_repairs SET cleared_at = datetime('now') WHERE skill_name = ? AND user_id = ? "
+                    + "AND cleared_at IS NULL AND outcome IN (?, ?)", e.getKey(), ctx.userId(), UNCHANGED, GAVE_UP);
         }
     }
 
@@ -310,18 +311,29 @@ public class SkillSelfRepair {
         String line;
         synchronized (lock) {
             String code = codeHash(skill);
+            // One repair of a skill at a time, whoever's: a skill's code is global. Another account's
+            // repair under way is not this account's record, and nothing of it is said or added here.
             Map<String, Object> running = row("WHERE skill_name = ? AND outcome = ? ORDER BY id DESC LIMIT 1",
                     skill, RUNNING);
+            if (running != null && !ctx.userId().equals(running.get("user_id"))) {
+                log.info("Task {}: '{}' is being repaired already, for another account; nothing starts.",
+                        ctx.taskId(), skill);
+                event(ctx.userId(), ctx.taskId(), "busy", skill, problem, null, ctx.taskId());
+                return "_🔧 " + skill + " is being repaired already, for another account: no repair starts for "
+                        + "this problem._";
+            }
             if (running != null) {
                 addProblem(id(running), ctx, problem);
-                log.info("Task {}: '{}' is being repaired already (task {}); its problem was added to that repair.",
-                        ctx.taskId(), skill, running.get("repair_task_id"));
+                log.info("Task {}: '{}' is being repaired already (task {}); its problem was added to that repair's "
+                        + "record.", ctx.taskId(), skill, running.get("repair_task_id"));
                 event(ctx.userId(), ctx.taskId(), "added", skill, problem, str(running, "repair_task_id"), ctx.taskId());
                 return "_🔧 " + skill + " is being repaired already (task " + running.get("repair_task_id")
-                        + "): this problem was added to that repair._";
+                        + "): this problem was added to that repair's record; the repair under way does not see "
+                        + "it._";
             }
-            Map<String, Object> last = row("WHERE skill_name = ? AND outcome NOT IN (?, ?, ?) ORDER BY id DESC LIMIT 1",
-                    skill, RUNNING, INTERRUPTED, NOT_STARTED);
+            // What this account's own repairs of the skill did: never another account's report.
+            Map<String, Object> last = row("WHERE skill_name = ? AND user_id = ? AND outcome NOT IN (?, ?, ?) "
+                    + "ORDER BY id DESC LIMIT 1", skill, ctx.userId(), RUNNING, INTERRUPTED, NOT_STARTED);
             boolean noProgress = last != null && last.get("cleared_at") == null
                     && Objects.equals(code, last.get("code_after"))
                     && (UNCHANGED.equals(last.get("outcome")) || GAVE_UP.equals(last.get("outcome")));

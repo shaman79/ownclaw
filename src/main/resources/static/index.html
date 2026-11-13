@@ -3568,8 +3568,10 @@
         rows.forEach(function(r) {
             var item = node('div', 'task-trace-item');
             var text = r.state === 'started' ? 'Started a repair of ' + r.skill + ': ' + (r.problem || '')
-                : r.state === 'added' ? r.skill + ' was being repaired already; this problem was added to that repair: '
-                    + (r.problem || '')
+                : r.state === 'added' ? r.skill + ' was being repaired already; this problem was added to that '
+                    + 'repair\'s record, and the repair under way did not see it: ' + (r.problem || '')
+                : r.state === 'busy' ? r.skill + ' was being repaired already, for another account: no repair '
+                    + 'started for this problem. ' + (r.problem || '')
                 : r.state === 'left' ? 'Not repaired again: the last repair of ' + r.skill
                     + ' changed nothing, so it was left to you. ' + (r.problem || '')
                 : r.state === 'repairing' ? 'This task repairs ' + r.skill + ': ' + (r.problem || '')

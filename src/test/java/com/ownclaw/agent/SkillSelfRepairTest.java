@@ -396,6 +396,8 @@ class SkillSelfRepairTest {
         assertTrue(String.valueOf(rows.get(0).get("added_problems")).contains("task " + second.taskId() + ": " + PROBLEM),
                 String.valueOf(rows.get(0).get("added_problems")));
         assertTrue(second.response().contains(MENU + " is being repaired already"), second.response());
+        assertTrue(second.response().contains("added to that repair's record; the repair under way does not see it"),
+                second.response());
     }
 
     // ───────────────────────── a repair runs ─────────────────────────
