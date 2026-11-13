@@ -2977,8 +2977,7 @@ public class AgentLoop {
             return List.copyOf(request);
         }
         String error = failed.syntaxError().strip();
-        var number = java.util.regex.Pattern.compile("line (\\d{1,9})").matcher(error);
-        Integer line = number.find() ? Integer.parseInt(number.group(1)) : null;
+        Integer line = errorLine(error);
         String[] errorLines = error.split("\n");
         String kind = errorLines[errorLines.length - 1].strip()
                 .replaceFirst("^Sorry: ", "")
@@ -3001,6 +3000,23 @@ public class AgentLoop {
                 .append("```requirements fence as asked.");
         request.add(LlmMessage.user(turn.toString()));
         return List.copyOf(request);
+    }
+
+    /**
+     * The line of skill.py a syntax error is at, as Python names it: in a traceback's
+     * {@code File "skill.py", line N}, or in py_compile's one-line form "... (skill.py, line N)";
+     * only without either, the first "line N" in it. The first "line N" used to be taken, and
+     * py_compile's IndentationError -- "expected an indented block after 'if' statement on line 4
+     * (skill.py, line 5)" -- names the block's line before its own: the repair was told and shown
+     * line 4, which is not wrong.
+     */
+    static Integer errorLine(String syntaxError) {
+        for (String pattern : List.of("File \"skill\\.py\", line (\\d{1,9})", "\\(skill\\.py, line (\\d{1,9})\\)",
+                "line (\\d{1,9})")) {
+            var m = java.util.regex.Pattern.compile(pattern).matcher(syntaxError);
+            if (m.find()) return Integer.parseInt(m.group(1));
+        }
+        return null;
     }
 
     /**
