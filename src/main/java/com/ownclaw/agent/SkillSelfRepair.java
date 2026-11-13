@@ -439,7 +439,7 @@ public class SkillSelfRepair {
             if (running != null && !ctx.userId().equals(running.get("user_id"))) {
                 log.info("Task {}: '{}' is being repaired already, for another account; nothing starts.",
                         ctx.taskId(), skill);
-                event(ctx.userId(), ctx.taskId(), "busy", skill, problem, null, ctx.taskId());
+                event(ctx.userId(), ctx.taskId(), "another", skill, problem, null, ctx.taskId());
                 return "_🔧 " + skill + " is being repaired already, for another account: no repair starts for "
                         + "this problem._";
             }
