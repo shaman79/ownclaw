@@ -469,17 +469,19 @@ public class SkillSelfRepair {
         Declared declared = Declared.of(tool);
         boolean debug = tool != null && tool.inputSchema() != null && tool.inputSchema().containsKey("debug");
         String taskId = UUID.randomUUID().toString().substring(0, 8);
+        // A repair of work the cloud never read is local only as well; one that may use the cloud is
+        // never handed what a local-only repair wrote.
+        boolean localOnly = ctx.options() != null && ctx.options().localOnly();
         String goal = goal(skill, ctx.originalMessage(), Instant.ofEpochMilli(ctx.startTimeMs()), zone, ctx.taskId(),
-                f.what(), f.calls(), declared, debug, previous);
+                f.what(), f.calls(), declared, debug, previous, localOnly);
         // Stored and sent: no vault value goes either way, as nothing stored for display does.
         goal = Redactor.scrubVault(goal, ctx.secretValues()).text();
         long id = insertReturningId("""
                 INSERT INTO skill_repairs (user_id, skill_name, trigger_task_id, trigger_message, trigger_at,
-                    repair_task_id, problem, goal, side_effects, code_before, outcome, previous_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    repair_task_id, problem, goal, side_effects, code_before, outcome, previous_id, local_only)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, ctx.userId(), skill, ctx.taskId(), ctx.originalMessage(), startedAt(ctx), taskId, problem, goal,
-                declared.sideEffectsText(), code, RUNNING, previous == null ? null : id(previous));
-        boolean localOnly = ctx.options() != null && ctx.options().localOnly();
+                declared.sideEffectsText(), code, RUNNING, previous == null ? null : id(previous), localOnly ? 1 : 0);
         var job = new Job(id, skill, taskId, declared, localOnly);
         log.info("Task {}: '{}' did not do its whole job -- self-repair {} started as task {}.", ctx.taskId(), skill,
                 id, taskId);
@@ -503,7 +505,8 @@ public class SkillSelfRepair {
      * whether the skill has side effects.
      */
     static String goal(String skill, String message, Instant at, ZoneId zone, String triggerTaskId, List<String> what,
-                       List<Artifact> calls, Declared declared, boolean debug, Map<String, Object> previous) {
+                       List<Artifact> calls, Declared declared, boolean debug, Map<String, Object> previous,
+                       boolean localOnly) {
         boolean runnable = declared.runnable();
         var sb = new StringBuilder();
         sb.append("Repair the skill '").append(skill).append("'. This is a self-repair: OwnClaw started it by itself, ")
@@ -530,7 +533,12 @@ public class SkillSelfRepair {
               .append(json(a.written())).append(". Its ").append(a.succeeded() ? "output" : "error")
               .append(", whole:\n").append(a.output()).append('\n');
         }
-        if (previous != null) {
+        if (previous != null && !localOnly && previous.get("local_only") instanceof Number n && n.intValue() != 0) {
+            // Written by the local model in a repair the cloud never read: it stays on this machine.
+            sb.append("\nThe previous self-repair of this skill (task ").append(previous.get("repair_task_id"))
+              .append(") changed its code, and the problem came back. It ran on the local model only, so its ")
+              .append("report stays on this machine.\n");
+        } else if (previous != null) {
             sb.append("\nThe previous self-repair of this skill (task ").append(previous.get("repair_task_id"))
               .append(") changed its code, and the problem came back. Its report:\n")
               .append(previous.get("report")).append('\n');

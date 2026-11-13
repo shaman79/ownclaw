@@ -200,6 +200,40 @@ class SelfRepairReviewTest {
         assertEquals(row.get("code_before"), row.get("code_after"));
     }
 
+    // F3: a local-only repair's report went into the next repair's goal, which went to the cloud.
+    @Test
+    @DisplayName("F3: a local-only repair's report is never handed to a repair that may use the cloud")
+    void localOnlyReportStaysLocal(@TempDir Path tmp) throws Exception {
+        var local = LocalModeTest.localModel();
+        fix = new Fix(tmp, null, registry -> null, local);
+        fix.fixedOutput = DEGRADED;
+        fix.rig.queue.start();
+        local.think.add(LoopRig.call(MENU, java.util.Map.of()));
+        local.think.add(problems("Cafe Two's menu could not be read.", List.of(java.util.Map.of("tool", MENU, "what", PROBLEM))));
+        local.think.add(LoopRig.call(AgentAction.SKILL_CREATE, java.util.Map.of("name", MENU, "description", "retry",
+                "parameters", "{}")));
+        local.codegen.add(SkillCodegenTest.finished(SkillCodegenTest.module("# v2")));
+        local.think.add(respond("Changed headers. LOCAL-ONLY-MARKER-7731 was in what I read."));
+        fix.rig.loop.executeFull("u1", TASK, true, null, List.of(), null, null,
+                new com.ownclaw.conversation.ChatOptions("free", null));
+        var first = fix.ended(fix.lastId());
+        assertEquals("unverified", first.get("outcome"));
+        assertEquals(1, ((Number) first.get("local_only")).intValue());
+
+        // The next run is on the cloud (the default): the problem again, and a repair that may use it.
+        fix.scriptMenu(true);
+        fix.rig.cloud.think.add(respond("Nothing more."));
+        fix.unattended(TASK);
+        var second = fix.ended(fix.lastId());
+        assertEquals(0, ((Number) second.get("local_only")).intValue());
+        assertEquals(first.get("id"), second.get("previous_id"), "it follows on from the local-only repair");
+        String goal = (String) second.get("goal");
+        assertFalse(goal.contains("LOCAL-ONLY-MARKER-7731"), goal);
+        assertTrue(goal.contains("It ran on the local model only, so its report stays on this machine."), goal);
+        assertTrue(fix.rig.cloud.calls.stream().noneMatch(c -> String.join("\n", LoopRig.userParts(c))
+                .contains("LOCAL-ONLY-MARKER-7731")), "sent to the cloud");
+    }
+
     // F4: repair records were looked up by skill name alone: one account was told another's report.
     @Test
     @DisplayName("F4: another account's repair that changed nothing neither stops this account's repair nor is told to it")
