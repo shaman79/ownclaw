@@ -37,7 +37,7 @@ class SkillCodeAsWrittenTest {
     }
 
     @Test
-    @DisplayName("fixing a skill kept no copy of: skill.py with every known value replaced wherever it stands -- inside a longer word, and short -- nothing learned; put back, it is skill.py")
+    @DisplayName("fixing a skill kept no copy of: skill.py with every known value replaced wherever it stands -- inside a longer word, and short; put back, it is skill.py")
     void aFixWithoutACopy(@TempDir Path tmp) throws Exception {
         var rig = new LoopRig(tmp, List.of());
         var spec = backupSpec();
@@ -166,7 +166,7 @@ class SkillCodeAsWrittenTest {
     }
 
     @Test
-    @DisplayName("the code pass: every known value wherever it stands -- as written and as Python escapes it -- a short one as a word; secrets removed; nothing learned; a placeholder kept only in the code as written, and only one the table knows")
+    @DisplayName("the code pass: every known value wherever it stands -- as written and as Python escapes it -- a short one as a word; secrets removed; what the table does not know replaced and learned, as anywhere; a placeholder kept only in the code as written, and only one the table knows")
     void theCodePass() {
         var r = new Redactor(null);
         var tally = new Redactor.Tally();
@@ -188,9 +188,9 @@ class SkillCodeAsWrittenTest {
         assertEquals(r.restore("u1", out.replace("D = '<ssid_3>'", "D = 'Example Guest\\'s WiFi'")),
                 code.replace("hunter2hunter2", "«secret removed»").replace("password = 'hunter2hunter2'",
                         "password = '«secret removed»'"), "put back, the code as it was");
-        assertTrue(out.contains("J = 'admin@example.com'"), "an address the table does not know is the code's own: " + out);
+        assertTrue(out.contains("J = '<email_1>'"), "an address the table did not know is replaced, as anywhere: " + out);
         assertEquals("write to <email_1>", r.filter("u1", "write to admin@example.com", Map.of(), new Redactor.Tally()),
-                "and was not learned from it: the first address the table learns");
+                "and learned: the same placeholder from then on");
         String asWritten = r.filterCode("u1", "G = '<ssid_1>'\nH = '<ssid_77>'\n", Map.of(), new Redactor.Tally(), true);
         assertTrue(asWritten.startsWith("G = '<ssid_1>'\nH = '<text_"), "the code as written keeps the placeholders the table knows: " + asWritten);
         // Mutation: replace known values only as words -> "/tmp/ExampleHome5G_backup" in clear.

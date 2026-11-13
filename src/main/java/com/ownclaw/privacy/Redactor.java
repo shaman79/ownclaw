@@ -343,11 +343,10 @@ public final class Redactor {
      * A skill's code holds the values in its literals, where they were put back, and a run's output
      * prints them inside paths and names: the filter of text replaces a value only as a word, so one
      * inside a longer word, or a short one known only by the name written before it, went out in
-     * clear. In code -- CODE and CODE_AS_WRITTEN -- nothing is learned: what it holds that the table
-     * does not know is the model's or the owner's own writing, and a word of it learned as an
-     * identifier would be replaced in every text from then on; a run's output (OUTPUT) is text, and
-     * an address or a number in it is learned and replaced as in any. A placeholder's shape is given
-     * one of its own (TEXT), except in CODE_AS_WRITTEN where the table knows it. The text is never
+     * clear. Every finding the detectors make is replaced and learned as anywhere -- in code too: an
+     * address, a number or a key in skill.py that the table does not know is the user's all the
+     * same. A placeholder's shape is given one of its own (TEXT), except in CODE_AS_WRITTEN where
+     * the table knows it. The text is never
      * filtered in pieces: split at each declared text, a part's detectors saw only fragments -- an
      * address, an IBAN or a token cut at every "0" went out whole.
      */
@@ -381,14 +380,19 @@ public final class Redactor {
         var found = new ArrayList<Finding>();
         for (Finding f : find(s, table.named())) {
             Declared in = within(stretches, f.start(), f.end());
-            boolean inCode = in == Declared.CODE || in == Declared.CODE_AS_WRITTEN;
-            // In code an identifier is replaced only as one the table knows, by the pass over every
-            // form a value takes there, longest first -- {{ExampleNet}} in an f-string whole, not the
-            // {ExampleNet} inside it -- and is never learned. What the text names outside the code is
-            // learned first, as the filter learns it, so a value the same part names -- a
-            // specification and the code it fixes -- is known inside the code.
-            if (inCode && f.kind() != null && f.kind() != Kind.TEXT) continue;
-            if (!inCode && f.kind() != null && f.kind() != Kind.TEXT) table.placeholder(f.kind(), f.valueIn(s));
+            boolean identifier = f.kind() != null && f.kind() != Kind.TEXT;
+            // In code, an identifier the table knows is left to the pass over every form a value
+            // takes there, longest first -- {{ExampleNet}} in an f-string whole, not the {ExampleNet}
+            // inside it. Every other finding is replaced, and learned, as the filter does anywhere:
+            // an address, a number or a key the table does not know went out in clear from skill.py
+            // when code was taken for the model's own writing.
+            if (identifier && (in == Declared.CODE || in == Declared.CODE_AS_WRITTEN)
+                    && table.knows(f.kind(), f.valueIn(s))) {
+                continue;
+            }
+            // Learned first, so a value the same part names -- a specification and the code it
+            // fixes -- is known inside the code.
+            if (identifier) table.placeholder(f.kind(), f.valueIn(s));
             found.add(f);
         }
         Map<String, String> known = stretches.isEmpty() ? Map.of() : table.byValue();

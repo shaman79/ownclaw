@@ -100,4 +100,52 @@ class GatewaySecurityReviewTest {
         assertTrue(EgressContext.HandedOut.echoes("x  \ny", "x"));
         assertFalse(EgressContext.HandedOut.echoes("x  y\n", "x"));
     }
+
+    static final String SKILL_PY = String.join("\n",
+            "import smtplib",
+            "HOST = '10.20.30.40'",
+            "PUBLIC = '203.0.113.40'",
+            "MAILTO = 'someone.else@example.org'",
+            "GW_MAC = '00:00:5e:00:53:01'",
+            "PHONE = '+420 601 234 567'",
+            "IBAN = 'CZ65 0800 0000 1920 0014 5399'",
+            "CARD = '4111 1111 1111 1111'",
+            "def run(params):",
+            "    return {'output': HOST}",
+            "");
+
+    @Test
+    @DisplayName("round 4: skill code declared CODE or as written is filtered at least as main filters it -- every identifier the table does not know replaced and learned")
+    void codeLosesNothingMainReplaced() {
+        String request = "Fix this skill:\n```python\n" + SKILL_PY + "```\n";
+        String asMain = new Redactor(null).filter("u1", request, Map.of(), new Redactor.Tally());
+        for (var kind : List.of(Redactor.Declared.CODE, Redactor.Declared.CODE_AS_WRITTEN)) {
+            var r = new Redactor(null);
+            String sent = r.filter("u1", request, Map.of(), new Redactor.Tally(), Map.of(SKILL_PY, kind));
+            assertEquals(asMain, sent, kind + ": as main sends it");
+            for (String id : List.of("someone.else@example.org", "00:00:5e:00:53:01", "601 234 567", "0800 0000 1920",
+                    "4111 1111 1111 1111")) {
+                assertFalse(sent.contains(id), kind + ": " + id + " in clear: " + sent);
+            }
+            assertTrue(r.count("u1", "mail someone.else@example.org", Map.of()).identifiersReplaced() > 0, "learned");
+        }
+        // Mutation: skip every identifier finding inside code -> the address, the MAC, the number, the IBAN
+        // and the card go out in clear.
+    }
+
+    @Test
+    @DisplayName("round 4: a skill read's code through the real gateway: an address and a number in it replaced, as without the declaration")
+    void aSkillReadsCode() {
+        String code = "import smtplib\nTO = 'someone.else@example.org'\nPHONE = '+420 601 234 567'\n"
+                + "def run(params):\n    return {'output': TO}\n";
+        String read = "Skill 'mailer'\n\n--- skill.py ---\n" + code + "\n--- SKILL.yaml ---\nname: mailer\n";
+        for (var declared : List.of(Map.<String, Redactor.Declared>of(), Map.of(code, Redactor.Declared.CODE))) {
+            var p = new Script();
+            var gw = new CloudGateway(p, p, config(), x -> { }, null, new Redactor(null));
+            p.next.add("ok");
+            gw.chat(List.of(LlmMessage.user("Result of skill read:\n" + read)), plain(declaring(declared)));
+            String sent = p.calls.getLast().getFirst().content();
+            assertFalse(sent.contains("someone.else@example.org") || sent.contains("601 234 567"), declared + ": " + sent);
+        }
+    }
 }
