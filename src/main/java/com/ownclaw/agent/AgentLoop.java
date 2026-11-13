@@ -2923,6 +2923,13 @@ public class AgentLoop {
                         }
                         enhanced.put("requirements", writing.restored(cloudRequirements));
                     }
+                    // Whatever named them -- the reply, or the planner's call, its values put back as
+                    // text -- the requirements are plain ones or the skill is not made.
+                    String notPlain = SkillManager.requirementsRefusal(str(enhanced, "requirements"));
+                    if (notPlain != null) {
+                        log.error("Skill '{}': its requirements are not plain ones", name);
+                        return Codegen.failed("the requirements for '" + name + "' were not taken: " + notPlain);
+                    }
                     return new Codegen(enhanced, null, code);
                 }
                 case SYNTAX_ERROR, DROPS_CODE -> { }

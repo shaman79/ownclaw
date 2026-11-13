@@ -325,4 +325,37 @@ class CodegenSecurityReviewTest {
         assertEquals(List.of(), wrong);
         // Mutation: look for the value as written only -> its bytes form, and its escaped forms, go out.
     }
+
+    @Test
+    @DisplayName("round 4: requirements.txt holds plain requirements only, whatever named them -- the reply, or the planner's call with its values put back as text")
+    void requirementsArePlainWhateverTheSource(@TempDir Path tmp) throws Exception {
+        for (String ok : List.of("requests", "requests>=2.31\nparamiko==3.4.0  # ssh\n\n# none else", "requests[socks] >= 2, < 3",
+                "numpy==1.26.*", "Pillow~=10.0")) {
+            assertNull(SkillManager.requirementsRefusal(ok), ok);
+        }
+        for (String bad : List.of("requests\n--index-url https://pypi-mirror.example/simple", "-e git+https://example.com/x.git",
+                "-r other.txt", "x @ https://example.com/x.whl", "x@https://example.com/x.whl",
+                "pkg; os_name == 'nt'", "pkg \\\n--trusted-host example.com", "https://example.com/x.whl", "pkg --hash=sha256:00")) {
+            String why = SkillManager.requirementsRefusal(bad);
+            assertNotNull(why, bad);
+            assertFalse(why.contains("example.com"), "said by its line, never its text: " + why);
+        }
+        // The planner's call names them, the reply none: the code generation refuses them.
+        var rig = new LoopRig(tmp.resolve("planner"), List.of());
+        var spec = spec();
+        spec.put("requirements", "requests\n--index-url https://pypi-mirror.example/simple");
+        rig.cloud.codegen.add(ends("```python\nimport json\n\ndef run(params):\n    return {'output': '', 'success': True}\n```\n"));
+        AgentLoop.Codegen out = rig.loop.generateSkillCode(spec, task());
+        assertNotNull(out.error(), String.valueOf(out.params()));
+        assertTrue(out.error().contains("line 2 is not a plain requirement"), out.error());
+        // And where requirements.txt is written, whoever calls: nothing is written.
+        SkillManager skills = SyntaxCheckTest.manager(tmp.resolve("skills"));
+        var params = new java.util.HashMap<String, Object>(Map.of("name", "pip_probe", "description", "Probes pip.",
+                "parameters", "{}", "code", "import json\n\ndef run(params):\n    return {'output': '', 'success': True}\n",
+                "requirements", "requests\n--index-url https://pypi-mirror.example/simple"));
+        String made = skills.createSkill(params);
+        assertTrue(made.startsWith("ERROR: the requirements for 'pip_probe' were not taken: line 2"), made);
+        assertFalse(Files.exists(tmp.resolve("skills/generated/pip_probe")), "nothing written");
+        // Mutation: check only the reply's requirements fence -> the planner's index URL reaches pip.
+    }
 }

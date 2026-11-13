@@ -276,6 +276,8 @@ public class SkillManager {
         if (syntaxError != null) return "ERROR: Python syntax error:\n" + syntaxError;
 
         String requirements = str(params, "requirements");
+        String notPlain = requirementsRefusal(requirements);
+        if (notPlain != null) return "ERROR: the requirements for '" + name + "' were not taken: " + notPlain;
         boolean requiresNetwork = Boolean.TRUE.equals(params.get("requires_network"));
         boolean hasSideEffects = Boolean.TRUE.equals(params.get("has_side_effects"));
         int timeout = toInt(params.get("timeout"), 30);
@@ -387,6 +389,42 @@ public class SkillManager {
             log.warn("Failed to read skill code for '{}': {}", name, e.getMessage());
             return null;
         }
+    }
+
+    /** One requirement as pip reads a plain one: a package name, its extras, and its version specifiers. */
+    private static final java.util.regex.Pattern PLAIN_REQUIREMENT = java.util.regex.Pattern.compile(
+            "[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?"
+            + "(?:\\[\\s*[A-Za-z0-9._-]+(?:\\s*,\\s*[A-Za-z0-9._-]+)*\\s*\\])?"
+            + "(?:\\s*(?:===|==|!=|<=|>=|~=|<|>)\\s*[A-Za-z0-9.*+!_-]+"
+            + "(?:\\s*,\\s*(?:===|==|!=|<=|>=|~=|<|>)\\s*[A-Za-z0-9.*+!_-]+)*)?");
+
+    /**
+     * Why {@code requirements} -- what requirements.txt would hold, for {@code pip install -r} --
+     * is not taken, or null when every line is a plain requirement or a comment. Whatever wrote it:
+     * the code's reply, or the planner's skill_create, whose arguments come back with the user's
+     * values put back as text -- and a value with a line break, or a line of the model's own, could
+     * add a pip option (an index URL, -e, -r, --trusted-host), a direct reference (name @ URL), an
+     * environment marker or a line continuation. Said by its line's number, never its text.
+     */
+    static String requirementsRefusal(String requirements) {
+        if (requirements == null || requirements.isBlank()) return null;
+        String[] lines = requirements.split("\r\n|\r|\n", -1);
+        for (int i = 0; i < lines.length; i++) {
+            String line = lines[i];
+            // pip's comment: a # at the line's start or after a blank.
+            int hash = -1;
+            for (int j = 0; j < line.length() && hash < 0; j++) {
+                if (line.charAt(j) == '#' && (j == 0 || Character.isWhitespace(line.charAt(j - 1)))) hash = j;
+            }
+            String requirement = (hash >= 0 ? line.substring(0, hash) : line).strip();
+            if (requirement.isEmpty()) continue;
+            if (!PLAIN_REQUIREMENT.matcher(requirement).matches()) {
+                return "line " + (i + 1) + " is not a plain requirement -- a package name, its extras and its "
+                        + "version; pip options, URLs, direct references, environment markers and continued lines "
+                        + "are not taken -- so nothing was written.";
+            }
+        }
+        return null;
     }
 
     /**
