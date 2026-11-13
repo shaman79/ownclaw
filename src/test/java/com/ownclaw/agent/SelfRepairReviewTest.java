@@ -487,6 +487,39 @@ class SelfRepairReviewTest {
         assertEquals(2, fix.told().size(), "the repair's outcome, then left to the owner once: " + fix.told());
     }
 
+    // R2-4 (P11): the evidence kept the trigger's {{n}}, which name other results inside the repair.
+    @Test
+    @DisplayName("R2-4: the evidence gives a call's arguments as they ran, so the repair's re-run reads the same input")
+    void theEvidenceGivesTheArgumentsAsTheyRan(@TempDir Path tmp) throws Exception {
+        var fetched = new java.util.concurrent.CopyOnWriteArrayList<java.util.Map<String, Object>>();
+        fix = new Fix(tmp, skill("page_fetch", false, List.of(), false, fetched,
+                p -> com.ownclaw.agent.tools.ToolResult.success("<html>Cafe Two: Goulash</html>")));
+        fix.rig.queue.start();
+        fix.rig.cloud.think.add(LoopRig.call("page_fetch", java.util.Map.of("url", "https://example.com/two")));
+        fix.rig.cloud.think.add(LoopRig.call(MENU, java.util.Map.of("html", "{{1}}")));
+        fix.rig.cloud.think.add(problems("Done.", List.of(java.util.Map.of("tool", MENU, "what", PROBLEM))));
+        // The repair does as its goal says: runs the skill with the arguments of the call in the evidence,
+        // as the step that hands it over shows them.
+        String[] shown = {null};
+        fix.rig.cloud.think.add(c -> {
+            var thinks = fix.rig.cloud.calls("think");
+            shown[0] = String.join("\n", LoopRig.userParts(thinks.get(thinks.size() - 1)))
+                    + String.join("\n", thinks.get(thinks.size() - 1).messages().stream()
+                    .filter(m -> m.role() == com.ownclaw.llm.LlmMessage.Role.ASSISTANT).map(m -> m.content()).toList());
+            var m = java.util.regex.Pattern.compile("\"arguments\":\\{\"html\":\"([^\"]*)\"").matcher(shown[0]);
+            return LoopRig.call(MENU, java.util.Map.of("html", m.find() ? m.group(1) : "{{1}}")).answer(c);
+        });
+        fix.rig.cloud.think.add(respond("Ran it."));
+        fix.unattended(TASK);
+        var row = fix.ended(fix.lastId());
+        String evidence = String.valueOf(row.get("evidence"));
+        assertFalse(evidence.contains("{{1}}"), evidence);
+        assertTrue(evidence.contains("<html>Cafe Two: Goulash</html>"), evidence);
+        assertFalse(shown[0].contains("\"html\":\"{{1}}\""), "the repair is shown the trigger's reference: " + shown[0]);
+        assertEquals(2, fix.menuCalls.size(), fix.menuCalls.toString());
+        assertEquals(fix.menuCalls.get(0), fix.menuCalls.get(1), "the same input as the call it repairs after");
+    }
+
     // F4: repair records were looked up by skill name alone: one account was told another's report.
     @Test
     @DisplayName("F4: another account's repair that changed nothing neither stops this account's repair nor is told to it")

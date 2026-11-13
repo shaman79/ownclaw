@@ -568,7 +568,8 @@ public class SkillSelfRepair {
         // Stored and sent: no vault value goes either way, as nothing stored for display does.
         var secrets = ctx.secretValues();
         String goal = Redactor.scrubVault(handed.goal(), secrets).text();
-        List<Evidence> evidence = handed.evidence().stream().map(e -> new Evidence(e.what(), e.about(),
+        List<Evidence> evidence = handed.evidence().stream().map(e -> new Evidence(
+                Redactor.scrubVault(e.what(), secrets).text(), scrubbed(e.about(), secrets),
                 Redactor.scrubVault(e.text(), secrets).text(), e.success())).toList();
         long id = insertReturningId("""
                 INSERT INTO skill_repairs (user_id, skill_name, trigger_task_id, trigger_message, trigger_at,
@@ -639,12 +640,14 @@ public class SkillSelfRepair {
                     .append("be said of it: ").append(d).append('\n');
                 continue;
             }
+            // The arguments as they ran, references filled in: a {{1}} of that task's would be another
+            // result in this one. A call that pulled in a PRIVATE result is PRIVATE itself, and never here.
             var about = new LinkedHashMap<String, Object>();
             about.put("task", triggerTaskId);
             about.put("skill", skill);
             about.put("call", i + 1);
-            about.put("arguments", a.written());
-            evidence.add(new Evidence(call + ", called with " + json(a.written()) + " -- it "
+            about.put("arguments", a.resolved());
+            evidence.add(new Evidence(call + ", called with " + json(a.resolved()) + " -- it "
                     + (a.succeeded() ? "reported success" : "FAILED") + "; its " + (a.succeeded() ? "output" : "error"),
                     about, a.output(), a.succeeded()));
             list.append("- ").append(ArtifactRef.handle(evidence.size())).append(": ").append(call)
@@ -1031,6 +1034,18 @@ public class SkillSelfRepair {
                     TextCalls.MAPPER.writeValueAsString(d), 0);
         } catch (Exception e) {
             log.warn("Self-repair could not record '{}' on task {}: {}", state, taskId, e.getMessage());
+        }
+    }
+
+    /** {@code about} with no vault value in it: as JSON, scrubbed, read back; what cannot be read back, without its arguments. */
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> scrubbed(Map<String, Object> about, Map<String, String> secrets) {
+        try {
+            return TextCalls.MAPPER.readValue(Redactor.scrubVault(json(about), secrets).text(), Map.class);
+        } catch (JsonProcessingException unreadable) {
+            var out = new LinkedHashMap<>(about);
+            out.remove("arguments");
+            return out;
         }
     }
 
