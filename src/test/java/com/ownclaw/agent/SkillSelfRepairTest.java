@@ -927,6 +927,36 @@ class SkillSelfRepairTest {
         assertEquals("stopped", row.get("outcome"), String.valueOf(row.get("report")));
     }
 
+    @Test
+    @DisplayName("R4-1: OwnClaw stopping interrupts a repair waiting for the local model: no Stop was pressed, so it stays to be started again")
+    void anInterruptWhileClosingIsNoStop(@TempDir Path tmp) throws Exception {
+        fix = new Fix(tmp);
+        fix.rig.queue.start();
+        fix.scriptMenu(true);
+        fix.rig.cloud.think.add(c -> {
+            fix.repair.closing();
+            // What TaskQueue.stop()'s shutdownNow does to a task waiting for the local lane.
+            var lane = new LocalLane();
+            lane.take(new AgentContext("u1", "other", "a chat holds the local model"));
+            Thread.currentThread().interrupt();
+            lane.take(new AgentContext("u1", "waiting", "the repair"));
+            throw new AssertionError("not reached");
+        });
+        int toldBefore = fix.told().size();
+        fix.unattended(TASK);
+        String repairTask = (String) fix.repairRow(0).get("repair_task_id");
+        long until = System.currentTimeMillis() + 20_000;
+        while (System.currentTimeMillis() < until && fix.rig.jdbc.queryForList(
+                "SELECT 1 FROM events WHERE event_type = 'task_completed' AND task_id = ?", repairTask).isEmpty()) {
+            Thread.sleep(50);
+        }
+        Thread.sleep(300);
+        var row = fix.repairRow(0);
+        assertNull(row.get("stopped_by"), "nobody pressed Stop");
+        assertEquals("running", row.get("outcome"), "told: " + fix.told().subList(toldBefore, fix.told().size()));
+        assertEquals(toldBefore, fix.told().size());
+    }
+
     static List<String> states(Fix fix, String taskId) {
         return fix.rig.jdbc.queryForList("SELECT json_extract(details, '$.state') FROM events WHERE event_type = "
                 + "'self_repair' AND task_id = ? ORDER BY id", String.class, taskId);

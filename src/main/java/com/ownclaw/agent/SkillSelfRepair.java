@@ -328,6 +328,12 @@ public class SkillSelfRepair {
         }
     }
 
+    /** Whether the owner's Stop of this repair is on its record ({@link #setCancellation}). */
+    private boolean stopAskedFor(long id) {
+        Map<String, Object> row = row("WHERE id = ?", id);
+        return row != null && row.get("stopped_by") != null;
+    }
+
     /** OwnClaw is stopping: see {@link #finish}. */
     private volatile boolean closing;
 
@@ -812,8 +818,11 @@ public class SkillSelfRepair {
         // Ended unfinished because OwnClaw is stopping -- a deploy's restart interrupts its calls -- it
         // is no outcome: the record stays 'running', and the next start starts it again (resume). The
         // owner's Stop, while OwnClaw runs, ends it as stopped.
+        // A CANCELLED ending is the owner's only when a Stop was asked for (stopped_by, kept as it is
+        // pressed): OwnClaw stopping interrupts a repair waiting for the local model, and that ends
+        // CANCELLED with nobody having pressed anything.
         if (closing && ended.terminationReason() != TerminationReason.COMPLETED
-                && ended.terminationReason() != TerminationReason.CANCELLED) {
+                && !(ended.terminationReason() == TerminationReason.CANCELLED && stopAskedFor(job.id()))) {
             log.info("Self-repair {} of '{}' was cut off by OwnClaw stopping: it starts again at the next start.",
                     job.id(), job.skill());
             return;
@@ -908,8 +917,10 @@ public class SkillSelfRepair {
      * while it waited, it failed before its loop began -- and is recorded so, and the owner told.
      */
     private void settle(Job job, String userId, AgentResult result, Throwable failure) {
-        // Dropped from the queue by the owner's Stop: stopped, OwnClaw stopping or not.
-        boolean stopped = result != null && result.terminationReason() == TerminationReason.CANCELLED;
+        // Dropped from the queue by the owner's Stop: stopped, OwnClaw stopping or not -- while it stops,
+        // only when a Stop was asked for.
+        boolean stopped = result != null && result.terminationReason() == TerminationReason.CANCELLED
+                && (!closing || stopAskedFor(job.id()));
         // Otherwise not while OwnClaw stops: the record stays running for the next start (finish).
         if (closing && !stopped) return;
         String why;
