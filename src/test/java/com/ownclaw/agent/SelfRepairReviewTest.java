@@ -578,6 +578,42 @@ class SelfRepairReviewTest {
         fix.ended(fix.lastId());
     }
 
+    // R4-4 (Rv4 E): a reference filled in inside a list went inline into the unfoldable evidence step.
+    @Test
+    @DisplayName("R4-4: a delegated exact call whose list argument took a long result by reference still fits, and is named for re-running by handle")
+    void aNestedLongArgumentStillFits(@TempDir Path tmp) throws Exception {
+        String page = "<p>Cafe Two: Goulash 120 Kc, Svickova 150 Kc</p>\n".repeat(6_000);   // ~300,000 chars
+        var fetched = new java.util.concurrent.CopyOnWriteArrayList<java.util.Map<String, Object>>();
+        fix = new Fix(tmp, skill("page_fetch", false, List.of(), false, fetched,
+                p -> com.ownclaw.agent.tools.ToolResult.success(page)));
+        fix.rig.queue.start();
+        fix.rig.cloud.think.add(LoopRig.call("page_fetch", java.util.Map.of("url", "https://example.com/two")));
+        fix.rig.cloud.think.add(LoopRig.call(AgentAction.DELEGATE, java.util.Map.of("calls",
+                List.of(java.util.Map.of("tool", MENU, "params", java.util.Map.of("pages", List.of("{{1}}", "fixed text")))))));
+        fix.rig.cloud.think.add(problems("Done.", List.of(java.util.Map.of("tool", MENU, "what", PROBLEM))));
+        for (int i = 0; i < 12; i++) {
+            fix.rig.cloud.think.add(c -> {
+                var thinks = fix.rig.cloud.calls("think");
+                long chars = thinks.get(thinks.size() - 1).messages().stream()
+                        .mapToLong(m -> m.content() == null ? 0 : m.content().length()).sum();
+                if (chars > 200_000) {
+                    throw new com.ownclaw.llm.OutputTruncated("anthropic",
+                            com.ownclaw.llm.OutputTruncated.Limit.CONTEXT_WINDOW, 100_000, null);
+                }
+                return respond("Read the evidence.").answer(c);
+            });
+        }
+        fix.unattended(TASK);
+        assertFalse(fix.menuCalls.isEmpty(), "the delegated call ran");
+        var row = fix.ended(fix.lastId());
+        assertEquals("Read the evidence.", row.get("report"), "the repair never got a step in: " + row.get("outcome"));
+        String goal = String.valueOf(row.get("goal"));
+        assertTrue(goal.contains("- {{2}}: the value of argument 'pages[0]' of call 1 of 1"), goal);
+        assertTrue(goal.contains("re-run it through delegate's exact 'calls'"), goal);
+        assertTrue(String.valueOf(row.get("evidence")).contains("\"pages\":[\"{{2}}\",\"fixed text\"]"),
+                "the list as written, its filled-in leaf by handle");
+    }
+
     // R2-4 (P11): the evidence kept the trigger's {{n}}, which name other results inside the repair.
     @Test
     @DisplayName("R2-4: the evidence gives a call's arguments as they ran, so the repair's re-run reads the same input")

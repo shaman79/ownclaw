@@ -699,21 +699,12 @@ public class SkillSelfRepair {
             // fit like any result and read with read_result -- and the call's arguments name it by its handle
             // here, so a re-run reads the very same input by reference and nobody retypes it. A call that
             // pulled in a PRIVATE result is PRIVATE itself, and never here.
-            var args = new LinkedHashMap<String, Object>(a.written());
+            // At any depth: a delegated exact call fills references inside a list or an object too.
+            var args = new LinkedHashMap<String, Object>();
+            boolean[] nested = {false};
+            var leaves = new Leaves(triggerTaskId, skill, i + 1, call, evidence, list, nested);
             for (var arg : a.resolved().entrySet()) {
-                Object ran = arg.getValue();
-                if (Objects.equals(a.written().get(arg.getKey()), ran)) continue;   // written as it ran
-                if (!(ran instanceof String text)) {
-                    args.put(arg.getKey(), ran);                                  // structured: as it ran
-                    continue;
-                }
-                evidence.add(new Evidence("the value of '" + arg.getKey() + "' in " + call + ", as it ran (a "
-                        + "reference of that task's, filled in)", Map.of("task", triggerTaskId, "skill", skill,
-                        "call", i + 1, "argument", arg.getKey()), text, true));
-                String handle = ArtifactRef.handle(evidence.size());
-                list.append("- ").append(handle).append(": the value of argument '").append(arg.getKey())
-                    .append("' of ").append(call).append(", as it ran.\n");
-                args.put(arg.getKey(), handle);
+                args.put(arg.getKey(), leaves.byHandle(a.written().get(arg.getKey()), arg.getValue(), arg.getKey(), true));
             }
             var about = new LinkedHashMap<String, Object>();
             about.put("task", triggerTaskId);
@@ -725,6 +716,8 @@ public class SkillSelfRepair {
                     about, a.output(), a.succeeded()));
             list.append("- ").append(ArtifactRef.handle(evidence.size())).append(": ").append(call)
                 .append(a.succeeded() ? ", which reported success: its output." : ", which FAILED: its error.")
+                .append(nested[0] ? " Its arguments name a result inside a list or an object: re-run it through "
+                        + "delegate's exact 'calls', where a reference is filled in at any depth." : "")
                 .append('\n');
         }
         if (previous != null && !localOnly && previous.get("local_only") instanceof Number n && n.intValue() != 0) {
@@ -779,6 +772,48 @@ public class SkillSelfRepair {
         sb.append("5. End with respond: say in a few sentences what was wrong, what you changed, and whether the ")
           .append("check passed, and set 'check' to passed, failed or not_run.\n");
         return new Handover(sb.toString(), List.copyOf(evidence));
+    }
+
+    /**
+     * The string leaves of a call's arguments that a reference filled in -- every one that differs from
+     * what was written at its place, at any depth -- each handed over as a result of its own and
+     * written as its handle there: a fetched page passed by reference inside a list goes to a result,
+     * folded to fit, never into the step's action, which nothing folds.
+     */
+    private record Leaves(String task, String skill, int callNo, String call, List<Evidence> evidence,
+                          StringBuilder list, boolean[] nested) {
+
+        Object byHandle(Object written, Object ran, String path, boolean top) {
+            if (ran instanceof String text) {
+                if (Objects.equals(written, ran)) return written;          // written as it ran
+                evidence.add(new Evidence("the value of '" + path + "' in " + call + ", as it ran (a reference "
+                        + "of that task's, filled in)", Map.of("task", task, "skill", skill, "call", callNo,
+                        "argument", path), text, true));
+                String handle = ArtifactRef.handle(evidence.size());
+                list.append("- ").append(handle).append(": the value of argument '").append(path).append("' of ")
+                    .append(call).append(", as it ran.\n");
+                if (!top) nested[0] = true;
+                return handle;
+            }
+            if (ran instanceof Map<?, ?> map) {
+                Map<?, ?> was = written instanceof Map<?, ?> w ? w : Map.of();
+                var out = new LinkedHashMap<String, Object>();
+                for (var e : map.entrySet()) {
+                    out.put(String.valueOf(e.getKey()), byHandle(was.get(e.getKey()), e.getValue(),
+                            path + "." + e.getKey(), false));
+                }
+                return out;
+            }
+            if (ran instanceof List<?> items) {
+                List<?> was = written instanceof List<?> w && w.size() == items.size() ? w : null;
+                var out = new ArrayList<Object>();
+                for (int k = 0; k < items.size(); k++) {
+                    out.add(byHandle(was == null ? null : was.get(k), items.get(k), path + "[" + k + "]", false));
+                }
+                return out;
+            }
+            return ran;                                                   // a number, a flag, null: as it ran
+        }
     }
 
     /**
