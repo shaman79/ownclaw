@@ -134,6 +134,10 @@ class ReplySeamTest {
                 "cut right after the opener: the code stays off the fence's line");
         assertEquals(opener + "\nimport json\n", ReplySeam.join(opener, "\n```python\nimport json\n"));
         assertEquals(opener + "\nimport json\n", ReplySeam.join(opener, "\nimport json\n"), "the exact continuation");
+        assertEquals(opener + "\nimport json\n", ReplySeam.join(opener, "import json\n"),
+                "the next line, without the line break: code never stands on the fence's own line");
+        assertEquals("```python\nimport json\n", ReplySeam.join("```py", "thon\nimport json\n"),
+                "cut at \"```py\": the beginning of ```python, no fence yet");
         // Mutation: no line break kept -> "```pythonimport json", and the imports are lost to the extraction.
     }
 
@@ -223,17 +227,20 @@ class ReplySeamTest {
     @Test
     @DisplayName("the other readings, one seam at a time: appended, the cut line alone again, begun again higher up, a lead-in before the fence dropped, a bare fence as reopened")
     void otherReadings() {
+        // Parts as the model wrote them: the first cut in "    x = compute(", kept in whole lines.
         String sofar = HEAD + "    total = 0\n    x = compute(";
+        String kept = ReplySeam.wholeLines(sofar);
+        assertEquals(HEAD + "    total = 0\n", kept);
         String higher = "    total = 0\n    x = compute(a, b)\n";
         var read = ReplySeam.readings(List.of(sofar, higher));
         assertEquals(List.of("appended as written"), read.stream().map(ReplySeam.Reading::how).toList(),
                 "the run from a line above read first: appended is the other");
-        assertEquals(sofar + higher, read.get(0).text());
+        assertEquals(kept + higher, read.get(0).text());
         assertEquals(2, read.get(0).part());
         String twice = "```python\nimport json\nimport os\ni";
         assertTrue(ReplySeam.readings(List.of(twice, "import os\nimport re\n")).stream()
-                .anyMatch(r -> r.how().equals("the cut line begun again")
-                        && r.text().equals("```python\nimport json\nimport os\nimport os\nimport re\n")));
+                .anyMatch(r -> r.text().equals("```python\nimport json\nimport os\nimport os\nimport re\n")),
+                "the line read as written again, read as the next line");
 
         String leadIn = "Continuing from where it stopped:\n\n```python\n    x = compute(a, b)\n";
         var lead = ReplySeam.readings(List.of(sofar, leadIn));
@@ -245,17 +252,52 @@ class ReplySeamTest {
         assertTrue(asOpened.stream().anyMatch(r -> r.text().equals(HEAD + "    total = 0\n    x = compute(a, b)\n")
                 && r.how().equals("a bare fence taken as the fence opened again")), asOpened.toString());
 
-        String restated = "x = compute(a, b)\n";
+        String restated = "total = 0\n    x = compute(a, b)\n";
+        assertEquals(HEAD + "    total = 0\n    x = compute(a, b)\n", ReplySeam.first(List.of(sofar, restated)).text(),
+                "the line it was shown written again after its indentation, read first");
         var appended = ReplySeam.readings(List.of(sofar, restated));
-        assertEquals(sofar + restated, appended.get(0).text(), "the restart read first, so appended is the first other");
+        assertEquals(kept + restated, appended.get(0).text(), "the restart read first, so appended is the first other");
 
         // One seam at a time, every other seam read first, and none read twice or as the first reading.
-        var three = ReplySeam.readings(List.of(sofar, higher.stripTrailing(), "\n    return x\n"));
+        var three = ReplySeam.readings(List.of(sofar, higher, "\n    return x\n"));
         assertEquals(2, three.get(0).part());
-        String first = ReplySeam.join(ReplySeam.join(sofar, higher.stripTrailing()), "\n    return x\n");
+        String first = ReplySeam.first(List.of(sofar, higher, "\n    return x\n")).text();
+        assertEquals(HEAD + "    total = 0\n    x = compute(a, b)\n    return x\n", first);
         assertTrue(three.stream().noneMatch(r -> r.text().equals(first)));
         assertEquals(three.size(), three.stream().map(ReplySeam.Reading::text).distinct().count());
         assertEquals(List.of(), ReplySeam.readings(List.of(sofar)), "one part has no seam");
+    }
+
+    @Test
+    @DisplayName("the line a part was cut in decides between the next line and the last line again: two equal lines, a restart from the blank line above")
+    void theCutLinesBeginning() {
+        String written = HEAD + "    lines = []\n    lines.append('')\n    lines.append('')\n    ret";
+        // The next line, which is the last one again: the line it was cut in begins "    ret", not as that line.
+        var parts = List.of(written, "    lines.append('')\n    return lines\n");
+        assertEquals(HEAD + "    lines = []\n    lines.append('')\n    lines.append('')\n    return lines\n",
+                ReplySeam.first(parts).text(), "read as the line again, by the line it was cut in");
+        String cutInTheSecond = HEAD + "    lines = []\n    lines.append('')\n    lines.ap";
+        assertEquals(HEAD + "    lines = []\n    lines.append('')\n    lines.append('')\n    return lines\n",
+                ReplySeam.first(List.of(cutInTheSecond, "    lines.append('')\n    return lines\n")).text(),
+                "read as the next line: it begins as the line cut off did");
+        // A restart from the blank line above the requirements fence, cut in its first line.
+        String reply = HEAD + "    return 1\n```\n\n```requirements\nreq";
+        assertEquals(HEAD + "    return 1\n```\n\n```requirements\nrequests\n```\n",
+                ReplySeam.first(List.of(reply, "\n```requirements\nrequests\n```\n")).text());
+        assertEquals(HEAD + "    return 1\n```\n\n```requirements\nrequests\n```\n",
+                ReplySeam.first(List.of(reply, "\nrequests\n```\n")).text(), "and the exact continuation");
+        // Cut right after the fence line's line break: no line begun, and a fence line twice in a row is never meant.
+        String atALineStart = HEAD + "    return 1\n```\n\n```requirements\n";
+        assertEquals(HEAD + "    return 1\n```\n\n```requirements\nrequests\n```\n",
+                ReplySeam.first(List.of(atALineStart, "\n```requirements\nrequests\n```\n")).text());
+        // The line it was cut in is the first that is not blank after the blank lines dropped with it.
+        String afterBlankLines = HEAD + "    y = 0\n\n    x = 1\n\n\n    ret";
+        assertEquals(HEAD + "    y = 0\n\n    x = 1\n\n\n    return x\n",
+                ReplySeam.first(List.of(afterBlankLines, "\n    x = 1\n\n\n    return x\n")).text(),
+                "the line written again from the blank line above, read by the line it was cut in");
+        assertEquals("    ret", ReplySeam.tailOf(written));
+        assertEquals("", ReplySeam.tailOf("no line break"));
+        // Mutation: no tail -> the second of the equal lines read as the first again, and a line lost.
     }
 
     @Test

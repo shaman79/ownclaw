@@ -107,10 +107,29 @@ final class ReplySeam {
      * @param part  the next part, as the model wrote it (or, cut off too, as it is kept)
      */
     static String join(String sofar, String part) {
+        return join(sofar, part, "");
+    }
+
+    /**
+     * {@link #join(String, String)}, knowing the {@code tail} of the part before: the beginning of
+     * the line it was cut in, which {@link #wholeLines} dropped -- the model wrote the next line
+     * after the text so far beginning so. Where the part could be either the last line again or
+     * the next line -- two equal lines in a row, or a line written again from the blank line above
+     * it -- the reading whose next line begins as the tail does is the one: read without it, an
+     * exact continuation lost one of two {@code report.append("")}, and a restart from the blank
+     * line above the requirements fence lost the requirements. A tail of only blanks tells nothing.
+     */
+    static String join(String sofar, String part, String tail) {
         if (part == null || part.isEmpty()) return sofar == null ? "" : sofar;
         if (sofar == null || sofar.isEmpty()) return part;
         String reopened = inPythonFence(sofar) ? afterReopenedFence(sofar, part) : null;
-        return reopened == null ? joinedAfter(sofar, part, false) : joinedAfter(sofar, reopened, true);
+        return reopened == null ? joinedAfter(sofar, part, false, tail) : joinedAfter(sofar, reopened, true, tail);
+    }
+
+    /** The beginning of the line a part was cut in, which {@link #wholeLines} drops; "" when it drops nothing. */
+    static String tailOf(String text) {
+        String kept = wholeLines(text);
+        return kept.endsWith("\n") ? text.substring(text.lastIndexOf('\n') + 1) : "";
     }
 
     /**
@@ -120,21 +139,54 @@ final class ReplySeam {
      * block anew writes whole lines in it. Joined to the cut line, the line after a comment the
      * model was cut after went into the comment, and the code compiled without it.
      */
-    private static String joinedAfter(String sofar, String next, boolean reopened) {
+    private static String joinedAfter(String sofar, String next, boolean reopened, String tail) {
         if (endsAtALine(sofar)) {
             String shown = shownOf(sofar);
-            // The line break the model writes after the line it was shown, and anything after it.
-            if (beginsWithALineEnd(next)) return shown + next;
+            boolean lineEnd = beginsWithALineEnd(next);
+            // Read on: the line break the model writes after the line it was shown, and what follows
+            // it; or, without one, the next line.
+            String on = lineEnd ? shown + next : sofar + next;
             int k = restartedWhole(shown, next);
-            if (k > 0) return shown + next.substring(k);
-            return sofar + next;
+            if (k == 0) return on;
+            String again = shown + next.substring(k);
+            // Which line follows the one it was shown, read each way, against the line the model was
+            // cut in: where one begins as it did and the other does not, that one.
+            if (tail != null && !tail.isBlank()) {
+                boolean onFits = lineAfter(on, shown.length()).startsWith(tail);
+                boolean againFits = lineAfter(again, shown.length()).startsWith(tail);
+                if (onFits != againFits) return onFits ? on : again;
+            }
+            // A fence line twice in a row is never meant: the second is the first written again.
+            String last = shown.substring(shown.lastIndexOf('\n') + 1).strip();
+            if (last.startsWith("```")) return again;
+            // A part that begins with a line break goes on after the line's end; one that begins
+            // with the end of the text so far writes it again.
+            return lineEnd ? on : again;
         }
         int k = restarted(sofar, next);
         String rest = next.substring(k);
-        if (reopened && k == 0 && !rest.isEmpty() && !rest.startsWith("\n") && !rest.startsWith("\r\n")) {
+        // After a fence opened again, or the fence's own line: what follows begins a line.
+        boolean onTheFence = inPythonFence(sofar) && sofar.substring(sofar.lastIndexOf('\n') + 1).strip().startsWith("```");
+        if ((reopened || onTheFence) && k == 0 && !rest.isEmpty() && !rest.startsWith("\n") && !rest.startsWith("\r\n")) {
             rest = (sofar.contains("\r\n") ? "\r\n" : "\n") + rest;
         }
         return sofar + rest;
+    }
+
+    /**
+     * The first line that is not blank after the one {@code at} ends in {@code text}, without its
+     * line break; "" when none: the line a part was cut in, the blank lines before it being dropped
+     * with it ({@link #wholeLines}).
+     */
+    private static String lineAfter(String text, int at) {
+        int newline = text.indexOf('\n', at);
+        while (newline >= 0) {
+            int end = text.indexOf('\n', newline + 1);
+            String line = text.substring(newline + 1, end < 0 ? text.length() : end);
+            if (!line.isBlank()) return line;
+            newline = end;
+        }
+        return "";
     }
 
     /**
@@ -148,6 +200,8 @@ final class ReplySeam {
         while (true) {
             int start = text.lastIndexOf('\n', end - 1) + 1;
             String line = text.substring(start, end).strip();
+            // A last line cut off at "```py" may be the beginning of "```python": no fence yet.
+            if (end == text.length() && line.equalsIgnoreCase("```py")) return false;
             if (line.startsWith("```")) return isPythonFence(line);
             if (start == 0) return false;
             end = start - 1;
@@ -413,14 +467,27 @@ final class ReplySeam {
     /** The reply written in {@code parts}, every seam read first ({@link #join}), and where its seams are. */
     static Reading first(List<String> parts) {
         var seams = new ArrayList<Integer>();
-        String text = joinFrom(parts.get(0), parts, 1, seams);
+        String text = joinFrom(kept(parts, 0), parts, 1, seams);
         return new Reading(0, "joined", text, toArray(seams));
+    }
+
+    /**
+     * Part {@code i} of {@code parts} as it is joined: in whole lines when a part follows it -- it
+     * was cut off -- and as the model wrote it when it is the last, which ended by itself.
+     */
+    static String kept(List<String> parts, int i) {
+        return i < parts.size() - 1 ? wholeLines(parts.get(i)) : parts.get(i);
     }
 
     /** {@code text} with {@code parts} from {@code from} on joined to it, each seam's place added to {@code seams}. */
     private static String joinFrom(String text, List<String> parts, int from, List<Integer> seams) {
-        for (int j = from; j < parts.size(); j++) {
-            String joined = join(text, parts.get(j));
+        return joinFrom(text, parts, from, parts.size(), seams);
+    }
+
+    /** {@link #joinFrom(String, List, int, List)} of the parts before {@code to} only. */
+    private static String joinFrom(String text, List<String> parts, int from, int to, List<Integer> seams) {
+        for (int j = from; j < to; j++) {
+            String joined = join(text, kept(parts, j), tailOf(parts.get(j - 1)));
             seams.add(seamOf(text, joined));
             text = joined;
         }
@@ -451,7 +518,7 @@ final class ReplySeam {
      * checks read first: one that passes them is kept before a repair is asked for -- a check of
      * the code here, where a repair of a long skill is another generation in parts.
      *
-     * @param parts the parts as the model wrote them, each cut-off one as it is kept ({@link #wholeLines})
+     * @param parts the parts as the model wrote them: every one but the last cut off
      */
     static List<Reading> readings(List<String> parts) {
         int n = parts.size();
@@ -460,18 +527,18 @@ final class ReplySeam {
         // The reply read first, up to each part, and its seams so far.
         String[] before = new String[n];
         var seamsBefore = new ArrayList<List<Integer>>();
-        before[1] = parts.get(0);
+        before[1] = kept(parts, 0);
         seamsBefore.add(List.of());
         seamsBefore.add(List.of());
         for (int i = 2; i < n; i++) {
             var seams = new ArrayList<>(seamsBefore.get(i - 1));
-            before[i] = joinFrom(before[i - 1], parts.subList(0, i), i - 1, seams);
+            before[i] = joinFrom(before[i - 1], parts, i - 1, i, seams);
             seamsBefore.add(seams);
         }
         var seen = new HashSet<String>();
         seen.add(first(parts).text());
         for (int i = 1; i < n; i++) {
-            for (var other : otherReadings(before[i], parts.get(i)).entrySet()) {
+            for (var other : otherReadings(before[i], kept(parts, i), tailOf(parts.get(i - 1))).entrySet()) {
                 var seams = new ArrayList<>(seamsBefore.get(i));
                 seams.add(seamOf(before[i], other.getKey()));
                 String text = joinFrom(other.getKey(), parts, i + 1, seams);
@@ -482,7 +549,7 @@ final class ReplySeam {
     }
 
     /** The other readings of one seam, in order: the text so far with {@code part} joined so, and how. */
-    private static LinkedHashMap<String, String> otherReadings(String sofar, String part) {
+    private static LinkedHashMap<String, String> otherReadings(String sofar, String part, String tail) {
         var out = new LinkedHashMap<String, String>();
         if (!opensWithAFence(part)) out.putIfAbsent(sofar + part, "appended as written");
         boolean fenced = inPythonFence(sofar);
@@ -500,15 +567,16 @@ final class ReplySeam {
         if (fenced) {
             String afterLeadIn = afterFirstPythonFence(sofar, part);
             if (afterLeadIn != null) {
-                out.putIfAbsent(joinedAfter(sofar, afterLeadIn, true), "the lead-in before the fence opened again dropped");
+                out.putIfAbsent(joinedAfter(sofar, afterLeadIn, true, tail),
+                        "the lead-in before the fence opened again dropped");
             }
             int[] first = firstLineNotBlank(part);
             if (first != null && part.substring(first[0], first[1]).strip().equals("```")) {
-                out.putIfAbsent(joinedAfter(sofar, withLineBreak(sofar, part.substring(first[2])), true),
+                out.putIfAbsent(joinedAfter(sofar, withLineBreak(sofar, part.substring(first[2])), true, tail),
                         "a bare fence taken as the fence opened again");
             }
         }
-        out.remove(join(sofar, part));
+        out.remove(join(sofar, part, tail));
         return out;
     }
 

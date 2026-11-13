@@ -3047,8 +3047,8 @@ public class AgentLoop {
                                            AgentContext context) {
         var request = new ArrayList<>(spec);
         boolean any = false;
-        for (String part : parts) {
-            String turn = part.stripTrailing();
+        for (int i = 0; i < parts.size(); i++) {
+            String turn = ReplySeam.kept(parts, i).stripTrailing();
             if (turn.isEmpty()) continue;
             if (any) request.add(LlmMessage.user(CONTINUE));
             request.add(LlmMessage.assistant(turn));
@@ -3124,9 +3124,9 @@ public class AgentLoop {
      * @param text    the reply as the model wrote it, its parts joined (read first): placeholders
      *                where it wrote them, none put back; null when the attempt ends the code
      *                generation
-     * @param parts   its parts as the model wrote them, each cut-off one as it is kept and joined
-     *                -- in whole lines ({@link ReplySeam#wholeLines}); without its trailing
-     *                whitespace, each is what went back to the model as its turn
+     * @param parts   its parts as the model wrote them, every one but the last cut off: each of
+     *                those, in whole lines without its trailing whitespace
+     *                ({@link ReplySeam#wholeLines}), is what went back to the model as its turn
      * @param tokens  their prompt and completion tokens together, for the log
      * @param ended   how the code generation ends, when it ends with this attempt; otherwise null
      * @param onLocal the cloud could not be reached and the task has moved to the local model,
@@ -3136,6 +3136,13 @@ public class AgentLoop {
         static Written ending(Codegen how) {
             return new Written(null, List.of(), 0, how, false);
         }
+    }
+
+    /** {@code parts} and {@code last} after them, as a list of its own. */
+    private static List<String> add(List<String> parts, String last) {
+        var all = new ArrayList<>(parts);
+        all.add(last);
+        return List.copyOf(all);
     }
 
     /**
@@ -3339,9 +3346,8 @@ public class AgentLoop {
                 String text = reply == null || reply.content() == null ? "" : reply.content();
                 if (cut == null) {
                     account(context, local, provider, reply);
-                    parts.add(text);
-                    return new Written(sofar == null ? text : ReplySeam.join(sofar, text), List.copyOf(parts),
-                            tokens, null, false);
+                    return new Written(sofar == null ? text : ReplySeam.join(sofar, text, ReplySeam.tailOf(parts.getLast())),
+                            add(parts, text), tokens, null, false);
                 }
 
                 // Kept in whole lines, the line it was cut in dropped, and sent back without the
@@ -3371,12 +3377,12 @@ public class AgentLoop {
                             "Asking again at low effort · " + label, tokenData(context));
                     continue; // the same request, at low effort
                 }
-                String joined = sofar == null ? kept : ReplySeam.join(sofar, kept);
+                String joined = sofar == null ? kept : ReplySeam.join(sofar, kept, ReplySeam.tailOf(parts.getLast()));
                 if (sofar != null && joined.length() == sofar.length()) {
                     return Written.ending(gotNoFurther(part, cut, sofar));
                 }
                 sofar = joined;
-                parts.add(kept);
+                parts.add(text);
                 var next = new ArrayList<>(asked);
                 next.add(LlmMessage.assistant(kept.stripTrailing()));
                 next.add(LlmMessage.user(CONTINUE));
