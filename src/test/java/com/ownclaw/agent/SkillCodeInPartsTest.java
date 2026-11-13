@@ -453,6 +453,20 @@ class SkillCodeInPartsTest {
         });
         assertTrue(rig.loop.generateSkillCode(spec(), task()).error().startsWith("ERROR: the request for the code of "
                 + "'openwrt_audit' did not fit ("), "the specification itself too long is said as before");
+
+        // A repair carries the code it mends: its first part refused by the window is the code outgrowing it.
+        rig.skills.syntax = code -> code.contains("def broken(:") ? "line 5: invalid syntax" : null;
+        String broken = module("def broken(:\n    pass");
+        rig.cloud.codegen.add(finished(broken));
+        rig.cloud.codegen.add(c -> {
+            throw new OutputTruncated("anthropic", OutputTruncated.Limit.CONTEXT_WINDOW, 1_000_000, null);
+        });
+        assertEquals("ERROR: the code for 'openwrt_audit' outgrew the model's context window: its repair, with the "
+                + ("```python\n" + broken + "\n```\n").length() + " characters of the code it mends, no "
+                + "longer fit ([anthropic] the conversation is longer than the model's 1,000,000-token context window), "
+                + "so nothing was created. A smaller skill fits: one job per skill, or split this one into several.",
+                rig.loop.generateSkillCode(spec(), task()).error());
+        // Mutation: no carried code for a repair -> "the request for the code of 'openwrt_audit' did not fit".
         assertTrue(rig.cloud.codegen.isEmpty());
     }
 

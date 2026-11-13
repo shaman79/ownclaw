@@ -2801,6 +2801,8 @@ public class AgentLoop {
         // What the attempts have brought back: a repair that brings either again has not got past it.
         var triedCode = new java.util.HashSet<String>();
         var seenErrors = new java.util.HashSet<String>();
+        // The characters of code a repair's request carries back: none for the first attempt.
+        int carried = 0;
         for (int attempt = 0; ; attempt++) {
             if (context.isCancelled()) return Codegen.stopped(name);
             if (attempt > 0) {
@@ -2809,20 +2811,25 @@ public class AgentLoop {
                         tokenData(context));
             }
             Written reply = writing.reply(prompt,
-                    (attempt == 0 ? "the code of skill '" : "repairing the code of skill '") + name + "'");
+                    (attempt == 0 ? "the code of skill '" : "repairing the code of skill '") + name + "'", carried);
             // Written from the start on the local model, whose prompt is its own.
             if (reply.onLocal()) return generateSkillCode(originalParams, context);
             if (reply.ended() != null) return reply.ended();
 
-            Checked first = checked(writing, reply.text());
+            Checked first = checked(writing, ReplySeam.first(reply.parts()));
             Checked chosen = first;
             if (first.mendable() && reply.parts().size() > 1) {
                 // Before a repair, which asks for the whole code again -- for a long skill another
                 // generation in parts -- the seams read otherwise, one at a time: each a check here.
                 for (ReplySeam.Reading other : ReplySeam.readings(reply.parts())) {
                     if (context.isCancelled()) return Codegen.stopped(name);
-                    Checked again = checked(writing, other.text());
-                    if (again.outcome() == Checked.Outcome.CHECK_FAILED) break;
+                    Checked again = checked(writing, other);
+                    // A check that could not run ends the code as the first reading's would: no
+                    // repair of the code can mend it, and the next reading's check would fail too.
+                    if (again.outcome() == Checked.Outcome.CHECK_FAILED) {
+                        chosen = again;
+                        break;
+                    }
                     if (again.outcome() == Checked.Outcome.PASSED) {
                         log.info("Skill '{}': its code passes the checks with the seam before part {} read otherwise "
                                 + "-- {} -- not as it was joined", name, other.part(), other.how());
@@ -2867,7 +2874,7 @@ public class AgentLoop {
                     }
                     return new Codegen(enhanced, null);
                 }
-                case SYNTAX_ERROR -> { }
+                case SYNTAX_ERROR, DROPS_CODE -> { }
             }
             String syntaxError = chosen.syntaxError();
             boolean newCode = triedCode.add(code);
@@ -2879,6 +2886,7 @@ public class AgentLoop {
             }
             log.warn("Skill '{}' syntax error (repair {}): {}", name, attempt + 1, syntaxError);
             prompt = repairRequest(spec, reply.parts(), chosen, context);
+            carried = reply.text().length();
             // The attempts before this one never go back: the gateway forgets what it handed out of them.
             writing.forgetAllBut(prompt);
         }
@@ -2895,15 +2903,27 @@ public class AgentLoop {
      *                  {@link Outcome#CHECK_FAILED}; null otherwise
      */
     private record Checked(String asWritten, String text, String code, Outcome outcome, String syntaxError) {
-        enum Outcome { NO_CODE, NO_RUN, REMOVED_SECRET, CHECK_FAILED, SYNTAX_ERROR, PASSED }
+        /**
+         * DROPS_CODE: the code ends at a seam while more code follows it in the reply
+         * ({@link ReplySeam#dropsCode}) -- a reading that would make the skill of the code before
+         * the seam only.
+         */
+        enum Outcome { NO_CODE, NO_RUN, REMOVED_SECRET, CHECK_FAILED, SYNTAX_ERROR, DROPS_CODE, PASSED }
 
-        /** Whether another reading of the seams could mend it: code missing, or not compiling. */
+        /** Whether another reading of the seams could mend it: code missing, in pieces, or not compiling. */
         boolean mendable() {
-            return outcome == Outcome.NO_CODE || outcome == Outcome.NO_RUN || outcome == Outcome.SYNTAX_ERROR;
+            return outcome == Outcome.NO_CODE || outcome == Outcome.NO_RUN || outcome == Outcome.SYNTAX_ERROR
+                    || outcome == Outcome.DROPS_CODE;
         }
     }
 
-    private Checked checked(CodeWriting writing, String asWritten) {
+    private Checked checked(CodeWriting writing, ReplySeam.Reading reading) {
+        String asWritten = reading.text();
+        if (reading.dropsCode()) {
+            String pieces = extractPythonCode(asWritten);
+            return new Checked(asWritten, null, pieces, Checked.Outcome.DROPS_CODE, "line "
+                    + pieces.split("\n", -1).length + ": " + DROPS_CODE);
+        }
         String text = writing.restored(asWritten);
         String code = extractPythonCode(text);
         if (code == null) return new Checked(asWritten, text, null, Checked.Outcome.NO_CODE, null);
@@ -2918,6 +2938,10 @@ public class AgentLoop {
         return new Checked(asWritten, text, code,
                 syntaxError == null ? Checked.Outcome.PASSED : Checked.Outcome.SYNTAX_ERROR, syntaxError);
     }
+
+    /** What a reading whose code ends at a seam while more follows is told as: its "error". */
+    static final String DROPS_CODE = "the code ends where its ```python fence closes, and more code follows it in "
+            + "another block";
 
     /** Text in a placeholder's shape, {@code <kind_n>}: the gateway's, or one the user wrote as text. */
     private static final java.util.regex.Pattern PLACEHOLDER_SHAPE = java.util.regex.Pattern.compile("<[a-z]+_\\d+>");
@@ -2946,6 +2970,11 @@ public class AgentLoop {
             if (any) request.add(LlmMessage.user(CONTINUE));
             request.add(LlmMessage.assistant(turn));
             any = true;
+        }
+        if (failed.outcome() == Checked.Outcome.DROPS_CODE) {
+            request.add(LlmMessage.user("Your reply's code is in pieces: " + failed.syntaxError().strip()
+                    + ". Return the COMPLETE code in ONE ```python fence, and the ```requirements fence as asked."));
+            return List.copyOf(request);
         }
         String error = failed.syntaxError().strip();
         var number = java.util.regex.Pattern.compile("line (\\d{1,9})").matcher(error);
@@ -3109,8 +3138,8 @@ public class AgentLoop {
          *   ends the code. A part of nothing but blanks is one of these: the provider refuses a turn
          *   of only blanks, and there is nothing in it to go on from.</li>
          *   <li>The window: a first part that ran on until the window was full, or a request refused
-         *   as too long for it, as before; after the first, that is where the code outgrew the window
-         *   -- its parts and the request no longer fit -- and is said so.</li>
+         *   as too long for it, as before; after the first, or for a repair's first -- its request
+         *   carries the code it mends -- that is where the code outgrew the window, and is said so.</li>
          *   <li>A refusal, a request the gateway did not send, a failed call, and a cloud that
          *   cannot be reached, each as the first call meets them: a connection that failed is asked
          *   again once; a cloud given up on hands the task to the local model, which writes the
@@ -3121,9 +3150,12 @@ public class AgentLoop {
          * each continuation is said in the chat ({@link TaskChat#continuing}) and logged; and each
          * part's tokens are counted once, against the tier that did the work.
          *
-         * @param what what the first part's call is for, as the owner reads it
+         * @param what    what the first part's call is for, as the owner reads it
+         * @param carried the characters of code the request carries back -- a repair's, the attempt
+         *                it mends; 0 for the first attempt: where its first part does not fit the
+         *                window, the code outgrew it
          */
-        Written reply(List<LlmMessage> prompt, String what) {
+        Written reply(List<LlmMessage> prompt, String what, int carried) {
             List<LlmMessage> asked = prompt;
             var parts = new ArrayList<String>();
             // The reply so far, as the model wrote it, from its first part that reached the maximum
@@ -3157,6 +3189,14 @@ public class AgentLoop {
                     if (cutOff.limit() != OutputTruncated.Limit.MAX_OUTPUT) {
                         if (cutOff.replyRanOn()) {
                             context.chat().ranOn(cutOff, live, "the code of '" + name + "' was not written");
+                        }
+                        if (part == 1 && carried > 0) {
+                            // A repair carries the code it mends: that is what no longer fits.
+                            return Written.ending(Codegen.failed(String.format(Locale.ROOT, "the code for '%s' "
+                                    + "outgrew the model's context window: its repair, with the %,d characters of "
+                                    + "the code it mends, no longer fit (%s), so nothing was created. A smaller "
+                                    + "skill fits: one job per skill, or split this one into several.",
+                                    name, carried, cutOff.getMessage())));
                         }
                         if (part > 1) {
                             // The parts so far fill the window: the code itself is longer than the model

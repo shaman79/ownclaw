@@ -138,8 +138,34 @@ class ReplySeamTest {
     }
 
     @Test
-    @DisplayName("a bare ``` the part begins with is kept as written: it is mostly the model closing the fence")
+    @DisplayName("a reading whose code ends at a seam while a block of code follows drops code; the requirements, prose or one part do not")
+    void readingsThatDropCode() {
+        String head = "```python\nimport json\n";
+        int[] seam = {head.length()};
+        assertTrue(ReplySeam.dropsCode(head + "```python\n    x = 1\n```\n", seam));
+        assertTrue(ReplySeam.dropsCode(head + "```\n\nThe rest:\n```py\nx = 1\n```\n", seam));
+        assertTrue(ReplySeam.dropsCode(head + "```\n\n```\nx = 1\n```\n", seam), "a bare-fenced block closed later");
+        assertFalse(ReplySeam.dropsCode(head + "```\n\n```requirements\nrequests\n```\n", seam));
+        assertFalse(ReplySeam.dropsCode(head + "```\n\nIt prints the hosts.\n", seam));
+        assertFalse(ReplySeam.dropsCode(head + "```\n\n```bash\npip install requests\n```\n", seam), "another language's block");
+        assertFalse(ReplySeam.dropsCode(head + "```python\n    x = 1\n```\n", new int[0]), "one part: a reply with two blocks of its own");
+        assertFalse(ReplySeam.dropsCode(head + "x = 1\n```\n\n```python\nrun({})\n```\n", seam), "the code ends after the seam");
+        // A part that opens with a fence line is not read appended as written: that closes the code at the seam.
+        assertTrue(ReplySeam.readings(List.of(HEAD + "    x = 1\n", "```python\n    return x\n```\n")).stream()
+                .noneMatch(r -> r.how().equals("appended as written")));
+        assertTrue(ReplySeam.readings(List.of(HEAD + "    x = 1\n", "    y = 2\n    return x\n```\n")).isEmpty()
+                || ReplySeam.readings(List.of(HEAD + "    x = 1\n", "\n    return x\n```\n")).stream()
+                .anyMatch(r -> r.how().equals("appended as written")), "one that does not, is");
+        // Mutation: no guard -> the reading that appends a reopened fence is the code before the seam, and compiles.
+    }
+
+    @Test
+    @DisplayName("a bare ``` the part begins with is kept as written when it closes the fence; followed by code a bare ``` closes, it is the fence opened again")
     void aBareFenceIsKept() {
+        String bareSofar = HEAD + "    x = 1\n";
+        assertEquals(bareSofar + "    return x\n```\n", ReplySeam.join(bareSofar, "```\n    return x\n```\n"));
+        assertEquals(bareSofar + "    return x\n```\n", ReplySeam.join(bareSofar, "```py\n    return x\n```\n"));
+        assertEquals(bareSofar + "    return x\n```\n", ReplySeam.join(bareSofar, "```Python3\n    return x\n```\n"));
         String sofar = HEAD + "    return {'output': json.dumps(1), 'success': True}";
         String closes = "\n```\n\nThe skill returns 1 as JSON.\n\n```requirements\nrequests\n```\n";
         assertEquals(sofar + closes, ReplySeam.join(sofar, closes));
