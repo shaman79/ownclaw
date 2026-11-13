@@ -312,6 +312,91 @@ public final class Redactor {
     }
 
     /**
+     * A known value shorter than this is replaced in skill code only where it stands as a word of
+     * its own ({@link #filterCode}): "AP7" in {@code GUEST = 'AP7'}; "ap" inside {@code map(} is no
+     * value, and replaced there it would break the code the model is shown.
+     */
+    private static final int MIN_CODE_SUBSTRING = 3;
+
+    /**
+     * Skill code, or what Python printed of it -- a load error's traceback, a run's -- as a cloud
+     * model may read it: the vault's values and every secret the detectors find removed, as by
+     * {@link #filter}; and every value the user's table holds replaced by its placeholder wherever it
+     * stands, inside a longer word too -- as written, and as Python or JSON escape it inside a
+     * string -- not only as a word, as the filter replaces it in text. Code holds the values in its
+     * literals, where they are put back, so one inside a longer word -- a path built on an SSID --
+     * or a short one that the filter knows only by the name written before it, went out in clear.
+     * Nothing is learned from the code: what it holds that the table does not know is the model's or
+     * the owner's own writing, and a word of the code learned as an identifier would be replaced in
+     * every text from then on. A placeholder's shape in it is given one of its own (TEXT), as the
+     * filter gives it -- except, with {@code keepPlaceholders}, one the table knows: the code exactly as
+     * the model wrote it, kept beside the skill, whose placeholders the model wrote and goes on
+     * writing ({@code AgentContext#declareSkillCode}).
+     */
+    public String filterCode(String userId, String text, Map<String, String> vault, Tally tally,
+                             boolean keepPlaceholders) {
+        if (text == null || text.isEmpty()) return text;
+        Scrubbed scrubbed = scrubVault(text, vault);
+        tally.secrets += scrubbed.count();
+        String s = scrubbed.text();
+        Table table = table(userId);
+        var sb = new StringBuilder(s.length());
+        int from = 0;
+        Map<String, String> known = table.byValue();
+        for (Finding f : find(s, table.named())) {
+            sb.append(knownReplaced(s.substring(from, f.start()), known, tally));
+            String span = s.substring(f.start(), f.end());
+            if (f.kind() == null) {
+                sb.append(SECRET_REMOVED);
+                tally.secrets++;
+            } else if (f.kind() == Kind.TEXT) {
+                sb.append(keepPlaceholders && table.value(span) != null ? span : table.placeholder(Kind.TEXT, f.valueIn(s)));
+            } else if (table.knows(f.kind(), f.valueIn(s))) {
+                sb.append(table.placeholder(f.kind(), f.valueIn(s)));
+                tally.identifiers++;
+            } else {
+                // Not the user's as far as the table knows: the code's own writing, and not learned.
+                sb.append(knownReplaced(span, known, tally));
+            }
+            from = f.end();
+        }
+        return sb.append(knownReplaced(s.substring(from), known, tally)).toString();
+    }
+
+    /**
+     * {@code s} with every value of {@code known} (value to placeholder) replaced wherever it stands --
+     * a short one only as a word -- longest first, and none inside another's replacement.
+     */
+    private static String knownReplaced(String s, Map<String, String> known, Tally tally) {
+        if (s.isEmpty() || known.isEmpty()) return s;
+        var spans = new ArrayList<int[]>();   // start, end, index of the value
+        var values = new ArrayList<>(known.keySet());
+        values.sort(Comparator.comparingInt(String::length).reversed());
+        var taken = new BitSet(s.length());
+        for (int v = 0; v < values.size(); v++) {
+            String value = values.get(v);
+            for (int at = s.indexOf(value); at >= 0; at = s.indexOf(value, at + 1)) {
+                int end = at + value.length();
+                if (taken.nextSetBit(at) >= 0 && taken.nextSetBit(at) < end) continue;
+                if (value.length() < MIN_CODE_SUBSTRING && (at > 0 && wordChar(s.charAt(at - 1))
+                        || end < s.length() && wordChar(s.charAt(end)))) continue;
+                taken.set(at, end);
+                spans.add(new int[] {at, end, v});
+            }
+        }
+        if (spans.isEmpty()) return s;
+        spans.sort(Comparator.comparingInt((int[] a) -> a[0]));
+        var sb = new StringBuilder(s.length());
+        int from = 0;
+        for (int[] span : spans) {
+            sb.append(s, from, span[0]).append(known.get(values.get(span[2])));
+            tally.identifiers++;
+            from = span[1];
+        }
+        return sb.append(s, from, s.length()).toString();
+    }
+
+    /**
      * What {@link #filter} would remove and replace in {@code text}, counted without adding to the
      * placeholder table: what a step's progress message says of its result.
      */
@@ -626,7 +711,14 @@ public final class Redactor {
      * {@code subprocess} call prints its command line in, and {@code str()} of a list or a dict.
      */
     private static String pythonRepr(String s) {
-        char quote = s.indexOf('\'') >= 0 && s.indexOf('"') < 0 ? '"' : '\'';
+        return pythonEscaped(s, s.indexOf('\'') >= 0 && s.indexOf('"') < 0 ? '"' : '\'');
+    }
+
+    /**
+     * {@code s} escaped as {@link #pythonRepr} escapes it, inside {@code quote}: as a value put back
+     * into a skill's code stands in a literal of that quote (the code's restore_values.py).
+     */
+    private static String pythonEscaped(String s, char quote) {
         var sb = new StringBuilder(s.length() + 8);
         s.codePoints().forEach(c -> {
             if (c == '\\') sb.append("\\\\");
@@ -865,6 +957,32 @@ public final class Redactor {
 
         synchronized String value(String placeholder) {
             return values.get(placeholder);
+        }
+
+        /** Whether it holds {@code value} as an identifier of {@code kind}. */
+        synchronized boolean knows(Kind kind, String value) {
+            return numbers.containsKey(kind.tag() + '\0' + value);
+        }
+
+        /**
+         * Every identifier it holds, each as written and as Python and JSON escape it inside a
+         * string, to its placeholder: what skill code is searched for ({@link #filterCode}). Not the
+         * values that name no device ({@link #namesNoDevice}), nor TEXT.
+         */
+        synchronized Map<String, String> byValue() {
+            var out = new HashMap<String, String>();
+            for (var e : numbers.entrySet()) {
+                int nul = e.getKey().indexOf('\0');
+                Kind kind = Kind.valueOf(e.getKey().substring(0, nul).toUpperCase(Locale.ROOT));
+                String value = e.getKey().substring(nul + 1);
+                if (kind == Kind.TEXT || value.isEmpty() || namesNoDevice(kind, value)) continue;
+                String placeholder = "<" + kind.tag() + "_" + e.getValue() + ">";
+                for (String form : List.of(value, pythonEscaped(value, '\''), pythonEscaped(value, '"'),
+                        pythonJson(value, false))) {
+                    out.putIfAbsent(form, placeholder);
+                }
+            }
+            return out;
         }
 
         /** The SSIDs and hostnames it holds that are long enough to be looked for anywhere. */

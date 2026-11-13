@@ -29,12 +29,19 @@ import java.util.function.IntFunction;
  * @param handedOut    the replies the gateway handed out under this context as the model wrote
  *                     them ({@link HandedOut}): always this context's own, and empty when it is
  *                     made -- whatever a caller passes is not taken
+ * @param skillCode    texts the task holds that are skill code, or what Python printed of it -- a
+ *                     skill read, a load error, a run's traceback -- each to whether it is the code
+ *                     exactly as the model wrote it: wherever one stands in a part, the gateway sends
+ *                     it as code ({@code Redactor#filterCode}), every value the user's table holds
+ *                     replaced wherever it stands, and nothing learned. Only the task declares them
+ *                     ({@code AgentContext#declareSkillCode})
  */
 public record EgressContext(String userId, String taskId, String purpose, PrivateIndex index,
                             Map<String, String> secretValues,
                             BiPredicate<Integer, String> allowed,
                             IntFunction<String> toolOf,
-                            HandedOut handedOut) {
+                            HandedOut handedOut,
+                            Map<String, Boolean> skillCode) {
 
     public EgressContext {
         index = index == null ? new PrivateIndex() : index;
@@ -45,13 +52,21 @@ public record EgressContext(String userId, String taskId, String purpose, Privat
         // Never the caller's: only the gateway puts a text in it, so no caller can give it one with
         // texts it never handed out.
         handedOut = new HandedOut();
+        skillCode = skillCode == null ? Map.of() : Map.copyOf(skillCode);
     }
 
-    /** A context with a memory of its own, empty ({@link #handedOut}). */
+    /** A context with a memory of its own, empty ({@link #handedOut}), and no skill code. */
     public EgressContext(String userId, String taskId, String purpose, PrivateIndex index,
                          Map<String, String> secretValues, BiPredicate<Integer, String> allowed,
                          IntFunction<String> toolOf) {
-        this(userId, taskId, purpose, index, secretValues, allowed, toolOf, null);
+        this(userId, taskId, purpose, index, secretValues, allowed, toolOf, null, null);
+    }
+
+    /** As the canonical constructor, with no skill code: a {@code handedOut} passed is not taken. */
+    public EgressContext(String userId, String taskId, String purpose, PrivateIndex index,
+                         Map<String, String> secretValues, BiPredicate<Integer, String> allowed,
+                         IntFunction<String> toolOf, HandedOut handedOut) {
+        this(userId, taskId, purpose, index, secretValues, allowed, toolOf, handedOut, null);
     }
 
     /**
@@ -126,6 +141,6 @@ public record EgressContext(String userId, String taskId, String purpose, Privat
     @Override
     public String toString() {
         return "EgressContext[userId=" + userId + ", taskId=" + taskId + ", purpose=" + purpose
-                + ", secretValues=" + secretValues.keySet() + "]";
+                + ", secretValues=" + secretValues.keySet() + ", skillCode=" + skillCode.size() + " texts]";
     }
 }

@@ -174,8 +174,19 @@ public class SkillManager {
      */
     public String createSkill(Map<String, Object> params, String requester,
                               java.util.function.BooleanSupplier stopped, Runnable waiting) {
+        return createSkill(params, null, requester, stopped, waiting);
+    }
+
+    /**
+     * {@link #createSkill(Map, String, java.util.function.BooleanSupplier, Runnable)} of code a model
+     * wrote with placeholders, and the user's values put back: {@code asWritten} is that code as the
+     * model wrote it, kept beside the skill ({@link #readAsWritten}) -- null for code written
+     * otherwise, which keeps none.
+     */
+    public String createSkill(Map<String, Object> params, String asWritten, String requester,
+                              java.util.function.BooleanSupplier stopped, Runnable waiting) {
         String name = str(params, "name");
-        if (name == null) return createSkillHeld(params, requester);
+        if (name == null) return createSkillHeld(params, requester, asWritten);
         // Held to write while its files are written, checked and registered: another task's
         // skill_create of the same name waits, and so does every run of it.
         var changing = com.ownclaw.agent.tools.SkillLocks.of(name).writeLock();
@@ -183,7 +194,7 @@ public class SkillManager {
             return "ERROR: Stopped while a run of skill '" + name + "' was under way: nothing was written.";
         }
         try {
-            return createSkillHeld(params, requester);
+            return createSkillHeld(params, requester, asWritten);
         } finally {
             changing.unlock();
         }
@@ -227,7 +238,7 @@ public class SkillManager {
         }
     }
 
-    private String createSkillHeld(Map<String, Object> params, String requester) {
+    private String createSkillHeld(Map<String, Object> params, String requester, String asWritten) {
         String name = str(params, "name");
         String description = str(params, "description");
         String code = str(params, "code");
@@ -347,6 +358,7 @@ public class SkillManager {
             // Registered over the old one, not after unregistering it: in between, another task's
             // look-up of the skill found no such tool.
             dynamicSkillRegistry.register(skill);
+            keepAsWritten(name, asWritten, code);
 
             return "Skill '" + name + "' " + (isUpdate ? "updated" : "created") +
                     " and registered. It is now available as a tool.";
@@ -372,6 +384,68 @@ public class SkillManager {
         } catch (IOException e) {
             log.warn("Failed to read skill code for '{}': {}", name, e.getMessage());
             return null;
+        }
+    }
+
+    /**
+     * Where the code of skill {@code name} is kept as the model wrote it: beside the skills' own
+     * directories, never in one -- a skill's directory is its working directory, writable by the
+     * skill, and a copy there could be rewritten by the skill's own run, for the next fix of it to
+     * send with whatever it put in. Under the skills' root, which the jail hides from every run.
+     */
+    private Path asWrittenFile(String name) {
+        return Path.of(config.getSkills().getGeneratedPath()).toAbsolutePath().normalize().getParent()
+                .resolve("_as_written").resolve(name + ".py");
+    }
+
+    /** The first line of a kept copy: the digest of the skill.py it was kept with. */
+    private static final String KEPT_WITH = "# skill.py sha256 ";
+
+    /**
+     * Keeps {@code asWritten} -- skill {@code name}'s code as the model wrote it, its placeholders in
+     * it -- with the digest of {@code code}, the skill.py it was made into; or, null, forgets any
+     * copy kept: code written otherwise has none.
+     */
+    private void keepAsWritten(String name, String asWritten, String code) {
+        try {
+            Path file = asWrittenFile(name);
+            if (asWritten == null) {
+                Files.deleteIfExists(file);
+                return;
+            }
+            Files.createDirectories(file.getParent());
+            Files.writeString(file, KEPT_WITH + sha256(code) + "\n" + asWritten, StandardCharsets.UTF_8);
+        } catch (IOException | RuntimeException e) {
+            log.warn("The code of '{}' as written could not be kept: {}", name, e.getClass().getSimpleName());
+        }
+    }
+
+    /**
+     * Skill {@code name}'s code exactly as the model wrote it -- its placeholders where the user's
+     * values are in skill.py -- when one was kept with the skill.py the skill has now; otherwise null:
+     * a skill made before copies were kept, or changed since by hand or by a page.
+     */
+    public String readAsWritten(String name) {
+        String code = readSkillCode(name);
+        if (code == null) return null;
+        try {
+            Path file = asWrittenFile(name);
+            if (!Files.isRegularFile(file, java.nio.file.LinkOption.NOFOLLOW_LINKS)) return null;
+            String kept = Files.readString(file, StandardCharsets.UTF_8);
+            int newline = kept.indexOf('\n');
+            if (newline < 0 || !kept.substring(0, newline).equals(KEPT_WITH + sha256(code))) return null;
+            return kept.substring(newline + 1);
+        } catch (IOException | RuntimeException e) {
+            return null;
+        }
+    }
+
+    private static String sha256(String text) {
+        try {
+            return java.util.HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256")
+                    .digest(text.getBytes(StandardCharsets.UTF_8)));
+        } catch (java.security.NoSuchAlgorithmException e) {
+            throw new IllegalStateException(e);
         }
     }
 
@@ -465,6 +539,7 @@ public class SkillManager {
         dynamicSkillRegistry.unregister(name);
 
         boolean dirGone = SkillJail.deleteTree(skill.skillDir());
+        keepAsWritten(name, null, null);
         // The environment too. This deleted the code and kept the 7 GB of packages the code had
         // pulled in, for every skill ever deleted.
         boolean envsGone = pythonEnv.removeEnvironments(name);

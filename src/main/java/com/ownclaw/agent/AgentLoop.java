@@ -1836,7 +1836,12 @@ public class AgentLoop {
         String name = params.get("name") != null ? params.get("name").toString() : null;
 
         return switch (action) {
-            case "read" -> skillManager.readSkill(name);
+            case "read" -> {
+                String read = skillManager.readSkill(name);
+                // Its code with the user's values in it: sent as code wherever it is replayed.
+                context.declareSkillCode(read, false);
+                yield read;
+            }
             case "delete" -> skillManager.deleteSkill(name, context.userId(), context::isCancelled,
                     () -> waitingForSkill(context, name));
             case "list" -> skillManager.listSkills();
@@ -2686,8 +2691,10 @@ public class AgentLoop {
         if (result == null) {
             Codegen code = generateSkillCode(action.params(), context);
             result = code.error() != null ? code.error()
-                    : skillManager.createSkill(code.params(), context.userId(), context::isCancelled,
+                    : skillManager.createSkill(code.params(), code.asWritten(), context.userId(), context::isCancelled,
                             () -> waitingForSkill(context, str(action.params(), "name")));
+            // A load error is Python's traceback of the code, the user's values put back in it.
+            if (code.error() == null && result.startsWith("ERROR")) context.declareSkillCode(result, false);
         }
         // The skill the model has just created is one of its tools from the next step.
         if (!result.startsWith("ERROR") && context.toolsAdded() != null) {
@@ -2756,6 +2763,16 @@ public class AgentLoop {
         String oldCode = skillManager.readSkillCode(name);
         String lastError = null;
         if (oldCode != null) {
+            // The code as the model wrote it, where it was kept with this skill.py: its placeholders
+            // where the values are, and sent so. Otherwise skill.py itself, every value the user's
+            // table holds replaced in it wherever it stands (AgentContext#declareSkillCode).
+            String asWritten = skillManager.readAsWritten(name);
+            if (asWritten != null) {
+                oldCode = asWritten;
+                context.declareSkillCode(asWritten, true);
+            } else {
+                context.declareSkillCode(oldCode, false);
+            }
             // Walk trajectory backwards to find the most recent failed execution of this skill
             var turns = context.trajectory().turns();
             for (int i = turns.size() - 1; i >= 0; i--) {
@@ -2775,6 +2792,8 @@ public class AgentLoop {
                 context.givenEarlier(history);
                 lastError = lastError == null ? history : lastError + "\n\n" + history;
             }
+            // A run's traceback quotes the code's lines, its values in them.
+            context.declareSkillCode(lastError, false);
             log.info("Skill '{}' exists — will attempt targeted fix{}{}",
                     name,
                     lastError != null ? " (error available)" : " (no error known)",

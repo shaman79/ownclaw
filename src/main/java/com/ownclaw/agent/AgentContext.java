@@ -1214,7 +1214,26 @@ public class AgentContext {
      */
     public com.ownclaw.llm.EgressContext egress(String purpose) {
         return new com.ownclaw.llm.EgressContext(userId, taskId, purpose, privateIndex,
-                secretValues(), new Excuses(), this::toolOf);
+                secretValues(), new Excuses(), this::toolOf, null, Map.copyOf(skillCode));
+    }
+
+    /**
+     * Texts of this task that are skill code, or what Python printed of it, each to whether it is
+     * the code exactly as the model wrote it ({@link #declareSkillCode}).
+     */
+    private final Map<String, Boolean> skillCode = new java.util.concurrent.ConcurrentHashMap<>();
+
+    /**
+     * {@code text} is skill code as it is on disk, its values in it, or what Python printed of it --
+     * a skill read, a load error, a run's traceback -- or, {@code asWritten}, the code exactly as the
+     * model wrote it, kept beside the skill: wherever it stands in a call this task makes, the
+     * gateway sends it as code ({@code Redactor#filterCode}). Its values are in its literals, where
+     * the filter of text, which replaces a value only as a word, left one inside a longer word, or
+     * a short one, in clear.
+     */
+    public void declareSkillCode(String text, boolean asWritten) {
+        if (text == null || text.isBlank()) return;
+        skillCode.merge(text, asWritten, (was, now) -> was && now);
     }
 
     /** The tool that produced result {@code n}, or null when there is no such result. */

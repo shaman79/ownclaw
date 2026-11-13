@@ -156,12 +156,22 @@ final class LoopRig {
             return python.restoreValues(code, values);
         }
 
+        /** Each skill's code as the model wrote it, where one was kept; and what each create kept. */
+        volatile Function<String, String> asWritten = name -> null;
+        final List<String> keptAsWritten = new java.util.concurrent.CopyOnWriteArrayList<>();
+
+        @Override public String readAsWritten(String name) { return asWritten.apply(name); }
         @Override public String readSkillCode(String name) { return source.apply(name); }
         @Override public String readSkill(String name) { return files.apply(name); }
         @Override String checkPythonSyntax(String code) { return syntax.apply(code); }
         @Override public String createSkill(Map<String, Object> params, String requester,
                                             java.util.function.BooleanSupplier stopped,
                                             Runnable waiting) { return create.apply(params); }
+        @Override public String createSkill(Map<String, Object> params, String kept, String requester,
+                                            java.util.function.BooleanSupplier stopped, Runnable waiting) {
+            if (kept != null) keptAsWritten.add(kept);
+            return create.apply(params);
+        }
     }
 
     final JdbcTemplate jdbc;
