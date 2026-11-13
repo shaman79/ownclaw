@@ -6,7 +6,10 @@ import javax.imageio.ImageReadParam;
 import javax.imageio.ImageReader;
 import javax.imageio.ImageWriteParam;
 import javax.imageio.ImageWriter;
-import javax.imageio.stream.FileImageInputStream;
+import javax.imageio.event.IIOReadProgressListener;
+import javax.imageio.event.IIOReadUpdateListener;
+import javax.imageio.event.IIOWriteProgressListener;
+import javax.imageio.stream.ImageInputStreamImpl;
 import javax.imageio.stream.MemoryCacheImageOutputStream;
 import java.awt.AlphaComposite;
 import java.awt.Color;
@@ -18,11 +21,9 @@ import java.awt.image.ColorModel;
 import java.awt.image.DataBufferInt;
 import java.awt.image.IndexColorModel;
 import java.awt.image.Raster;
-import java.io.BufferedInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.EOFException;
 import java.io.IOException;
-import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -39,9 +40,6 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.RejectedExecutionException;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.ScheduledFuture;
-import java.util.concurrent.TimeUnit;
 
 /**
  * The copy of a pasted image that the cloud model is sent: made once, when the image is uploaded,
@@ -73,9 +71,13 @@ import java.util.concurrent.TimeUnit;
  * more than 20 images, and 10 MB base64 ({@link #MAX_BASE64}).
  * <p>
  * One check runs at a time, on a thread of its own, so uploads queue rather than multiply what
- * the server spends; and each is given {@link #CHECK_TIME}: past it the read is aborted and the file
- * stays private, whole, for skills. A large image is read at a fraction of its pixels, so its
- * reading holds no more than about four times the copy in memory.
+ * the server spends; and each is given {@link #CHECK_TIME}: past it the read is aborted -- by the
+ * reading thread itself, the only one the JDK's JPEG reader takes an abort from -- and the file
+ * stays private, whole, for skills. The file is read from memory, and a reader is handed only the
+ * chunks it draws from. A declaration no screenshot or photo has -- more than {@link #MAX_PIXELS}
+ * pixels, more than {@link #MAX_PARTS} parts beside the picture's data -- is not read at all: a
+ * file of a few hundred bytes so made kept a reader busy for minutes. A large image is read at a
+ * fraction of its pixels, so its reading holds no more than about four times the copy in memory.
  * <p>
  * What the pasted file carries beside the picture -- EXIF (a camera's, a time, a place), XMP,
  * IPTC, a colour profile, text, a comment, a thumbnail, more frames, bytes after its end -- is said
@@ -128,12 +130,32 @@ public final class CloudImageCopy {
      */
     static final long ROW_MEMORY = 64L << 20;
 
+    /**
+     * The most pixels a pasted image may declare and be checked: 2^28, 268 million -- more than any
+     * screen or camera makes (a 200-megapixel phone photo, a page-long screenshot are under it), and
+     * read in a second or two. A crafted file declaring more is small and slow: one of 215 bytes
+     * declaring 46,340 x 46,340 took a quarter of a minute to decode. A bound on the check, not on
+     * the content: the file is kept, and skills are given it.
+     */
+    static final long MAX_PIXELS = 1L << 28;
+
+    /**
+     * The most parts a pasted image may hold beside its picture's data and be checked: chunks,
+     * segments, sub-blocks. A screenshot or a photo holds tens; a crafted file of millions -- 95 MB of
+     * empty PNG chunks, a GIF comment in one-byte sub-blocks -- kept a reader at them for minutes.
+     */
+    static final int MAX_PARTS = 10_000;
+
+    /** Why a pasted image declaring more than {@link #MAX_PIXELS} stays private. */
+    static final String TOO_MANY_PIXELS = "it is too large to check -- more than 268 million pixels, which no screen "
+            + "or camera makes -- so it stays private; skills still get it";
+
+    /** Why a pasted image of more than {@link #MAX_PARTS} parts stays private. */
+    static final String TOO_MANY_PARTS = "it is too large to check -- more than 10,000 parts beside its picture's "
+            + "data, which no screenshot or photo has -- so it stays private; skills still get it";
+
     /** One check at a time: uploads queue. */
     private static final ExecutorService CHECKER = Executors.newSingleThreadExecutor(daemon("pasted-image-check"));
-
-    /** What ends a check that has run out of time. */
-    private static final ScheduledExecutorService TIMER =
-            Executors.newSingleThreadScheduledExecutor(daemon("pasted-image-check-timer"));
 
     private static java.util.concurrent.ThreadFactory daemon(String name) {
         return r -> {
@@ -207,72 +229,197 @@ public final class CloudImageCopy {
         try {
             return done.get();
         } catch (InterruptedException e) {
-            check.abort();
-            done.cancel(true);
+            // The check hears it on its own thread, where a reader can be stopped.
+            check.cancelled = true;
+            done.cancel(false);
             Thread.currentThread().interrupt();
             return Made.stays("its check was interrupted, so it stays private");
         } catch (ExecutionException e) {
-            return Made.stays(check.aborted ? TOO_LONG : "it could not be read as an image");
+            return Made.stays(check.late() ? TOO_LONG : "it could not be read as an image");
         }
     }
 
-    /** One check, on {@link #CHECKER}: aborted by {@link #TIMER} when it runs past its time. */
-    private static final class Check implements Callable<Made> {
+    /** What a check asks between the pieces of its work, and its reading between bytes. */
+    interface Deadline {
+        /** Throws {@link Late} once the check is past its time. */
+        void inTime() throws IOException;
+
+        Deadline NONE = () -> { };
+    }
+
+    /** A check past its time: what ends its reading, from the reading thread itself. */
+    static final class Late extends IOException {
+        Late() {
+            super("past its time");
+        }
+    }
+
+    /**
+     * One check, on {@link #CHECKER}. Its time is kept by the thread doing the work, never by
+     * another: the JDK's JPEG reader and writer throw when another thread aborts them, and its PNG
+     * and GIF readers forget an abort that came before their read began. So the bytes are read from
+     * memory through a stream that asks the time ({@link Reading}), the reader and the writer hear
+     * it on their own progress ({@link Stopper}), and the work asks it between its pieces.
+     */
+    private static final class Check implements Callable<Made>, Deadline {
         final Path file;
         final Duration limit;
-        volatile boolean aborted;
-        volatile ImageReader reader;
-        volatile ImageWriter writer;
+        volatile boolean cancelled;
+        private volatile long deadline;
+        private volatile boolean started;
 
         Check(Path file, Duration limit) {
             this.file = file;
             this.limit = limit;
         }
 
-        /** Ends the read or the write under way, and every one after it. */
-        void abort() {
-            aborted = true;
-            ImageReader r = reader;
-            if (r != null) r.abort();
-            ImageWriter w = writer;
-            if (w != null) w.abort();
+        boolean late() {
+            return cancelled || started && System.nanoTime() - deadline >= 0;
+        }
+
+        @Override
+        public void inTime() throws IOException {
+            if (late()) throw new Late();
         }
 
         @Override
         public Made call() {
-            ScheduledFuture<?> timer = TIMER.schedule(this::abort, limit.toNanos(), TimeUnit.NANOSECONDS);
+            deadline = System.nanoTime() + limit.toNanos();
+            started = true;
             try {
                 Made made = make(file, this);
-                return aborted ? Made.stays(TOO_LONG) : made;
+                return late() ? Made.stays(TOO_LONG) : made;
             } catch (IOException | RuntimeException e) {
-                return Made.stays(aborted ? TOO_LONG : "it did not decode as an image");
+                return Made.stays(late() ? TOO_LONG : "it did not decode as an image");
             } catch (OutOfMemoryError e) {
                 // One allocation the heap could not give: the check ends, the server goes on.
                 return Made.stays("reading it took more memory than this server has for one picture, so it "
                         + "stays private -- skills still get it");
-            } finally {
-                timer.cancel(false);
-                reader = null;
-                writer = null;
             }
+        }
+    }
+
+    /**
+     * Stops a read or a write from its own thread once its check is past its time: each row a
+     * reader decodes and each a writer encodes is reported here, and an abort from there is one the
+     * JDK's readers and writers all take.
+     */
+    private static final class Stopper implements IIOReadProgressListener, IIOReadUpdateListener,
+            IIOWriteProgressListener {
+        private final Check check;
+
+        Stopper(Check check) {
+            this.check = check;
+        }
+
+        private void stopIfLate(ImageReader reader) {
+            if (check.late()) reader.abort();
+        }
+
+        private void stopIfLate(ImageWriter writer) {
+            if (check.late()) writer.abort();
+        }
+
+        @Override public void imageStarted(ImageReader source, int imageIndex) { stopIfLate(source); }
+        @Override public void imageProgress(ImageReader source, float percentageDone) { stopIfLate(source); }
+        @Override public void imageUpdate(ImageReader source, BufferedImage image, int minX, int minY, int width,
+                                          int height, int periodX, int periodY, int[] bands) { stopIfLate(source); }
+        @Override public void passStarted(ImageReader source, BufferedImage image, int pass, int minPass, int maxPass,
+                                          int minX, int minY, int periodX, int periodY, int[] bands) { stopIfLate(source); }
+        @Override public void imageStarted(ImageWriter source, int imageIndex) { stopIfLate(source); }
+        @Override public void imageProgress(ImageWriter source, float percentageDone) { stopIfLate(source); }
+
+        @Override public void sequenceStarted(ImageReader source, int minIndex) { }
+        @Override public void sequenceComplete(ImageReader source) { }
+        @Override public void imageComplete(ImageReader source) { }
+        @Override public void thumbnailStarted(ImageReader source, int imageIndex, int thumbnailIndex) { }
+        @Override public void thumbnailProgress(ImageReader source, float percentageDone) { }
+        @Override public void thumbnailComplete(ImageReader source) { }
+        @Override public void readAborted(ImageReader source) { }
+        @Override public void passComplete(ImageReader source, BufferedImage image) { }
+        @Override public void thumbnailPassStarted(ImageReader source, BufferedImage thumbnail, int pass, int minPass,
+                                                   int maxPass, int minX, int minY, int periodX, int periodY,
+                                                   int[] bands) { }
+        @Override public void thumbnailUpdate(ImageReader source, BufferedImage thumbnail, int minX, int minY,
+                                              int width, int height, int periodX, int periodY, int[] bands) { }
+        @Override public void thumbnailPassComplete(ImageReader source, BufferedImage thumbnail) { }
+        @Override public void imageComplete(ImageWriter source) { }
+        @Override public void thumbnailStarted(ImageWriter source, int imageIndex, int thumbnailIndex) { }
+        @Override public void thumbnailProgress(ImageWriter source, float percentageDone) { }
+        @Override public void thumbnailComplete(ImageWriter source) { }
+        @Override public void writeAborted(ImageWriter source) { }
+    }
+
+    /**
+     * The file's bytes, from memory, for a reader: each read asks the check's time now and then, so
+     * a reader that takes its input a byte at a time -- the PNG and GIF readers read every chunk's
+     * and sub-block's header so -- stops when the check is past its time, wherever it is.
+     */
+    private static final class Reading extends ImageInputStreamImpl {
+        private final byte[] data;
+        private final Deadline deadline;
+        private int reads;
+
+        Reading(byte[] data, Deadline deadline) {
+            this.data = data;
+            this.deadline = deadline;
+        }
+
+        @Override
+        public int read() throws IOException {
+            checkClosed();
+            tick();
+            bitOffset = 0;
+            return streamPos < data.length ? data[(int) streamPos++] & 0xFF : -1;
+        }
+
+        @Override
+        public int read(byte[] b, int off, int len) throws IOException {
+            checkClosed();
+            tick();
+            java.util.Objects.checkFromIndexSize(off, len, b.length);
+            bitOffset = 0;
+            if (len == 0) return 0;
+            if (streamPos >= data.length) return -1;
+            int n = (int) Math.min(len, data.length - streamPos);
+            System.arraycopy(data, (int) streamPos, b, off, n);
+            streamPos += n;
+            return n;
+        }
+
+        @Override
+        public long length() {
+            return data.length;
+        }
+
+        private void tick() throws IOException {
+            if ((++reads & 0xFF) == 0) deadline.inTime();
         }
     }
 
     /** The copy, made on the check's thread. */
     private static Made make(Path file, Check check) throws IOException {
-        Header header = header(file);
+        // In memory: an upload is at most 100 MB, and one check runs at a time.
+        byte[] data = Files.readAllBytes(file);
+        check.inTime();
+        Header header = header(data, check);
         if (header.refused() != null) return Made.stays(header.refused());
+        if (header.picture() != null) data = pictureAlone(data, header.picture());
+        check.inTime();
         Iterator<ImageReader> readers = ImageIO.getImageReadersByFormatName(header.format().reader);
         if (!readers.hasNext()) return Made.stays("this server has no reader for " + header.format().mediaType);
         ImageReader reader = readers.next();
-        check.reader = reader;
+        var stopper = new Stopper(check);
+        reader.addIIOReadProgressListener(stopper);
+        reader.addIIOReadUpdateListener(stopper);
         BufferedImage image;
         int width, height;
         Size target;
-        try (var in = new FileImageInputStream(file.toFile())) {
+        try (var in = new Reading(data, check)) {
             reader.setInput(in, true, true);
             width = reader.getWidth(0);
             height = reader.getHeight(0);
+            check.inTime();
             if (width <= 0 || height <= 0) return Made.stays("it did not decode as an image");
             if ((long) width * header.bytesPerPixel() * 3 > ROW_MEMORY) {
                 return Made.stays("it is wider than this server can read a row of, so it stays private -- skills "
@@ -283,28 +430,32 @@ public final class CloudImageCopy {
             ImageReadParam param = reader.getDefaultReadParam();
             int every = subsampling(width, height, target);
             if (every > 1) param.setSourceSubsampling(every, every, 0, 0);
+            // The PNG and GIF readers clear an abort when their read begins: past its time, it is
+            // not begun -- and once begun, the Stopper hears every row.
+            check.inTime();
             image = reader.read(0, param);
         } catch (IOException | RuntimeException notAnImage) {
-            return Made.stays(check.aborted ? TOO_LONG : "it did not decode as an image");
+            return Made.stays(check.late() ? TOO_LONG : "it did not decode as an image");
         } finally {
-            check.reader = null;
             reader.dispose();
         }
-        if (check.aborted) return Made.stays(TOO_LONG);
+        // An aborted read returns what it had decoded: none of it is a copy.
+        if (check.late()) return Made.stays(TOO_LONG);
         if (image == null) return Made.stays("it did not decode as an image");
 
         BufferedImage pixels = oriented(normalized(image), header.orientation());
         image = null;
         boolean turned = header.orientation() >= 5;
         int shownWidth = turned ? height : width, shownHeight = turned ? width : height;
+        check.inTime();
         BufferedImage scaled = scale(pixels, target.width(), target.height());
         pixels = null;
-        if (check.aborted) return Made.stays(TOO_LONG);
+        check.inTime();
 
         // In the original's family: a photograph stays a JPEG, a screenshot a PNG.
         if (header.format() != Format.JPEG) {
-            byte[] png = png(scaled, check);
-            if (check.aborted) return Made.stays(TOO_LONG);
+            byte[] png = png(scaled, stopper);
+            check.inTime();
             if (base64(png.length) <= MAX_BASE64) {
                 return Made.of(new Copy("image/png", target.width(), target.height(), shownWidth, shownHeight, png,
                         header.metadata()));
@@ -312,8 +463,8 @@ public final class CloudImageCopy {
         }
         BufferedImage flat = scaled.getType() == BufferedImage.TYPE_INT_ARGB ? flatten(scaled) : scaled;
         for (float quality : JPEG_QUALITIES) {
-            byte[] jpeg = jpeg(flat, quality, check);
-            if (check.aborted) return Made.stays(TOO_LONG);
+            byte[] jpeg = jpeg(flat, quality, stopper);
+            check.inTime();
             if (base64(jpeg.length) <= MAX_BASE64) {
                 return Made.of(new Copy("image/jpeg", target.width(), target.height(), shownWidth, shownHeight, jpeg,
                         header.metadata()));
@@ -338,24 +489,53 @@ public final class CloudImageCopy {
      * @param orientation   1 to 8, as EXIF numbers them; 1 when it says none
      * @param metadata      what it carries beside the picture, in words, or null
      * @param refused       why it is not read, or null
+     * @param picture       of a PNG that holds more than its picture, the byte ranges -- start, end, start,
+     *                      end... -- of the chunks a reader needs to draw it, which alone it is given:
+     *                      of a palette image the JDK's reader parses every chunk it is handed, an sPLT
+     *                      of 95 MB into arrays of hundreds, and inflates a colour profile whatever it
+     *                      inflates to. Null when the file is that already, and for any other format.
      */
-    record Header(Format format, int bytesPerPixel, int orientation, String metadata, String refused) {
+    record Header(Format format, int bytesPerPixel, int orientation, String metadata, String refused, int[] picture) {
+        Header(Format format, int bytesPerPixel, int orientation, String metadata, String refused) {
+            this(format, bytesPerPixel, orientation, metadata, refused, null);
+        }
+
         static Header refused(String why) {
             return new Header(null, 0, 1, null, why);
         }
     }
 
+    /** The PNG chunks a reader draws the picture from: its header, palette, transparency, data and end. */
+    private static final Set<String> DRAWN_FROM = Set.of("IHDR", "PLTE", "tRNS", "IDAT", "IEND");
+
+    /** {@code data} with only the byte ranges {@code picture} names, after a PNG's signature. */
+    static byte[] pictureAlone(byte[] data, int[] picture) {
+        int size = 8;
+        for (int i = 0; i < picture.length; i += 2) size += picture[i + 1] - picture[i];
+        byte[] out = java.util.Arrays.copyOf(data, size);
+        int at = 8;
+        for (int i = 0; i < picture.length; i += 2) {
+            System.arraycopy(data, picture[i], out, at, picture[i + 1] - picture[i]);
+            at += picture[i + 1] - picture[i];
+        }
+        return out;
+    }
+
     /** {@code file}'s {@link Header}. */
     static Header header(Path file) throws IOException {
-        try (var in = new Bytes(new BufferedInputStream(Files.newInputStream(file), 1 << 16))) {
-            byte[] head = in.readUpTo(12);
-            Format format = sniff(head, head.length);
-            if (format == null) {
-                return Header.refused(webp(head, head.length)
-                        ? "it is a WebP image, which this server cannot decode, so it cannot check it is a picture or fit it to the model"
-                        : "it is not a PNG, JPEG or GIF image, the kinds this server can check");
-            }
-            in.unread(head);
+        return header(Files.readAllBytes(file), Deadline.NONE);
+    }
+
+    /** The {@link Header} of a file of these bytes, walked within {@code deadline}. */
+    static Header header(byte[] data, Deadline deadline) throws IOException {
+        Format format = sniff(data, data.length);
+        if (format == null) {
+            return Header.refused(webp(data, data.length)
+                    ? "it is a WebP image, which this server cannot decode, so it cannot check it is a picture or fit it to the model"
+                    : "it is not a PNG, JPEG or GIF image, the kinds this server can check");
+        }
+        var in = new Bytes(data, deadline);
+        try {
             return switch (format) {
                 case PNG -> png(in);
                 case JPEG -> jpeg(in);
@@ -364,6 +544,11 @@ public final class CloudImageCopy {
         } catch (EOFException cut) {
             return Header.refused("it is not a whole image: the file ends early");
         }
+    }
+
+    /** Whether a picture of {@code width} x {@code height} is more than {@link #MAX_PIXELS}. */
+    private static boolean tooManyPixels(long width, long height) {
+        return width * height > MAX_PIXELS;
     }
 
     /** The format a file's first bytes say it is, of the three this code decodes; null for any other. */
@@ -400,17 +585,39 @@ public final class CloudImageCopy {
     /** The PNG settings of one length only. */
     private static final Map<String, Integer> PNG_LENGTHS = Map.of("gAMA", 4, "cHRM", 32, "sRGB", 1, "pHYs", 9, "cICP", 4);
 
+    /** An IDAT chunk shorter than this, but for the last, is one part beside the picture's data ({@link #MAX_PARTS}). */
+    private static final int SHORT_IDAT = 1024;
+
     private static Header png(Bytes in) throws IOException {
         in.skip(8);
         var beside = new LinkedHashSet<String>();
-        int colorType = -1, bitDepth = 8, orientation = 1;
+        int colorType = -1, bitDepth = 8, orientation = 1, parts = 0;
+        long lastIdat = -1;
+        var drawn = new java.util.ArrayList<Integer>();
+        boolean more = false;
         while (true) {
+            int start = in.position();
             long length = in.u32();
-            String type = new String(in.readFully(4), StandardCharsets.ISO_8859_1);
+            String type = in.ascii(4);
+            if (DRAWN_FROM.contains(type) && length <= in.remaining() - 4) {
+                drawn.add(start);
+                drawn.add((int) (start + 12 + length));
+            } else {
+                more = true;
+            }
+            if (type.equals("IDAT")) {
+                // Real encoders write it in runs of kilobytes; thousands of tiny ones are made to be slow.
+                if (lastIdat >= 0 && lastIdat < SHORT_IDAT) parts++;
+                lastIdat = length;
+            } else {
+                parts++;
+            }
+            if (parts > MAX_PARTS) return Header.refused(TOO_MANY_PARTS);
             switch (type) {
                 case "IHDR" -> {
                     if (length != 13) return Header.refused("it is not a PNG the server can read: its header is broken");
-                    in.skip(8);
+                    long width = in.u32(), height = in.u32();
+                    if (tooManyPixels(width, height)) return Header.refused(TOO_MANY_PIXELS);
                     bitDepth = in.u8();
                     colorType = in.u8();
                     in.skip(3 + 4);
@@ -418,7 +625,7 @@ public final class CloudImageCopy {
                 }
                 case "IEND" -> {
                     in.skip(length + 4);
-                    if (in.read() != -1) beside.add("bytes after the picture's end");
+                    if (in.remaining() > 0) beside.add("bytes after the picture's end");
                     int samples = switch (colorType) {
                         case 0, 3 -> 1;
                         case 4 -> 2;
@@ -426,7 +633,7 @@ public final class CloudImageCopy {
                         default -> 4;
                     };
                     return new Header(Format.PNG, samples * Math.max(1, bitDepth / 8), orientation,
-                            words(beside), null);
+                            words(beside), null, more ? drawn.stream().mapToInt(Integer::intValue).toArray() : null);
                 }
                 case "eXIf" -> {
                     byte[] exif = in.readUpTo((int) Math.min(length, 1 << 20));
@@ -469,7 +676,7 @@ public final class CloudImageCopy {
     private static Header jpeg(Bytes in) throws IOException {
         in.skip(2);
         var beside = new LinkedHashSet<String>();
-        int frame = -1, components = 0, scans = 0, orientation = 1;
+        int frame = -1, components = 0, scans = 0, orientation = 1, parts = 0;
         boolean interleaved = true;
         while (true) {
             int b = in.read();
@@ -481,16 +688,21 @@ public final class CloudImageCopy {
             } while (marker == 0xFF);
             if (marker == -1) throw new EOFException();
             if (marker == 0xD9) {
-                if (in.read() != -1) beside.add("bytes after the picture's end");
+                if (in.remaining() > 0) beside.add("bytes after the picture's end");
                 break;
             }
             if (marker == 0x01 || marker >= 0xD0 && marker <= 0xD7) continue;
+            if (++parts > MAX_PARTS) return Header.refused(TOO_MANY_PARTS);
             int length = in.u16() - 2;
             if (length < 0) return Header.refused("it is not a JPEG the server can read: its structure is broken");
             if (marker >= 0xC0 && marker <= 0xCF && marker != 0xC4 && marker != 0xC8 && marker != 0xCC) {
                 if (frame != -1) return Header.refused("it is not a baseline JPEG: it holds more than one frame");
                 frame = marker;
-                in.skip(5);
+                if (length < 6) return Header.refused("it is not a JPEG the server can read: its frame is broken");
+                in.skip(1);
+                int height = in.u16(), width = in.u16();
+                if (height == 0) return Header.refused("it is not a baseline JPEG, the kind browsers paste");
+                if (tooManyPixels(width, height)) return Header.refused(TOO_MANY_PIXELS);
                 components = in.u8();
                 in.skip(length - 6);
             } else if (marker == 0xDA) {
@@ -549,32 +761,37 @@ public final class CloudImageCopy {
         if ((packed & 0x80) != 0) in.skip(3L << ((packed & 7) + 1));
         var beside = new LinkedHashSet<String>();
         int images = 0;
+        int[] parts = {0};
         while (true) {
             int b = in.read();
             if (b == -1) throw new EOFException();
             if (b == 0x3B) {
-                if (in.read() != -1) beside.add("bytes after the picture's end");
+                if (in.remaining() > 0) beside.add("bytes after the picture's end");
                 break;
             }
             if (b == 0x2C) {
                 images++;
-                in.skip(8);
+                in.skip(4);
+                int width = in.u16le(), height = in.u16le();
+                if (images == 1 && tooManyPixels(width, height)) return Header.refused(TOO_MANY_PIXELS);
                 int local = in.u8();
                 if ((local & 0x80) != 0) in.skip(3L << ((local & 7) + 1));
                 in.skip(1);
-                in.skipSubBlocks();
+                // The picture's own data, in sub-blocks of 255 but its last; many short ones are made to be slow.
+                if (!in.skipSubBlocks(parts, true)) return Header.refused(TOO_MANY_PARTS);
             } else if (b == 0x21) {
                 int label = in.u8();
+                parts[0]++;
                 if (label == 0xF9) {
-                    in.skipSubBlocks();
+                    if (!in.skipSubBlocks(parts, false)) return Header.refused(TOO_MANY_PARTS);
                 } else if (label == 0xFF) {
                     int size = in.u8();
                     String id = new String(in.readFully(size), StandardCharsets.ISO_8859_1);
                     if (!id.equals("NETSCAPE2.0") && !id.equals("ANIMEXTS1.0")) beside.add("data of another program");
-                    in.skipSubBlocks();
+                    if (!in.skipSubBlocks(parts, false)) return Header.refused(TOO_MANY_PARTS);
                 } else {
                     beside.add(label == 0xFE ? "a comment" : label == 0x01 ? "text" : "data of another program");
-                    in.skipSubBlocks();
+                    if (!in.skipSubBlocks(parts, false)) return Header.refused(TOO_MANY_PARTS);
                 }
             } else {
                 return Header.refused("it is not a GIF the server can read: its structure is broken");
@@ -629,24 +846,33 @@ public final class CloudImageCopy {
                 : (long) u16(d, at, false) << 16 | (u16(d, at + 2, false) & 0xFFFFL);
     }
 
-    /** A file read from its start, a byte at a time or in runs, with what was read put back. */
-    private static final class Bytes implements AutoCloseable {
-        private final InputStream in;
-        private byte[] back = new byte[0];
-        private int backAt;
+    /** A file's bytes, from memory, walked from its start; its check's time asked now and then. */
+    private static final class Bytes {
+        private final byte[] data;
+        private final Deadline deadline;
+        private int at;
+        private int steps;
 
-        Bytes(InputStream in) {
-            this.in = in;
+        Bytes(byte[] data, Deadline deadline) {
+            this.data = data;
+            this.deadline = deadline;
+        }
+
+        private void tick() throws IOException {
+            if ((++steps & 0xFFF) == 0) deadline.inTime();
+        }
+
+        int remaining() {
+            return data.length - at;
+        }
+
+        int position() {
+            return at;
         }
 
         int read() throws IOException {
-            if (backAt < back.length) return back[backAt++] & 0xFF;
-            return in.read();
-        }
-
-        void unread(byte[] bytes) {
-            back = bytes;
-            backAt = 0;
+            tick();
+            return at < data.length ? data[at++] & 0xFF : -1;
         }
 
         int u8() throws IOException {
@@ -659,44 +885,52 @@ public final class CloudImageCopy {
             return u8() << 8 | u8();
         }
 
+        int u16le() throws IOException {
+            return u8() | u8() << 8;
+        }
+
         long u32() throws IOException {
             return (long) u16() << 16 | u16();
         }
 
+        String ascii(int n) throws IOException {
+            return new String(readFully(n), StandardCharsets.ISO_8859_1);
+        }
+
         byte[] readUpTo(int n) throws IOException {
-            var out = new ByteArrayOutputStream(Math.min(n, 1 << 16));
-            for (int i = 0; i < n; i++) {
-                int b = read();
-                if (b == -1) break;
-                out.write(b);
-            }
-            return out.toByteArray();
+            tick();
+            int m = Math.min(n, remaining());
+            byte[] out = java.util.Arrays.copyOfRange(data, at, at + m);
+            at += m;
+            return out;
         }
 
         byte[] readFully(int n) throws IOException {
-            byte[] got = readUpTo(n);
-            if (got.length < n) throw new EOFException();
-            return got;
+            if (n > remaining()) throw new EOFException();
+            return readUpTo(n);
         }
 
         void skip(long n) throws IOException {
-            while (n > 0 && backAt < back.length) {
-                backAt++;
-                n--;
-            }
-            if (n > 0) {
-                long skipped = in.skip(n);
-                while (skipped < n) {
-                    if (in.read() == -1) throw new EOFException();
-                    skipped++;
-                    skipped += in.skip(n - skipped);
-                }
-            }
+            tick();
+            if (n < 0 || n > remaining()) throw new EOFException();
+            at += (int) n;
         }
 
-        /** A GIF's data sub-blocks, to the one of length 0. */
-        void skipSubBlocks() throws IOException {
-            for (int n = u8(); n != 0; n = u8()) skip(n);
+        /**
+         * A GIF's data sub-blocks, to the one of length 0, each counted in {@code parts} -- of the
+         * picture's own data ({@code picture}) only one shorter than 255 that is not its last: false
+         * once they are more than {@link #MAX_PARTS}.
+         */
+        boolean skipSubBlocks(int[] parts, boolean picture) throws IOException {
+            int n = u8();
+            while (n != 0) {
+                skip(n);
+                int next = u8();
+                if (!picture || n < 255 && next != 0) parts[0]++;
+                if (parts[0] > MAX_PARTS) return false;
+                n = next;
+            }
+            return true;
         }
 
         /**
@@ -712,14 +946,9 @@ public final class CloudImageCopy {
                 while (next == 0xFF) next = read();
                 if (next == -1) throw new EOFException();
                 if (next == 0x00 || next >= 0xD0 && next <= 0xD7) continue;
-                unread(new byte[]{(byte) 0xFF, (byte) next});
+                at -= 2;
                 return;
             }
-        }
-
-        @Override
-        public void close() throws IOException {
-            in.close();
         }
     }
 
@@ -932,15 +1161,14 @@ public final class CloudImageCopy {
         return png(image, null);
     }
 
-    private static byte[] png(BufferedImage image, Check check) throws IOException {
+    private static byte[] png(BufferedImage image, Stopper stopper) throws IOException {
         ImageWriter writer = ImageIO.getImageWritersByFormatName("png").next();
-        if (check != null) check.writer = writer;
+        if (stopper != null) writer.addIIOWriteProgressListener(stopper);
         var bytes = new ByteArrayOutputStream();
         try (var out = new MemoryCacheImageOutputStream(bytes)) {
             writer.setOutput(out);
             writer.write(null, new IIOImage(image, null, null), writer.getDefaultWriteParam());
         } finally {
-            if (check != null) check.writer = null;
             writer.dispose();
         }
         return bytes.toByteArray();
@@ -951,9 +1179,9 @@ public final class CloudImageCopy {
         return jpeg(image, quality, null);
     }
 
-    private static byte[] jpeg(BufferedImage image, float quality, Check check) throws IOException {
+    private static byte[] jpeg(BufferedImage image, float quality, Stopper stopper) throws IOException {
         ImageWriter writer = ImageIO.getImageWritersByFormatName("jpeg").next();
-        if (check != null) check.writer = writer;
+        if (stopper != null) writer.addIIOWriteProgressListener(stopper);
         var bytes = new ByteArrayOutputStream();
         try (var out = new MemoryCacheImageOutputStream(bytes)) {
             writer.setOutput(out);
@@ -962,7 +1190,6 @@ public final class CloudImageCopy {
             param.setCompressionQuality(quality);
             writer.write(null, new IIOImage(image, null, null), param);
         } finally {
-            if (check != null) check.writer = null;
             writer.dispose();
         }
         return bytes.toByteArray();

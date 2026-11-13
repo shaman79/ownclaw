@@ -24,12 +24,12 @@ class ImageHeaderTest {
     @DisplayName("a progressive, lossless, hierarchical or arithmetic JPEG, and a baseline one in several scans, are refused from the header")
     void jpegsReadWhole(@TempDir Path dir) throws Exception {
         for (int frame : new int[]{0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF}) {
-            var h = CloudImageCopy.header(Files.write(dir.resolve("f" + frame), TestImages.jpegDeclaring(frame, 30000, 30000, 3, 1)));
+            var h = CloudImageCopy.header(Files.write(dir.resolve("f" + frame), TestImages.jpegDeclaring(frame, 16000, 16000, 3, 1)));
             assertNotNull(h.refused(), "frame " + Integer.toHexString(frame));
         }
-        var several = CloudImageCopy.header(Files.write(dir.resolve("s"), TestImages.jpegDeclaring(0xC0, 30000, 30000, 3, 3)));
+        var several = CloudImageCopy.header(Files.write(dir.resolve("s"), TestImages.jpegDeclaring(0xC0, 16000, 16000, 3, 3)));
         assertTrue(several.refused().contains("several scans"), several.refused());
-        var baseline = CloudImageCopy.header(Files.write(dir.resolve("b"), TestImages.jpegDeclaring(0xC0, 30000, 30000, 3, 1)));
+        var baseline = CloudImageCopy.header(Files.write(dir.resolve("b"), TestImages.jpegDeclaring(0xC0, 16000, 16000, 3, 1)));
         assertNull(baseline.refused(), "baseline in one scan is read row by row: " + baseline.refused());
         assertEquals(CloudImageCopy.Format.JPEG, baseline.format());
         var extended = CloudImageCopy.header(Files.write(dir.resolve("e"), TestImages.jpegDeclaring(0xC1, 3000, 3000, 1, 1)));
@@ -50,6 +50,113 @@ class ImageHeaderTest {
         assertEquals(8, CloudImageCopy.header(dir.resolve("wide.png")).bytesPerPixel());
         assertNotNull(CloudImageCopy.of(Files.write(dir.resolve("ok.png"), TestImages.uniformGreyPng(4000, 10))).copy());
         // Mutation: drop the row check -> the reader is handed rows of any width.
+    }
+
+    @Test
+    @DisplayName("a declaration no screenshot or photo has -- over 268 million pixels, over 10,000 parts beside the picture's data -- is refused from the header, at once")
+    void tooLargeToCheck(@TempDir Path dir) throws Exception {
+        var tooMany = new java.util.LinkedHashMap<String, byte[]>();
+        tooMany.put("png 16385 x 16385", TestImages.pngOf("IHDR", TestImages.ihdr(16385, 16385, 8, 0),
+                "IDAT", TestImages.idat(new byte[]{0, 0}, 1), "IEND", new byte[0]));
+        // The reviewers' 215 bytes, a quarter of a minute of decoding.
+        tooMany.put("jpeg 46340 x 46340", TestImages.jpegDeclaring(0xC0, 46340, 46340, 3, 1));
+        tooMany.put("gif 65535 x 65535", TestImages.gifDeclaring(65535, 65535));
+        for (var e : tooMany.entrySet()) {
+            long start = System.nanoTime();
+            var made = CloudImageCopy.of(Files.write(dir.resolve("p" + e.getValue().length), e.getValue()));
+            assertNull(made.copy(), e.getKey());
+            assertEquals(CloudImageCopy.TOO_MANY_PIXELS, made.privateBecause(), e.getKey());
+            assertTrue(System.nanoTime() - start < 500_000_000L, e.getKey() + " answered from its header");
+        }
+        assertNull(CloudImageCopy.header(Files.write(dir.resolve("edge.png"), TestImages.pngOf("IHDR",
+                TestImages.ihdr(16384, 16384, 8, 0), "IDAT", TestImages.idat(new byte[]{0, 0}, 1), "IEND", new byte[0])))
+                .refused(), "2^28 pixels exactly is checked");
+
+        var parts = new java.util.LinkedHashMap<String, byte[]>();
+        parts.put("png of empty chunks", pngWithEmptyChunks(MAX_PARTS + 1));
+        parts.put("png of tiny IDATs", pngOfTinyIdats(MAX_PARTS + 2));
+        parts.put("jpeg of comments", jpegWithComments(MAX_PARTS + 1));
+        parts.put("gif comment in one-byte sub-blocks", gifWithComment(MAX_PARTS + 1));
+        parts.put("gif picture in one-byte sub-blocks", gifOfTinyBlocks(MAX_PARTS + 2));
+        for (var e : parts.entrySet()) {
+            var made = CloudImageCopy.of(Files.write(dir.resolve("q" + e.getKey().hashCode()), e.getValue()));
+            assertEquals(CloudImageCopy.TOO_MANY_PARTS, made.privateBecause(), e.getKey());
+        }
+        // Under the bound: read, and what it carries said.
+        assertEquals("data of another program", CloudImageCopy.header(
+                Files.write(dir.resolve("ok.png"), pngWithEmptyChunks(9_000))).metadata());
+        assertEquals("a comment", CloudImageCopy.header(Files.write(dir.resolve("ok.gif"), gifWithComment(9_000))).metadata());
+        assertEquals("a comment", CloudImageCopy.header(Files.write(dir.resolve("ok.jpg"), jpegWithComments(9_000))).metadata());
+        assertNull(CloudImageCopy.header(Files.write(dir.resolve("ok2.gif"), gifOfTinyBlocks(9_000))).refused());
+        // Mutation: no pixel bound -> the JPEG is decoded for seconds; no part count -> each is read part by part.
+    }
+
+    static final int MAX_PARTS = CloudImageCopy.MAX_PARTS;
+
+    /** A 1 x 1 grey PNG with {@code n} empty chunks of a program's own before its data. */
+    static byte[] pngWithEmptyChunks(int n) {
+        var out = new java.io.ByteArrayOutputStream();
+        byte[] head = TestImages.pngOf("IHDR", TestImages.ihdr(1, 1, 8, 0));
+        out.writeBytes(head);
+        for (int i = 0; i < n; i++) TestImages.chunk(out, "prVt", new byte[0]);
+        byte[] rest = TestImages.pngOf("IDAT", TestImages.idat(new byte[]{0, (byte) 128}, 1), "IEND", new byte[0]);
+        out.write(rest, 8, rest.length - 8);
+        return out.toByteArray();
+    }
+
+    /** A 1 x 1 grey PNG whose compressed data is split into {@code n} IDAT chunks of a byte or so. */
+    static byte[] pngOfTinyIdats(int n) {
+        byte[] data = TestImages.idat(new byte[]{0, (byte) 128}, 1);
+        var out = new java.io.ByteArrayOutputStream();
+        out.writeBytes(TestImages.pngOf("IHDR", TestImages.ihdr(1, 1, 8, 0)));
+        for (int i = 0; i < n; i++) {
+            int from = Math.min(i, data.length), to = i == n - 1 ? data.length : Math.min(i + 1, data.length);
+            TestImages.chunk(out, "IDAT", java.util.Arrays.copyOfRange(data, from, to));
+        }
+        TestImages.chunk(out, "IEND", new byte[0]);
+        return out.toByteArray();
+    }
+
+    /** A small JPEG with {@code n} empty comments after its start. */
+    static byte[] jpegWithComments(int n) throws Exception {
+        byte[] jpeg = TestImages.encoded(TestImages.screenshot(40, 30), "jpeg");
+        var out = new java.io.ByteArrayOutputStream();
+        out.write(jpeg, 0, 2);
+        for (int i = 0; i < n; i++) out.writeBytes(new byte[]{(byte) 0xFF, (byte) 0xFE, 0, 2});
+        out.write(jpeg, 2, jpeg.length - 2);
+        return out.toByteArray();
+    }
+
+    /** A 1 x 1 GIF behind a comment of {@code n} one-byte sub-blocks. */
+    static byte[] gifWithComment(int n) {
+        var out = new java.io.ByteArrayOutputStream();
+        out.writeBytes("GIF89a".getBytes(java.nio.charset.StandardCharsets.ISO_8859_1));
+        out.writeBytes(new byte[]{1, 0, 1, 0, (byte) 0x80, 0, 0, 0, 0, 0, (byte) 255, (byte) 255, (byte) 255});
+        out.write(0x21);
+        out.write(0xFE);
+        for (int i = 0; i < n; i++) {
+            out.write(1);
+            out.write('x');
+        }
+        out.write(0);
+        out.writeBytes(new byte[]{0x2C, 0, 0, 0, 0, 1, 0, 1, 0, 0, 2, 2, 0x44, 0x01, 0, 0x3B});
+        return out.toByteArray();
+    }
+
+    /** A 1 x 1 GIF whose picture's data is in {@code n} sub-blocks of one byte. */
+    static byte[] gifOfTinyBlocks(int n) {
+        var out = new java.io.ByteArrayOutputStream();
+        out.writeBytes("GIF89a".getBytes(java.nio.charset.StandardCharsets.ISO_8859_1));
+        out.writeBytes(new byte[]{1, 0, 1, 0, (byte) 0x80, 0, 0, 0, 0, 0, (byte) 255, (byte) 255, (byte) 255});
+        out.writeBytes(new byte[]{0x2C, 0, 0, 0, 0, 1, 0, 1, 0, 0, 2});
+        byte[] lzw = {0x44, 0x01};
+        for (int i = 0; i < n; i++) {
+            out.write(1);
+            out.write(i < lzw.length ? lzw[i] : 0);
+        }
+        out.write(0);
+        out.write(0x3B);
+        return out.toByteArray();
     }
 
     @Test

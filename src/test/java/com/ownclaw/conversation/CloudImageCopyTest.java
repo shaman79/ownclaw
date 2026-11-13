@@ -15,6 +15,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.Arrays;
+import java.util.List;
 import java.util.concurrent.atomic.AtomicLong;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -230,7 +231,7 @@ class CloudImageCopyTest {
                 .privateBecause().contains("WebP"));
         // A 200-byte progressive JPEG declaring 30,000 x 30,000 took a server's memory: not read at all.
         long start = System.nanoTime();
-        var progressive = CloudImageCopy.of(file(dir, "p.jpg", TestImages.jpegDeclaring(0xC2, 30000, 30000, 3, 1)));
+        var progressive = CloudImageCopy.of(file(dir, "p.jpg", TestImages.jpegDeclaring(0xC2, 16000, 16000, 3, 1)));
         assertNull(progressive.copy());
         assertTrue(progressive.privateBecause().contains("progressive"), progressive.privateBecause());
         assertTrue(System.nanoTime() - start < 2_000_000_000L, "refused from its header, without decoding it");
@@ -238,7 +239,7 @@ class CloudImageCopyTest {
             assertNull(CloudImageCopy.of(file(dir, "f" + frame, TestImages.jpegDeclaring(frame, 3000, 3000, 3, 1))).copy(),
                     "frame " + Integer.toHexString(frame));
         }
-        var scans = CloudImageCopy.of(file(dir, "s.jpg", TestImages.jpegDeclaring(0xC0, 30000, 30000, 3, 3)));
+        var scans = CloudImageCopy.of(file(dir, "s.jpg", TestImages.jpegDeclaring(0xC0, 16000, 16000, 3, 3)));
         assertNull(scans.copy(), "a baseline JPEG in several scans is read into buffers of its whole size");
         assertTrue(scans.privateBecause().contains("several scans"), scans.privateBecause());
         // Mutation: let ImageIO pick the reader by its guess -> the WBMP-shaped bytes "decode";
@@ -273,12 +274,11 @@ class CloudImageCopyTest {
     }
 
     @Test
-    @DisplayName("each accepted format at its largest size -- 65,535 x 65,535 -- is read in bounded memory and time, from a file of a few hundred bytes")
+    @DisplayName("each accepted format at its largest size -- 65,535 x 65,535 -- is answered in bounded memory and time, from a file of a few hundred bytes")
     void theLargestDeclarationsAreBounded(@TempDir Path dir) throws Exception {
         for (var crafted : new Object[][]{
                 {"baseline.jpg", TestImages.jpegDeclaring(0xC0, 65535, 65535, 3, 1)},
-                // The largest the JDK's reader takes is a little under 2^31 samples: read every 8th pixel.
-                {"baseline30000.jpg", TestImages.jpegDeclaring(0xC0, 30000, 30000, 3, 1)},
+                {"baseline16384.jpg", TestImages.jpegDeclaring(0xC0, 16384, 16384, 3, 1)},
                 {"grey.png", TestImages.uniformGreyPng(65535, 300)},
                 {"tall.png", TestImages.uniformGreyPng(300, 65535)},
                 {"two.gif", TestImages.gifDeclaring(65535, 65535)}}) {
@@ -293,6 +293,30 @@ class CloudImageCopyTest {
             assertNotNull(result[0], crafted[0] + ": an answer");
         }
         // Mutation: no time limit -> minutes.
+    }
+
+    @Test
+    @DisplayName("a reader is given the chunks it draws from and no other: a palette PNG's 60 MB suggested palette is never parsed")
+    void theReaderGetsThePictureAlone(@TempDir Path dir) throws Exception {
+        // A palette image: the JDK's reader parses every chunk of one whatever it is told -- an sPLT
+        // into five arrays of ints, several times its size.
+        var palette = new java.io.ByteArrayOutputStream();
+        palette.writeBytes(new byte[]{0, 0, 0, (byte) 255, (byte) 255, (byte) 255});
+        byte[] row = new byte[1 + 40];
+        for (int i = 1; i < row.length; i++) row[i] = (byte) (i % 2);
+        byte[] splt = new byte[6 + 6 * 10_000_000];
+        System.arraycopy("bomb\0".getBytes(StandardCharsets.ISO_8859_1), 0, splt, 0, 5);
+        splt[5] = 8;
+        byte[] png = TestImages.pngOf("IHDR", TestImages.ihdr(40, 30, 8, 3), "PLTE", palette.toByteArray(),
+                "sPLT", splt, "IDAT", TestImages.idat(row, 30), "IEND", new byte[0]);
+        splt = null;
+        Path f = file(dir, "palette.png", png);
+        var result = new CloudImageCopy.Made[1];
+        long peak = heapPeak(() -> result[0] = CloudImageCopy.of(f));
+        assertNotNull(result[0].copy(), result[0].privateBecause());
+        assertEquals("data of another program", result[0].copy().metadata());
+        assertTrue(peak < 150L << 20, (peak >> 20) + " MB of heap: the suggested palette was parsed");
+        // Mutation: hand the reader the file whole -> hundreds of megabytes of arrays.
     }
 
     @Test
@@ -312,16 +336,21 @@ class CloudImageCopyTest {
     }
 
     @Test
-    @DisplayName("past its time the read is aborted and the file stays private, saying so; checks run one at a time")
+    @DisplayName("past its time the read is aborted from the reading thread and the file stays private, saying so -- a PNG's and a JPEG's; checks run one at a time")
     void pastItsTimeItStaysPrivate(@TempDir Path dir) throws Exception {
-        // Twenty thousand rows of twenty thousand grey pixels: under a megabyte, seconds of inflating.
-        Path big = file(dir, "big.png", TestImages.uniformGreyPng(20000, 20000));
-        long start = System.nanoTime();
-        var made = CloudImageCopy.of(big, Duration.ofMillis(300));
-        long ms = (System.nanoTime() - start) / 1_000_000;
-        assertNull(made.copy());
-        assertEquals(CloudImageCopy.TOO_LONG, made.privateBecause());
-        assertTrue(ms < 5_000, "the read was aborted, not let run: " + ms + " ms");
+        // Sixteen thousand rows of sixteen thousand grey pixels: under a megabyte, two seconds of
+        // inflating; and a JPEG of 16,384 x 16,384 of a few hundred bytes, a second and more of
+        // decoding -- whose reader throws when another thread aborts it.
+        Path big = file(dir, "big.png", TestImages.uniformGreyPng(16000, 16000));
+        Path jpeg = file(dir, "big.jpg", TestImages.jpegDeclaring(0xC0, 16384, 16384, 3, 1));
+        for (Path f : List.of(big, jpeg)) {
+            long start = System.nanoTime();
+            var made = CloudImageCopy.of(f, Duration.ofMillis(200));
+            long ms = (System.nanoTime() - start) / 1_000_000;
+            assertNull(made.copy());
+            assertEquals(CloudImageCopy.TOO_LONG, made.privateBecause());
+            assertTrue(ms < 800, f.getFileName() + ": the read was aborted at its time, not let run: " + ms + " ms");
+        }
 
         // Two at once queue: one thread, so the second starts when the first has ended.
         var pool = java.util.concurrent.Executors.newFixedThreadPool(2);
@@ -335,6 +364,6 @@ class CloudImageCopyTest {
         } finally {
             pool.shutdownNow();
         }
-        // Mutation: no abort on the timer -> the read runs its seconds; a pool of two -> side by side.
+        // Mutation: the Stopper aborts nothing -> each read runs its seconds; a pool of two -> side by side.
     }
 }
