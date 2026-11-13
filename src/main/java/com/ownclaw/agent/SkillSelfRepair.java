@@ -341,7 +341,7 @@ public class SkillSelfRepair {
             // no vault value, as nothing stored for display holds one.
             String what = ctx.firstRunOf(results, r.what()) == null
                     ? Redactor.scrubVault(r.what(), ctx.secretValues()).text() : WITHHELD;
-            found.computeIfAbsent(r.tool(), n -> new Found(n, new ArrayList<>(), callsOf.get(n))).what().add(what);
+            found.computeIfAbsent(r.tool(), n -> new Found(n, new ArrayList<>(), callsOf.getOrDefault(n, List.of()))).what().add(what);
         }
         if (ended.terminationReason() != TerminationReason.CANCELLED) {
             for (var e : callsOf.entrySet()) {
