@@ -483,6 +483,20 @@ class SkillSelfRepairTest {
     }
 
     @Test
+    @DisplayName("a run of the changed skill that worked is not 'fixed' unless the repair says its check passed: a degraded output can work")
+    void aWorkingRunIsNotTheCheck(@TempDir Path tmp) throws Exception {
+        fix = new Fix(tmp);
+        fix.rig.queue.start();
+        fix.scriptMenu(true);
+        scriptFixAndCheck(fix.rig, Map.of("debug", true), respond("Changed the headers and ran it."));
+        fix.unattended(TASK);
+        var row = fix.ended(fix.lastId());
+        assertEquals("unverified", row.get("outcome"));
+        String note = fix.told().get(fix.told().size() - 1);
+        assertTrue(note.contains("Changed, but not checked"), note);
+    }
+
+    @Test
     @DisplayName("changed, and run again it still shows the problem: not fixed, and the owner told so")
     void changedButStillFailing(@TempDir Path tmp) throws Exception {
         fix = new Fix(tmp);
@@ -590,7 +604,7 @@ class SkillSelfRepairTest {
         var first = fix.ended(fix.lastId());
         assertEquals("unverified", first.get("outcome"));
         String note = fix.told().get(fix.told().size() - 1);
-        assertTrue(note.contains("Changed, but the repair did not run it again"), note);
+        assertTrue(note.contains("Changed, but not checked: the repair did not run it again after its change and say the check passed."), note);
 
         fix.menuRun(true);
         var rows = fix.repairs();

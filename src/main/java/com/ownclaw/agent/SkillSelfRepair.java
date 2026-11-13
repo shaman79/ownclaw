@@ -758,7 +758,7 @@ public class SkillSelfRepair {
             case FIXED -> "Fixed and checked: it was run again, and the problem is gone. " + which;
             case UNVERIFIED -> (sideEffects
                     ? "Changed, but not run again to check it: its SKILL.yaml does not say it has no side effects."
-                    : completed ? "Changed, but the repair did not run it again to check the change."
+                    : completed ? "Changed, but not checked: the repair did not run it again after its change and say the check passed."
                     : "Changed, but the repair did not finish, so the change was not checked.") + " " + which;
             case NOT_FIXED -> "Changed, but run again it still shows the problem. When the problem shows again, "
                     + "self-repair tries again with this report. " + which;

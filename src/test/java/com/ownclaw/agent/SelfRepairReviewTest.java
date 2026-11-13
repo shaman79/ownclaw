@@ -265,6 +265,34 @@ class SelfRepairReviewTest {
                 && p.contains(PROBLEM)), parts.toString());
     }
 
+    // 6: one repair of a skill at a time, whoever's -- and nothing of another account's repair is added or said.
+    @Test
+    @DisplayName("6: while another account's repair of the skill runs, nothing starts and nothing is added to its record")
+    void anotherAccountsRepairUnderWay(@TempDir Path tmp) throws Exception {
+        fix = new Fix(tmp);
+        fix.menuRun(true);                                        // u1's repair waits in the queue
+        fix.scriptMenu(true);
+        AgentResult r = fix.rig.loop.executeFull("u2", TASK, true);
+        assertEquals(1, fix.repairs().size(), fix.repairs().toString());
+        assertNull(fix.repairRow(0).get("added_problems"), "u2's problem went into u1's record");
+        assertEquals(1, fix.rig.queue.getQueueSize());
+        assertTrue(r.response().contains("is being repaired already, for another account"), r.response());
+        assertFalse(r.response().contains((String) fix.repairRow(0).get("repair_task_id")), "u1's task named to u2");
+    }
+
+    // F7: switched off, unattended respond still offered problems, saying each listed skill is repaired.
+    @Test
+    @DisplayName("F7: switched off, an unattended answer is offered no problems and promises no repair")
+    void switchedOffPromisesNothing(@TempDir Path tmp) throws Exception {
+        fix = new Fix(tmp);
+        fix.rig.config.getSelfRepair().setEnabled(false);
+        fix.rig.cloud.think.add(respond("ok"));
+        fix.unattended("Say hello.");
+        var props = propertiesOfRespond(fix.rig.cloud.calls("think").get(0));
+        assertFalse(props.containsKey(SkillSelfRepair.PROBLEMS), props.toString());
+        assertFalse(String.valueOf(props).contains("is repaired after this task"), props.toString());
+    }
+
     // F4: repair records were looked up by skill name alone: one account was told another's report.
     @Test
     @DisplayName("F4: another account's repair that changed nothing neither stops this account's repair nor is told to it")
