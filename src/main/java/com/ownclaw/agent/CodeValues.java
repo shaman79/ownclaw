@@ -78,7 +78,8 @@ final class CodeValues {
      * @param refused why it was refused, as the script says it -- "outside" (code, an f-string's field
      *                or format), "header" (a comment on the first two lines, where an encoding is
      *                declared), "fstring" (an f-string, on a Python older than 3.12), "changed" (the
-     *                code put back does not read as the program written), "bytes" (a value a bytes
+     *                code put back does not read as the program written), "deep" (nested too deeply
+     *                to be read back and checked), "bytes" (a value a bytes
      *                literal cannot hold), "read" (code the tokenizer could not read) -- or null
      * @param line    the line of the code it was refused at, 0 when no line is known
      * @param failed  why it could not run at all -- the check's own failure, nothing about the code --
@@ -118,6 +119,8 @@ final class CodeValues {
                 case "changed" -> "would not read, with your values put back, as the program the model wrote -- "
                         + "Python, reading the file as the skill's runner does, takes it for other code";
                 case "bytes" -> "names a value of yours that a bytes literal cannot hold" + at;
+                case "deep" -> "is nested too deeply for Python to read it back as one program, so your values "
+                        + "could not be checked once put back";
                 case "read" -> "could not be read by Python's tokenizer" + at;
                 default -> "names a value of yours" + at + " outside any string or comment, where it would be "
                         + "code, not text";

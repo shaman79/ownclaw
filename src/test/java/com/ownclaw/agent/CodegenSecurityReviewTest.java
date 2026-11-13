@@ -358,4 +358,16 @@ class CodegenSecurityReviewTest {
         assertFalse(Files.exists(tmp.resolve("skills/generated/pip_probe")), "nothing written");
         // Mutation: check only the reply's requirements fence -> the planner's index URL reaches pip.
     }
+
+    @Test
+    @DisplayName("round 4: code nested too deeply to be read back -- thousands of terms in one expression -- is refused plainly, not a check that could not run")
+    void tooDeepToCheck(@TempDir Path tmp) throws Exception {
+        SkillManager python = SyntaxCheckTest.manager(tmp.resolve("python"));
+        String code = "X = '<ssid_1>'" + " + 'a'".repeat(5_000) + "\n";
+        CodeValues.Restored r = python.restoreValues(code, Map.of("<ssid_1>", "ExampleHome5G"));
+        assertNull(r.failed(), "it ran: " + r.failed());
+        assertEquals("deep", r.refused(), String.valueOf(r.code()));
+        assertTrue(r.why().contains("nested too deeply"), r.why());
+        // Mutation: catch nothing -> the script dies, and the code generation says the check could not run.
+    }
 }

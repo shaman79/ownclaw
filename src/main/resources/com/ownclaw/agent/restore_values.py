@@ -292,7 +292,13 @@ def checked(code, values, out):
         got = joined(ast.parse(after))
     except (SyntaxError, ValueError):
         raise Refused(0, 'changed')
-    if ast.dump(got) != ast.dump(meant(code, values)):
+    try:
+        same = ast.dump(got) == ast.dump(meant(code, values))
+    except (RecursionError, MemoryError):
+        # Nested deeper than this Python reads back -- thousands of terms in one expression: it
+        # cannot be checked, so it is not put back.
+        raise Refused(0, 'deep')
+    if not same:
         raise Refused(0, 'changed')
     return out
 
@@ -303,6 +309,8 @@ def main():
         result = {'code': checked(data['code'], data['values'], restored(data['code'], data['values']))}
     except Refused as r:
         result = {'refused': r.why, 'line': r.line}
+    except (RecursionError, MemoryError):
+        result = {'refused': 'deep', 'line': 0}
     sys.stdout.write(json.dumps(result))
 
 
