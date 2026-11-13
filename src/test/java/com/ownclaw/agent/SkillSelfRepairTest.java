@@ -700,16 +700,74 @@ class SkillSelfRepairTest {
         assertEquals("running", fix.repairRow(1).get("outcome"));
     }
 
+    /** OwnClaw started again: a new queue, and the self-repair a new process makes, wired into the loop. */
+    static SkillSelfRepair restarted(Fix fix, TaskQueue queue) {
+        var repair = new SkillSelfRepair(fix.rig.jdbc, fix.rig.config, fix.rig.skills, fix.rig.registry, queue,
+                new ResultDelivery(fix.rig.chat, fix.rig.emitter), fix.rig.chat, fix.rig.events, ZoneId.of("UTC"));
+        fix.rig.loop.setSelfRepair(repair);
+        repair.start();
+        return repair;
+    }
+
     @Test
-    @DisplayName("a repair under way when OwnClaw stops is recorded as interrupted at the next start, and does not stop the next one")
-    void interruptedAtStartup(@TempDir Path tmp) throws Exception {
+    @DisplayName("F10: a repair under way when OwnClaw stops starts again when it is up: its record goes on, both pages say so, and the owner is told")
+    void resumedAfterARestart(@TempDir Path tmp) throws Exception {
+        fix = new Fix(tmp);
+        AgentResult trigger = fix.menuRun(true);   // queued; the process "stops" before it runs
+        String cutOff = (String) fix.repairRow(0).get("repair_task_id");
+        int toldBefore = fix.told().size();
+
+        var queue = new TaskQueue(fix.rig.loop, fix.rig.events, fix.rig.emitter, fix.rig.config, fix.rig.cancellation);
+        try {
+            var repair = restarted(fix, queue);
+            fix.rig.cloud.think.add(call(AgentAction.SKILL_MANAGE, Map.of("action", "read", "name", MENU)));
+            fix.rig.cloud.think.add(respond("The site blocks every client; nothing to change."));
+            queue.start();
+            repair.resume();
+            var row = fix.ended(fix.repairRow(0).get("id") instanceof Number n ? n.longValue() : -1);
+
+            assertEquals("unchanged", row.get("outcome"), "the record went on to its end");
+            String again = (String) row.get("repair_task_id");
+            assertNotEquals(cutOff, again);
+            assertEquals(1, fix.repairs().size());
+            var told = fix.told();
+            assertTrue(told.get(toldBefore).contains("OwnClaw restarted while it ran (task " + cutOff
+                    + "), so it starts again as task " + again), told.toString());
+            assertTrue(told.get(told.size() - 1).contains("Not fixed: the repair did not change the skill"), told.toString());
+            assertTrue(states(fix, cutOff).contains("interrupted"), states(fix, cutOff).toString());
+            assertTrue(states(fix, trigger.taskId()).contains("resumed"), states(fix, trigger.taskId()).toString());
+            assertTrue(states(fix, again).containsAll(List.of("repairing", "unchanged")), states(fix, again).toString());
+            // It was handed the same evidence again.
+            var first = fix.rig.cloud.calls("think").get(fix.rig.cloud.calls("think").size() - 2);
+            assertTrue(String.join("\n", LoopRig.userParts(first)).contains(PROBLEM));
+        } finally {
+            queue.stop();
+        }
+    }
+
+    @Test
+    @DisplayName("F10: a repair cut off again with no change of its own since it was started again is not started a third time; the next problem starts a new one")
+    void cutOffTwiceIsNoProgress(@TempDir Path tmp) throws Exception {
         fix = new Fix(tmp);
         fix.menuRun(true);
-        fix.repair.start();   // what the next start does
+        var queue = new TaskQueue(fix.rig.loop, fix.rig.events, fix.rig.emitter, fix.rig.config, fix.rig.cancellation);
+        restarted(fix, queue).resume();                 // started again, and "stops" before it runs
+        assertEquals("running", fix.repairRow(0).get("outcome"));
+        var queue2 = new TaskQueue(fix.rig.loop, fix.rig.events, fix.rig.emitter, fix.rig.config, fix.rig.cancellation);
+        restarted(fix, queue2).resume();
         assertEquals("interrupted", fix.repairRow(0).get("outcome"));
+        assertEquals(0, queue2.getQueueSize());
+        String note = fix.told().get(fix.told().size() - 1);
+        assertTrue(note.contains("again, and it had changed nothing since it was started again"), note);
+        // Interrupted is no verdict: the next problem starts a repair.
+        fix.rig.loop.setSelfRepair(fix.repair);
         fix.menuRun(true);
-        assertEquals(2, fix.repairs().size());
         assertEquals("running", fix.repairRow(1).get("outcome"));
+    }
+
+    static List<String> states(Fix fix, String taskId) {
+        return fix.rig.jdbc.queryForList("SELECT json_extract(details, '$.state') FROM events WHERE event_type = "
+                + "'self_repair' AND task_id = ? ORDER BY id", String.class, taskId);
     }
 
     @Test

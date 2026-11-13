@@ -25,7 +25,7 @@ class SelfRepairPageTest {
     @DisplayName("the task page draws its self-repair rows, text only, each linking the other task")
     void drawn() {
         int detail = page.indexOf("function renderTaskDetail(");
-        int drawn = page.indexOf("var repairs = buildTaskSelfRepair(t.selfRepair || []); if (repairs) view.appendChild(repairs);");
+        int drawn = page.indexOf("var repairs = buildTaskSelfRepair(t.selfRepair || [], t.taskId); if (repairs) view.appendChild(repairs);");
         assertTrue(detail >= 0 && drawn > detail && drawn < page.indexOf("function buildTaskSelfRepair("),
                 "renderTaskDetail draws the rows");
         String repairs = StillRunningPageTest.function("buildTaskSelfRepair");

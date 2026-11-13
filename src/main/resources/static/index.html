@@ -3513,7 +3513,7 @@
         }
         stat(formatTokenCount(outcome ? outcome.localTokens : tdSum(steps, 'localTokens')), 'Local tokens');
         view.appendChild(stats);
-        var repairs = buildTaskSelfRepair(t.selfRepair || []);
+        var repairs = buildTaskSelfRepair(t.selfRepair || [], t.taskId);
         if (repairs) view.appendChild(repairs);
 
         var stepsPanel = node('div');
@@ -3553,7 +3553,7 @@
      * repairs after which task, and how it ended. Each repair or triggering task is a link to its
      * page. Text only (node()): skill names and problems are the model's words.
      */
-    function buildTaskSelfRepair(rows) {
+    function buildTaskSelfRepair(rows, taskId) {
         if (!rows.length) return null;
         var panel = node('div');
         panel.appendChild(node('div', 'task-section-title', 'Self-repair'));
@@ -3577,9 +3577,13 @@
                 : r.state === 'left' ? 'Not repaired again: the last repair of ' + r.skill
                     + ' changed nothing, so it was left to you. ' + (r.problem || '')
                 : r.state === 'repairing' ? 'This task repairs ' + r.skill + ': ' + (r.problem || '')
+                : r.state === 'resumed' ? 'OwnClaw restarted while the repair of ' + r.skill + ' ran; it started '
+                    + 'again.'
                 : 'The repair of ' + r.skill + ': ' + (outcomes[r.state] || r.state) + '.';
             item.appendChild(node('div', 'task-trace-line', text));
-            var other = r.state === 'repairing' || outcomes[r.state] ? r.triggerTaskId : r.repairTaskId;
+            // The other task of the row: the repair, on the page of the task it repairs after, and that
+            // task on the repair's own page.
+            var other = r.triggerTaskId === taskId ? r.repairTaskId : r.triggerTaskId;
             if (isTaskId(other)) {
                 var link = node('button', 'skill-back-btn', (other === r.triggerTaskId
                         ? 'The task it repairs after: ' : r.state === 'left' ? 'The last repair: '

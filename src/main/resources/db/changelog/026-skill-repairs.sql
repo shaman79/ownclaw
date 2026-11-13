@@ -18,6 +18,10 @@
 -- side_effects: what the skill's SKILL.yaml said as the repair began; a repair runs it only on 'false'.
 -- goal / evidence: what the repair was given -- its request, written by code, and (JSON) the
 -- results it was handed as its first steps: the problem, the skill's public outputs, a report.
+-- declared: (JSON) what the skill declared as the repair began -- side effects, network,
+-- credentials, system packages, container image -- the bounds of what the repair may do.
+-- resumed_at / code_at_resume: when a repair cut off by a restart was started again, and its own
+-- change of the skill then; one cut off again with no change of its own since is not started again.
 -- local_only: the repair ran on the local model only (the work it repairs did); its report is never
 -- handed to a repair that may use the cloud.
 -- code_before / code_after: the sha256 of the skill's skill.py when the repair was started and when
@@ -37,6 +41,7 @@ CREATE TABLE IF NOT EXISTS skill_repairs (
     added_problems   TEXT,
     goal             TEXT,
     evidence         TEXT,
+    declared         TEXT,
     side_effects     TEXT    NOT NULL CHECK (side_effects IN ('true', 'false', 'undeclared')),
     code_before      TEXT,
     code_after       TEXT,
@@ -47,6 +52,8 @@ CREATE TABLE IF NOT EXISTS skill_repairs (
     previous_id      INTEGER,
     local_only       INTEGER NOT NULL DEFAULT 0,
     cleared_at       TEXT,
+    resumed_at       TEXT,
+    code_at_resume   TEXT,
     started_at       TEXT    NOT NULL DEFAULT (datetime('now')),
     ended_at         TEXT
 );

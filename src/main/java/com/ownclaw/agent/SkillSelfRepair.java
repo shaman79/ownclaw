@@ -187,8 +187,7 @@ public class SkillSelfRepair {
     }
 
     /**
-     * Said at startup, like the other switches; and a repair that was under way when OwnClaw
-     * stopped is recorded as cut off -- it did not end, so it neither runs on nor stops the next.
+     * Said at startup, like the other switches.
      */
     @PostConstruct
     public void start() {
@@ -198,9 +197,72 @@ public class SkillSelfRepair {
         } else {
             log.info("Self-repair off (ownclaw.self-repair.enabled): problems of unattended work start no repair.");
         }
-        int cut = jdbc.update("UPDATE skill_repairs SET outcome = ?, ended_at = datetime('now') WHERE outcome = ?",
-                INTERRUPTED, RUNNING);
-        if (cut > 0) log.warn("Self-repair: {} repair(s) under way when OwnClaw stopped recorded as interrupted.", cut);
+    }
+
+    /**
+     * Once OwnClaw is up, every repair that was under way when it stopped -- every deploy restarts
+     * it -- starts again: its record goes on under a new task, given the same goal and evidence; both
+     * tasks' pages say so, and the owner is told. Not one that was started again before and was cut
+     * off again with no change of its own since: that is no progress, it is recorded as interrupted
+     * and the owner told, and the next problem starts a new one.
+     */
+    @org.springframework.context.event.EventListener(org.springframework.boot.context.event.ApplicationReadyEvent.class)
+    public void resume() {
+        for (var row : jdbc.queryForList("SELECT * FROM skill_repairs WHERE outcome = ? ORDER BY id", RUNNING)) {
+            try {
+                resume(row);
+            } catch (RuntimeException e) {
+                log.error("Self-repair {} could not be started again: {}", row.get("id"), e.getMessage(), e);
+                jdbc.update("UPDATE skill_repairs SET outcome = ?, ended_at = datetime('now') WHERE id = ? AND outcome = ?",
+                        INTERRUPTED, row.get("id"), RUNNING);
+            }
+        }
+    }
+
+    private void resume(Map<String, Object> row) {
+        long id = id(row);
+        String userId = str(row, "user_id"), skill = str(row, "skill_name"), cutOff = str(row, "repair_task_id");
+        String trigger = str(row, "trigger_task_id");
+        boolean again = row.get("resumed_at") != null && Objects.equals(row.get("code_after"), row.get("code_at_resume"));
+        Job read = again ? null : job(row);
+        if (read == null) {
+            jdbc.update("UPDATE skill_repairs SET outcome = ?, ended_at = datetime('now') WHERE id = ?", INTERRUPTED, id);
+            event(userId, cutOff, INTERRUPTED, skill, str(row, "problem"), cutOff, trigger);
+            event(userId, trigger, INTERRUPTED, skill, str(row, "problem"), cutOff, trigger);
+            log.warn("Self-repair {} of '{}' was cut off by a restart {}: not started again.", id, skill,
+                    again ? "again, with no change since it was started again" : "and cannot be read back");
+            tell(userId, cutOff, "🔧 Self-repair of " + skill + " cut off", "OwnClaw restarted while it ran (task "
+                    + cutOff + ")" + (again ? ", again, and it had changed nothing since it was started again" : "")
+                    + ", so it is not started again. The next time the problem shows, a repair starts again.", null);
+            return;
+        }
+        jdbc.update("UPDATE skill_repairs SET repair_task_id = ?, resumed_at = datetime('now'), code_at_resume = ? "
+                + "WHERE id = ?", read.taskId(), row.get("code_after"), id);
+        event(userId, cutOff, INTERRUPTED, skill, str(row, "problem"), read.taskId(), trigger);
+        event(userId, trigger, "resumed", skill, str(row, "problem"), read.taskId(), trigger);
+        event(userId, read.taskId(), "repairing", skill, str(row, "problem"), read.taskId(), trigger);
+        log.info("Self-repair {} of '{}' was cut off by a restart (task {}): started again as task {}.", id, skill,
+                cutOff, read.taskId());
+        tell(userId, read.taskId(), "🔧 Self-repair of " + skill + " started again", "OwnClaw restarted while it "
+                + "ran (task " + cutOff + "), so it starts again as task " + read.taskId() + ".", null);
+        queue.submitRepair(userId, str(row, "goal"), read).whenComplete((result, failure) ->
+                settle(read, userId, result, failure));
+    }
+
+    /** A repair's job read back from its record, under a new task id; null when it cannot be. */
+    private Job job(Map<String, Object> row) {
+        try {
+            if (row.get("goal") == null || row.get("declared") == null) return null;
+            Declared declared = TextCalls.MAPPER.readValue(str(row, "declared"), Declared.class);
+            List<Evidence> evidence = row.get("evidence") == null ? List.of()
+                    : TextCalls.MAPPER.readValue(str(row, "evidence"),
+                            new com.fasterxml.jackson.core.type.TypeReference<List<Evidence>>() {});
+            return new Job(id(row), str(row, "skill_name"), UUID.randomUUID().toString().substring(0, 8), declared,
+                    row.get("local_only") instanceof Number n && n.intValue() != 0, evidence);
+        } catch (JsonProcessingException unreadable) {
+            log.warn("Self-repair {}: its record cannot be read back: {}", row.get("id"), unreadable.getMessage());
+            return null;
+        }
     }
 
     private boolean enabled() {
@@ -486,12 +548,12 @@ public class SkillSelfRepair {
                 Redactor.scrubVault(e.text(), secrets).text(), e.success())).toList();
         long id = insertReturningId("""
                 INSERT INTO skill_repairs (user_id, skill_name, trigger_task_id, trigger_message, trigger_at,
-                    repair_task_id, problem, goal, evidence, side_effects, code_before, outcome, previous_id,
-                    local_only)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    repair_task_id, problem, goal, evidence, declared, side_effects, code_before, outcome,
+                    previous_id, local_only)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, ctx.userId(), skill, ctx.taskId(), ctx.originalMessage(), startedAt(ctx), taskId, problem, goal,
-                json(evidence), declared.sideEffectsText(), code, RUNNING, previous == null ? null : id(previous),
-                localOnly ? 1 : 0);
+                json(evidence), json(declared), declared.sideEffectsText(), code, RUNNING,
+                previous == null ? null : id(previous), localOnly ? 1 : 0);
         var job = new Job(id, skill, taskId, declared, localOnly, evidence);
         log.info("Task {}: '{}' did not do its whole job -- self-repair {} started as task {}.", ctx.taskId(), skill,
                 id, taskId);
