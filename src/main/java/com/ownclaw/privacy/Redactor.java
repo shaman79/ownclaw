@@ -204,7 +204,7 @@ public final class Redactor {
     /**
      * {@link #cuttable(String, Map)} with the user's own named values -- the SSIDs and hostnames
      * the placeholder table holds -- among the identifiers no cut falls inside: the gateway
-     * replaces one wherever it stands, and "Home5G" cut from "KazdaHome5G" is no longer one it
+     * replaces one wherever it stands, and "Home5G" cut from "ExampleHome5G" is no longer one it
      * knows.
      */
     public Cuttable cuttable(String userId, String text, Map<String, String> vault) {
@@ -1006,8 +1006,8 @@ public final class Redactor {
     /**
      * {@code text} with every placeholder the user's table knows put back to its value. A
      * placeholder that is the whole of a quoted string whose value holds that quote is put back
-     * between the other quotes, so code stays code: {@code '<ssid_1>'} for Jana's WiFi is
-     * {@code "Jana's WiFi"}.
+     * between the other quotes, so code stays code: {@code '<ssid_1>'} for Example Guest's WiFi is
+     * {@code "Example Guest's WiFi"}.
      */
     public String restore(String userId, String text) {
         if (text == null || text.indexOf('<') < 0) return text;
