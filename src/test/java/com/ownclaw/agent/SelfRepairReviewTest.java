@@ -592,6 +592,25 @@ class SelfRepairReviewTest {
                 "a repair that never finished counted as no progress: " + next.response());
     }
 
+    // R3-4 (C): a hash of a PRIVATE result's bytes was stored, and skill_repairs is readable through the ops SQL.
+    @Test
+    @DisplayName("R3-4 (C): no hash of a PRIVATE result's bytes is stored in a repair's record")
+    void noHashOfAPrivateResult(@TempDir Path tmp) throws Exception {
+        var read = new java.util.concurrent.CopyOnWriteArrayList<java.util.Map<String, Object>>();
+        fix = new Fix(tmp, skill("mail_count", false, List.of("IMAP_PASS"), false, read,
+                p -> com.ownclaw.agent.tools.ToolResult.success("{\"ok\": false, \"unread\": 7}")));
+        fix.rig.cloud.think.add(LoopRig.call("mail_count", java.util.Map.of()));
+        fix.rig.cloud.think.add(respond("The count failed."));
+        fix.unattended("Using mail_count, count the unread mail.");
+        var row = fix.repairRow(0);
+        assertTrue(String.valueOf(row.get("goal")).contains("its result is private"), "the call is PRIVATE");
+        assertEquals(SkillSelfRepair.LAST_CALL_FAILED, row.get("problem"), "it failed: a key would be kept");
+        assertNull(row.get("output_hash"), "a hash of the private output is stored");
+        // And a PUBLIC one that failed the same way has its key.
+        var pub = new Artifact("mail_count", java.util.Map.of(), "{\"ok\": false, \"unread\": 7}", true);
+        assertNotNull(SkillSelfRepair.failureKey(pub));
+    }
+
     // R2-4 (P11): the evidence kept the trigger's {{n}}, which name other results inside the repair.
     @Test
     @DisplayName("R2-4: the evidence gives a call's arguments as they ran, so the repair's re-run reads the same input")

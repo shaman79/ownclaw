@@ -1122,10 +1122,12 @@ public class SkillSelfRepair {
      * problem, so they never block a clean run's clearing nor read as "the same problem". A skill that
      * raised is keyed by its exception and message, the traceback's last line: its frames name the
      * harness's runner file, a new random name on every run, and line numbers. Anything else, with the
-     * runner's name, a file and line, and the "ERROR: " a delegation puts in front, taken out.
+     * runner's name, a file and line, and the "ERROR: " a delegation puts in front, taken out. None of a
+     * PRIVATE result: a hash of its bytes in skill_repairs -- which the ops API's SQL reads -- gives a
+     * short private output (a count, a balance) away to whoever hashes the candidates.
      */
     static String failureKey(Artifact a) {
-        if (a == null || a.succeeded()) return null;
+        if (a == null || a.succeeded() || a.isPrivate()) return null;
         String text = a.output().strip();
         if (text.startsWith("ERROR: ")) text = text.substring("ERROR: ".length());
         var traceback = TRACEBACK.matcher(text);
