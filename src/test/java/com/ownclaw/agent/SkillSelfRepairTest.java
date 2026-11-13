@@ -85,12 +85,18 @@ class SkillSelfRepairTest {
 
         Fix(Path tmp, TaskQueue queue, Function<com.ownclaw.agent.tools.ToolRegistry, CapabilityResolver> resolver,
             Tool... more) throws Exception {
+            this(tmp, queue, resolver, new StopWithoutLocalModelTest.Down(), more);
+        }
+
+        /** @param local the local model: down, unless a test scripts one */
+        Fix(Path tmp, TaskQueue queue, Function<com.ownclaw.agent.tools.ToolRegistry, CapabilityResolver> resolver,
+            com.ownclaw.llm.LlmProvider local, Tool... more) throws Exception {
             var tools = new ArrayList<Tool>();
             tools.add(skill(MENU, false, List.of(), true, menuCalls, p -> menuFails.get()
                     ? ToolResult.failure("Traceback: ConnectionResetError") : ToolResult.success(menuOutput.get())));
             tools.add(skill("smtp_send_email", true, List.of(), false, mailCalls, p -> ToolResult.success("{\"ok\": true}")));
             tools.addAll(List.of(more));
-            rig = new LoopRig(tmp, tools, 600, new StopWithoutLocalModelTest.Down(),
+            rig = new LoopRig(tmp, tools, 600, local,
                     (registry, config, router) -> new ThinkingEngine(registry, config, router), resolver);
             for (Tool t : tools) code.put(t.name(), "def run(params):\n    return {}  # " + t.name() + " v1\n");
             rig.skills.source = code::get;
@@ -287,6 +293,41 @@ class SkillSelfRepairTest {
         assertEquals(2, calls.size());
         assertTrue(fix.repairs().isEmpty(), fix.repairs().toString());
         assertFalse(r.response().contains("Self-repair"), r.response());
+    }
+
+    @Test
+    @DisplayName("a task the owner stopped starts no repair for a call that failed: the Stop can be what failed it")
+    void aStoppedTaskStartsNone(@TempDir Path tmp) throws Exception {
+        fix = new Fix(tmp, skill("web_snapshot", false, List.of(), false, new ArrayList<>(),
+                p -> ToolResult.failure("interrupted")));
+        fix.rig.cloud.think.add(call("web_snapshot", Map.of("url", "https://example.com/menu")));
+        fix.rig.cloud.think.add(c -> {
+            fix.rig.cancellation.requestAll("u1", "the owner pressed Stop");
+            return call(AgentAction.SKILL_MANAGE, Map.of("action", "list")).answer(c);
+        });
+        AgentResult r = fix.unattended("Using web_snapshot, fetch https://example.com/menu");
+
+        assertEquals(AgentResult.TerminationReason.CANCELLED, r.terminationReason(), r.response());
+        assertTrue(fix.repairs().isEmpty(), fix.repairs().toString());
+    }
+
+    @Test
+    @DisplayName("the repair of work that ran local only runs local only too: its evidence never reaches the cloud")
+    void localOnlyWorkIsRepairedLocally(@TempDir Path tmp) throws Exception {
+        var local = LocalModeTest.localModel();
+        fix = new Fix(tmp, null, registry -> null, local);
+        fix.rig.queue.start();
+        local.think.add(call(MENU, Map.of()));
+        local.think.add(problems("Cafe Two's menu could not be read.", List.of(Map.of("tool", MENU, "what", PROBLEM))));
+        local.think.add(call(AgentAction.SKILL_MANAGE, Map.of("action", "read", "name", MENU)));
+        local.think.add(respond("The site blocks it; nothing to change."));
+        fix.rig.loop.executeFull("u1", TASK, true, null, List.of(), null, null,
+                new com.ownclaw.conversation.ChatOptions("free", null));
+        var row = fix.ended(fix.lastId());
+
+        assertEquals("unchanged", row.get("outcome"));
+        assertEquals(4, local.calls("think").size(), "the local model ran the task and its repair");
+        assertTrue(fix.rig.cloud.calls.isEmpty(), "the cloud was sent: " + fix.rig.cloud.calls);
     }
 
     @Test
@@ -578,7 +619,7 @@ class SkillSelfRepairTest {
         // The repair: tries to run it, then fixes it without the flag, then says so.
         fix.rig.cloud.think.add(call("menu_mailer", Map.of()));
         fix.rig.cloud.think.add(call(AgentAction.SKILL_CREATE, Map.of("name", "menu_mailer",
-                "description", "Mail the menus; wait for both.", "parameters", "{}")));
+                "description", "Mail the menus; wait for both.", "parameters", "{}", "has_side_effects", false)));
         fix.rig.cloud.codegen.add(SkillCodegenTest.finished(SkillCodegenTest.module("# v2")));
         fix.rig.cloud.think.add(respond("It mailed before the second menu arrived; now it waits for both."));
         fix.unattended("Using menu_mailer, mail me the menus.");
