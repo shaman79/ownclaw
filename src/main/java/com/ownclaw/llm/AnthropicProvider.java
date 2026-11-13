@@ -429,6 +429,13 @@ class AnthropicProvider implements LlmProvider {
      * cannot be made without it, because max_tokens is required. The lookup is part of the call
      * that needs it, so its hook holds the lookup's cancel as it holds the request's.
      */
+    /**
+     * How long the Models API is given to describe a model: it answers in well under a second. The
+     * client's own timeouts are a streamed reply's, minutes long; a black-holed network or a hung
+     * server held each lookup that long, and a task made several.
+     */
+    static final java.time.Duration MODELS_TIME = java.time.Duration.ofSeconds(10);
+
     private ModelLimits limits(String model, String apiKey, LlmProgress progress) {
         ModelLimits known = limits.get(model);
         if (known != null) return known;
@@ -438,7 +445,7 @@ class AnthropicProvider implements LlmProvider {
                 .header("anthropic-version", API_VERSION)
                 .get()
                 .build();
-        ModelLimits found = StreamedCall.send(httpClient, request, "anthropic", progress, response -> {
+        ModelLimits found = StreamedCall.send(httpClient, request, "anthropic", progress, MODELS_TIME, response -> {
             String text = response.body() != null ? response.body().string() : "";
             if (!response.isSuccessful()) {
                 throw new LlmException("anthropic", "the Models API could not describe '" + model

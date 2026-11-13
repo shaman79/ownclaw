@@ -70,7 +70,7 @@ public class ThinkingEngine {
         // has not asked yet: guessed on the first request after a restart, it folded and then
         // unfolded the chat, and each wrote the whole chat to the cache again.
         if ("anthropic".equals(provider.name()) && (context.conversationImageCount() > 0 || !context.pasted().isEmpty())) {
-            int folded = context.fitImages(LlmMessage.imagesPerRequest(provider.contextWindow(context.progress())),
+            int folded = context.fitImages(LlmMessage.imagesPerRequest(context.cloudWindow(provider)),
                     LlmMessage.IMAGE_BYTES_PER_REQUEST);
             if (folded > 0) {
                 log.info("Task {}: {} of the chat's oldest images are shown by their lines alone, to keep the "

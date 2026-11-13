@@ -90,6 +90,17 @@ final class LoopRig {
         @Override public boolean supportsTools() { return true; }
         @Override public String name() { return name; }
         @Override public String model() { return "claude-opus-5"; }
+
+        /** Each lookup of the model's window (the Models API's), when it began. */
+        final List<Long> lookups = new CopyOnWriteArrayList<>();
+        /** What a lookup of the window does: the window it finds, or null when it fails. */
+        volatile java.util.function.Function<com.ownclaw.llm.LlmProgress, Integer> window = progress -> null;
+
+        @Override
+        public Integer contextWindow(com.ownclaw.llm.LlmProgress progress) {
+            lookups.add(System.currentTimeMillis());
+            return window.apply(progress);
+        }
     }
 
     /** The model calls a tool. */

@@ -377,6 +377,61 @@ class PastedImageTaskTest {
     }
 
     @Test
+    @DisplayName("a Stop during the window's lookup, before the first request, ends the task at once: the lookup is made in the loop, where a Stop reaches it")
+    void stopDuringTheWindowsLookup(@TempDir Path tmp) throws Exception {
+        var rig = new LoopRig(tmp, List.of(LocalModeTest.NOOP));
+        // A Models API that takes six seconds, hearing a Stop as a request in flight does.
+        rig.cloud.window = progress -> {
+            long end = System.currentTimeMillis() + 6_000;
+            while (System.currentTimeMillis() < end) {
+                try {
+                    Thread.sleep(20);
+                } catch (InterruptedException e) {
+                    throw new IllegalStateException(e);
+                }
+                progress.onProgress();
+            }
+            return 1_000_000;
+        };
+        rig.cloud.think.add(respond("seen"));
+        String session = LocalModeTest.session(rig);
+        var ids = pasteMany(rig, 1);
+        long t0 = System.currentTimeMillis();
+        var done = new java.util.concurrent.CompletableFuture<AgentResult>();
+        new Thread(() -> {
+            try {
+                done.complete(rig.turn(session, "what is on it?", ids));
+            } catch (Throwable e) {
+                done.completeExceptionally(e);
+            }
+        }).start();
+        while (rig.cloud.lookups.isEmpty() && System.currentTimeMillis() - t0 < 10_000) Thread.sleep(10);
+        Thread.sleep(500);
+        rig.cancellation.requestAll("u1", "the owner pressed Stop");
+        long stopAt = System.currentTimeMillis();
+        AgentResult r = done.get(30, java.util.concurrent.TimeUnit.SECONDS);
+        assertEquals(AgentResult.TerminationReason.CANCELLED, r.terminationReason());
+        assertTrue(System.currentTimeMillis() - stopAt < 2_000, "ended at the Stop, not when the lookup did: "
+                + (System.currentTimeMillis() - stopAt) + " ms");
+        assertTrue(rig.cloud.calls("think").isEmpty(), "no request was made");
+        // Mutation: look the window up before the loop again -> the Stop waits out the six seconds.
+    }
+
+    @Test
+    @DisplayName("a window lookup that failed is made once a task, not on every step: each waited out its timeout")
+    void aFailedLookupOnceATask(@TempDir Path tmp) throws Exception {
+        var rig = new LoopRig(tmp, List.of(LocalModeTest.NOOP));
+        rig.cloud.window = progress -> null;
+        rig.cloud.think.add(call("noop", Map.of()));
+        rig.cloud.think.add(call("noop", Map.of()));
+        rig.cloud.think.add(respond("seen"));
+        rig.turn(LocalModeTest.session(rig), "what is on it?", pasteMany(rig, 1));
+        assertEquals(3, rig.cloud.calls("think").size());
+        assertEquals(1, rig.cloud.lookups.size(), "asked once in three steps: " + rig.cloud.lookups);
+        // Mutation: ask the provider on every step -> four lookups, each a timeout on a network that is down.
+    }
+
+    @Test
     @DisplayName("a message pasted with eighteen images: the next turn still finds the last turn's cached chat, through the free fourth mark")
     void eighteenImagesKeepTheCache(@TempDir Path tmp) throws Exception {
         var rig = new LoopRig(tmp, List.of(LocalModeTest.NOOP));

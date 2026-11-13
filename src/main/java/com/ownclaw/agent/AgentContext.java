@@ -400,6 +400,37 @@ public class AgentContext {
         return chatImages.size();
     }
 
+    /** Whether the task's pasted images were measured against one request's limits yet. */
+    private volatile boolean imagesMeasured;
+
+    /** The cloud model's window as this task asked it of the Models API: asked once, null when that failed. */
+    private volatile Integer windowAsked;
+    private volatile boolean windowAskedOnce;
+
+    public boolean imagesMeasured() {
+        return imagesMeasured;
+    }
+
+    public void measureImages() {
+        imagesMeasured = true;
+    }
+
+    /**
+     * The cloud model's context window, as {@code provider} knows it -- or as the Models API tells it,
+     * asked at most once in this task: a lookup that failed is not made again on every step, each
+     * waiting out its timeout. Null when it is not known. Not under the context's lock: the lookup
+     * is a request, and a Stop must reach the task meanwhile.
+     */
+    public Integer cloudWindow(com.ownclaw.llm.LlmProvider provider) {
+        Integer known = provider.knownContextWindow();
+        if (known != null) return known;
+        if (windowAskedOnce) return windowAsked;
+        Integer asked = provider.contextWindow(progress());
+        windowAsked = asked;
+        windowAskedOnce = true;
+        return asked;
+    }
+
     /**
      * Fold the chat's oldest images to their lines -- each message still says an image was pasted
      * with it -- so that a request's images are within what the Messages API takes: {@code maxImages}

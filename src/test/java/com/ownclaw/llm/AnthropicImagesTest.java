@@ -252,6 +252,26 @@ class AnthropicImagesTest {
     }
 
     @Test
+    @DisplayName("the Models API is given ten seconds of its own: the client's timeouts are a streamed reply's, minutes long")
+    void theModelsApiHasItsOwnTime() {
+        var timeouts = new java.util.ArrayList<Long>();
+        var config = new OwnClawConfig();
+        config.getMentor().setAnthropicApiKey("test-key");
+        config.getMentor().setAnthropicModel("claude-opus-5");
+        var client = new okhttp3.OkHttpClient.Builder().addInterceptor(chain -> {
+            timeouts.add(chain.call().timeout().timeoutNanos());
+            return new okhttp3.Response.Builder().request(chain.request()).protocol(okhttp3.Protocol.HTTP_1_1).code(200)
+                    .message("ok").body(okhttp3.ResponseBody.create(AnthropicStreamingTest.LIMITS,
+                            okhttp3.MediaType.get("application/json"))).build();
+        }).build();
+        var provider = new AnthropicProvider(config, new ObjectMapper(), client);
+        assertEquals(1_000_000, provider.contextWindow(LlmProgress.NONE));
+        assertEquals(List.of(AnthropicProvider.MODELS_TIME.toNanos()), timeouts);
+        assertEquals(java.time.Duration.ofSeconds(10), AnthropicProvider.MODELS_TIME);
+        // Mutation: send the lookup with the client's timeouts -> a hung server holds it for minutes.
+    }
+
+    @Test
     @DisplayName("the window is asked of the Models API before a request is shaped, when this process does not know it yet")
     void theWindowBeforeTheFirstRequest() {
         var http = new FakeHttp().json(AnthropicStreamingTest.MODELS, 200, AnthropicStreamingTest.LIMITS);

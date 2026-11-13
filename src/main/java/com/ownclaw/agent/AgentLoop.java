@@ -340,9 +340,6 @@ public class AgentLoop {
             }
         }
         registerAttachments(context, attachmentIds, fileStorage, eventLog);
-        AgentResult tooMany = imagesPastOneRequest(context, com.ownclaw.llm.CloudGateway.showsImages(config),
-                () -> llmRouter.cloud().contextWindow(context.progress()));
-        if (tooMany != null) return end(context, tooMany, false);
         AgentResult stopped = stopWithoutLocalModel(context, () -> {
             LlmProvider local = llmRouter.local();
             return local != null && local.isAvailable();
@@ -1005,6 +1002,16 @@ public class AgentLoop {
             // === THINK ===
             LlmProvider provider = llmRouter.selectProvider(context);
             boolean local = llmRouter.isLocal(provider);
+            // Before the first request to the cloud: a message whose own images are more than one
+            // request carries is refused, saying how to send them. Here, in the loop, where a Stop
+            // and the stall watchdog reach the window's lookup -- before it, a Stop waited for the
+            // Models API.
+            if (!local && !context.imagesMeasured()) {
+                context.measureImages();
+                AgentResult tooMany = imagesPastOneRequest(context, com.ownclaw.llm.CloudGateway.showsImages(config),
+                        () -> context.cloudWindow(provider));
+                if (tooMany != null) return tooMany;
+            }
             readMessages(context, step + 1, local);
             imagesNotSeen(context, local, provider);
             String providerLabel = local ? "local" : provider.name();
