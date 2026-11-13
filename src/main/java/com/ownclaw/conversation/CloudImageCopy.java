@@ -480,7 +480,7 @@ public final class CloudImageCopy {
             boolean turned = header.orientation() >= 5;
             target = resizedSize(turned ? height : width, turned ? width : height, MAX_EDGE, MAX_TOKENS);
             ImageReadParam param = reader.getDefaultReadParam();
-            int every = subsampling(width, height, target);
+            int every = subsampling(width, height, target, header.pixelBytes());
             if (every > 1) param.setSourceSubsampling(every, every, 0, 0);
             // The PNG and GIF readers clear an abort when their read begins: past its time, it is
             // not begun -- and once begun, the Stopper hears every row.
@@ -494,14 +494,25 @@ public final class CloudImageCopy {
         // An aborted read returns what it had decoded: none of it is a copy.
         if (check.late()) return Made.stays(TOO_LONG);
         if (image == null) return Made.stays("it did not decode as an image");
+        // Read at the copy's size or less -- a 16-bit picture is (subsampling): the copy is what was
+        // read, never drawn larger than that.
+        boolean sideways = header.orientation() >= 5;
+        int readWidth = sideways ? image.getHeight() : image.getWidth();
+        int readHeight = sideways ? image.getWidth() : image.getHeight();
+        if (readWidth < target.width() || readHeight < target.height()) {
+            target = new Size(Math.min(readWidth, target.width()), Math.min(readHeight, target.height()));
+        }
 
-        BufferedImage pixels = oriented(normalized(image), header.orientation());
+        // Each step's input let go before the next is made, and turned last, at the copy's size:
+        // turned first, a 16-bit photo was held three times over at its whole size.
+        BufferedImage pixels = normalized(image);
         image = null;
         boolean turned = header.orientation() >= 5;
         int shownWidth = turned ? height : width, shownHeight = turned ? width : height;
         check.inTime();
-        BufferedImage scaled = scale(pixels, target.width(), target.height());
+        BufferedImage scaled = scale(pixels, turned ? target.height() : target.width(), turned ? target.width() : target.height());
         pixels = null;
+        scaled = oriented(scaled, header.orientation());
         check.inTime();
 
         // In the original's family: a photograph stays a JPEG, a screenshot a PNG.
@@ -538,6 +549,7 @@ public final class CloudImageCopy {
      * read at all.
      *
      * @param bytesPerPixel the most a reader holds of one pixel of a row, for {@link #ROW_MEMORY}
+     * @param pixelBytes    the bytes of one pixel as the reader decodes it: 8 for a 16-bit RGBA PNG
      * @param orientation   1 to 8, as EXIF numbers them; 1 when it says none
      * @param metadata      what it carries beside the picture, in words, or null
      * @param refused       why it is not read, or null
@@ -547,13 +559,10 @@ public final class CloudImageCopy {
      *                      of 95 MB into arrays of hundreds, and inflates a colour profile whatever it
      *                      inflates to. Null when the file is that already, and for any other format.
      */
-    record Header(Format format, int bytesPerPixel, int orientation, String metadata, String refused, int[] picture) {
-        Header(Format format, int bytesPerPixel, int orientation, String metadata, String refused) {
-            this(format, bytesPerPixel, orientation, metadata, refused, null);
-        }
-
+    record Header(Format format, int bytesPerPixel, int pixelBytes, int orientation, String metadata, String refused,
+                  int[] picture) {
         static Header refused(String why) {
-            return new Header(null, 0, 1, null, why);
+            return new Header(null, 0, 0, 1, null, why, null);
         }
     }
 
@@ -684,8 +693,9 @@ public final class CloudImageCopy {
                         case 2 -> 3;
                         default -> 4;
                     };
-                    return new Header(Format.PNG, samples * Math.max(1, bitDepth / 8), orientation,
-                            words(beside), null, more ? drawn.stream().mapToInt(Integer::intValue).toArray() : null);
+                    return new Header(Format.PNG, samples * Math.max(1, bitDepth / 8), samples * (bitDepth == 16 ? 2 : 1),
+                            orientation, words(beside), null,
+                            more ? drawn.stream().mapToInt(Integer::intValue).toArray() : null);
                 }
                 case "eXIf" -> {
                     byte[] exif = in.readUpTo((int) Math.min(length, 1 << 20));
@@ -785,7 +795,8 @@ public final class CloudImageCopy {
             return Header.refused("it is a JPEG in several scans, which browsers never paste and which takes memory in "
                     + "proportion to its whole size to read, so it stays private -- skills still get it");
         }
-        return new Header(Format.JPEG, Math.max(1, components) * 16, orientation, words(beside), null);
+        return new Header(Format.JPEG, Math.max(1, components) * 16, Math.max(1, components), orientation, words(beside),
+                null, null);
     }
 
     /** What a JPEG application segment or comment is beside the picture, or null for the picture's own. */
@@ -850,7 +861,7 @@ public final class CloudImageCopy {
             }
         }
         if (images > 1) beside.add("more frames");
-        return new Header(Format.GIF, 4, 1, words(beside), null);
+        return new Header(Format.GIF, 4, 1, 1, words(beside), null, null);
     }
 
     private static String words(Set<String> beside) {
@@ -1055,12 +1066,14 @@ public final class CloudImageCopy {
      * Every how many pixels a large image is read: 1 for one at most twice the copy's longer edge,
      * else the fewest that read it at most that -- never less than the copy, which the reading is
      * then smoothed down to. A picture many times the size the model reads is not held whole in
-     * memory for it.
+     * memory for it. One whose pixels are more than 4 bytes as decoded -- 16 bits a sample -- is
+     * read at the copy's size or under it, and its copy is what was read: at twice that, a 16-bit
+     * photo of 180 KB took 120 MB to read. Pastes are 8-bit: screenshots are.
      */
-    static int subsampling(int width, int height, Size target) {
+    static int subsampling(int width, int height, Size target, int pixelBytes) {
         int longest = Math.max(width, height);
         int targetLongest = Math.max(target.width(), target.height());
-        return Math.max(1, Math.ceilDiv(longest, 2 * targetLongest));
+        return Math.max(1, Math.ceilDiv(longest, (pixelBytes > 4 ? 1 : 2) * targetLongest));
     }
 
     /**

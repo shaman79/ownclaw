@@ -319,6 +319,35 @@ class CloudImageCopyTest {
         // Mutation: hand the reader the file whole -> hundreds of megabytes of arrays.
     }
 
+    /** A {@code width} x {@code height} PNG of this depth and colour type, turned as EXIF {@code orientation} says. */
+    static byte[] turnedPng(int width, int height, int depth, int colorType, int orientation) {
+        int samples = colorType == 6 ? 4 : 3;
+        byte[] row = new byte[1 + width * samples * depth / 8];
+        for (int i = 1; i < row.length; i++) row[i] = (byte) (i % 7 == 0 ? 0xFF : 0x40);
+        return TestImages.pngOf("IHDR", TestImages.ihdr(width, height, depth, colorType),
+                "eXIf", Arrays.copyOfRange(TestImages.exif(orientation, ""), 6, 32),
+                "IDAT", TestImages.idat(row, height), "IEND", new byte[0]);
+    }
+
+    @Test
+    @DisplayName("a turned photo is let go of step by step and turned at its copy's size; a 16-bit one is read at that size: the heap is the copy's order")
+    void aTurnedPhotoTakesItsCopysMemory(@TempDir Path dir) throws Exception {
+        for (int depth : new int[]{16, 8}) {
+            // 4,400 x 3,300, stored on its side: 116 MB as 16-bit RGBA, 58 MB as 8-bit, from a file of kilobytes.
+            Path f = file(dir, "turned" + depth + ".png", turnedPng(4400, 3300, depth, 6, 6));
+            var result = new CloudImageCopy.Made[1];
+            long peak = heapPeak(() -> result[0] = CloudImageCopy.of(f));
+            var copy = result[0].copy();
+            assertNotNull(copy, result[0].privateBecause());
+            assertEquals(3300, copy.originalWidth());
+            assertEquals(4400, copy.originalHeight());
+            assertTrue(copy.height() > copy.width(), "upright: " + copy.width() + "x" + copy.height());
+            assertTrue(peak < (depth == 16 ? 100L : 165L) << 20, depth + "-bit: " + (peak >> 20) + " MB of heap");
+        }
+        // Mutation: read a 16-bit photo at twice its copy's size -> 90 MB read; turn it before scaling,
+        // the decoded image still held -> three times its size at once.
+    }
+
     @Test
     @DisplayName("a picture far larger than its copy is read at a fraction of its pixels: the heap it takes is its copy's order, not its own")
     void aLargePictureIsReadAtAFraction(@TempDir Path dir) throws Exception {
