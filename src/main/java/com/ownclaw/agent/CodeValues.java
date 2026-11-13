@@ -22,7 +22,18 @@ import java.util.regex.Pattern;
  * of it was code -- a WiFi name a neighbour chose, {@code a'+__import__("os").getcwd()+'b}, ran in the
  * skill. Now each placeholder inside a literal becomes the value escaped for that literal's kind,
  * one in a comment cannot end the comment, and one anywhere else is refused: put back there, any
- * value would be code. Only the code: the rest of a reply -- its requirements -- is put back as text.
+ * value would be code. So is one in a comment on the first two lines: there Python reads an
+ * encoding declaration, and "coding:unicode_escape" put back in one made the runner decode the
+ * restore's own escapes into quotes and line breaks, and the rest of the value ran.
+ * <p>
+ * And whatever it put back, the script checks as the skill's runner reads it -- the file's bytes,
+ * decoded as they declare: the same encoding declared as the code as written, and the very program
+ * it means, every placeholder in a string replaced by its value and nothing else different. One
+ * check of the result, not of each way there: a value that turns the code into other code by a
+ * way no rule above foresaw is refused all the same.
+ * <p>
+ * Only the code: the rest of a reply -- its requirements -- is put back as text, and only a value
+ * that is one plain token there ({@code AgentLoop}).
  */
 final class CodeValues {
 
@@ -65,7 +76,9 @@ final class CodeValues {
      *
      * @param code    the code with the values put back; null when refused, or when it could not run
      * @param refused why it was refused, as the script says it -- "outside" (code, an f-string's field
-     *                or format), "coding" (an encoding declaration), "bytes" (a value a bytes
+     *                or format), "header" (a comment on the first two lines, where an encoding is
+     *                declared), "fstring" (an f-string, on a Python older than 3.12), "changed" (the
+     *                code put back does not read as the program written), "bytes" (a value a bytes
      *                literal cannot hold), "read" (code the tokenizer could not read) -- or null
      * @param line    the line of the code it was refused at, 0 when no line is known
      * @param failed  why it could not run at all -- the check's own failure, nothing about the code --
@@ -98,7 +111,12 @@ final class CodeValues {
         String why() {
             String at = line > 0 ? " at line " + line : "";
             return switch (refused) {
-                case "coding" -> "names a value of yours in its encoding declaration" + at;
+                case "header" -> "names a value of yours in a comment on its first two lines" + at + ", where Python "
+                        + "reads an encoding declaration";
+                case "fstring" -> "names a value of yours in an f-string" + at + ", which the Python skills run on "
+                        + "reads as one piece: put back there, it could not be told from the f-string's fields";
+                case "changed" -> "would not read, with your values put back, as the program the model wrote -- "
+                        + "Python, reading the file as the skill's runner does, takes it for other code";
                 case "bytes" -> "names a value of yours that a bytes literal cannot hold" + at;
                 case "read" -> "could not be read by Python's tokenizer" + at;
                 default -> "names a value of yours" + at + " outside any string or comment, where it would be "
