@@ -1006,6 +1006,48 @@ class SkillSelfRepairTest {
         assertEquals("stopped", fix.repairRow(0).get("outcome"));
     }
 
+    @Test
+    @DisplayName("R4-7: a repair stopped after it changed the skill, whose ending never came, is told at the next start as a change not checked")
+    void aStoppedRepairThatChangedTheSkillSaysSo(@TempDir Path tmp) throws Exception {
+        fix = new Fix(tmp);
+        fix.rig.queue.start();
+        fix.scriptMenu(true);
+        fix.rig.cloud.think.add(call(AgentAction.SKILL_CREATE, Map.of("name", MENU, "description",
+                "Fetch the menus; retry as a browser.", "parameters", "{}")));
+        fix.rig.cloud.codegen.add(SkillCodegenTest.finished(SkillCodegenTest.module("# v2")));
+        for (int i = 0; i < 2; i++) {
+            fix.rig.cloud.think.add(c -> {
+                fix.repair.closing();
+                throw new com.ownclaw.llm.LlmException("anthropic", "Connection failed: api.example.com", 0,
+                        new java.net.UnknownHostException("api.example.com"));
+            });
+        }
+        fix.unattended(TASK);
+        String repairTask = (String) fix.repairRow(0).get("repair_task_id");
+        long until = System.currentTimeMillis() + 20_000;
+        while (System.currentTimeMillis() < until && fix.rig.jdbc.queryForList(
+                "SELECT 1 FROM events WHERE event_type = 'task_completed' AND task_id = ?", repairTask).isEmpty()) {
+            Thread.sleep(50);
+        }
+        assertEquals("running", fix.repairRow(0).get("outcome"));
+        // The owner's Stop, pressed while it ran -- its ending never came: kept on the record.
+        fix.rig.jdbc.update("UPDATE skill_repairs SET stopped_by = 'you pressed Stop' WHERE id = ?",
+                fix.repairRow(0).get("id"));
+        assertNotEquals(fix.repairRow(0).get("code_before"), fix.repairRow(0).get("code_after"), "it changed the skill");
+        var queue = new TaskQueue(fix.rig.loop, fix.rig.events, fix.rig.emitter, fix.rig.config, fix.rig.cancellation);
+        try {
+            int told = fix.told().size();
+            restarted(fix, queue).resume();
+            String note = String.join("\n", fix.told().subList(told, fix.told().size()));
+            assertEquals("unverified", fix.repairRow(0).get("outcome"));
+            assertEquals(0, ((Number) fix.repairRow(0).get("completed")).intValue(), "no verdict");
+            assertTrue(note.contains("after it had changed the skill: the change is in place and was not checked"), note);
+            assertEquals(0, queue.getQueueSize());
+        } finally {
+            queue.stop();
+        }
+    }
+
     static List<String> states(Fix fix, String taskId) {
         return fix.rig.jdbc.queryForList("SELECT json_extract(details, '$.state') FROM events WHERE event_type = "
                 + "'self_repair' AND task_id = ? ORDER BY id", String.class, taskId);

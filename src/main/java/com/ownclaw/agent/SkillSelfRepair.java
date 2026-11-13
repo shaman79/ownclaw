@@ -245,16 +245,21 @@ public class SkillSelfRepair {
         String userId = str(row, "user_id"), skill = str(row, "skill_name"), cutOff = str(row, "repair_task_id");
         String trigger = str(row, "trigger_task_id");
         if (row.get("stopped_by") != null) {
-            // The owner stopped it before OwnClaw stopped, and its ending never came: stopped it is.
+            // The owner stopped it before OwnClaw stopped, and its ending never came: stopped it is -- or, as
+            // finish has it, unverified when it had already changed the skill, and he is told the skill was
+            // rewritten and not checked.
+            boolean changed = changed(row);
+            String outcome = changed ? UNVERIFIED : STOPPED;
             jdbc.update("UPDATE skill_repairs SET outcome = ?, report = ?, ended_at = datetime('now') WHERE id = ?",
-                    STOPPED, row.get("stopped_by"), id);
-            event(userId, cutOff, STOPPED, skill, str(row, "problem"), cutOff, trigger);
-            event(userId, trigger, STOPPED, skill, str(row, "problem"), cutOff, trigger);
-            log.info("Self-repair {} of '{}' was stopped ({}) before the restart: not started again.", id, skill,
-                    row.get("stopped_by"));
+                    outcome, row.get("stopped_by"), id);
+            event(userId, cutOff, outcome, skill, str(row, "problem"), cutOff, trigger);
+            event(userId, trigger, outcome, skill, str(row, "problem"), cutOff, trigger);
+            log.info("Self-repair {} of '{}' was stopped ({}) before the restart{}: not started again.", id, skill,
+                    row.get("stopped_by"), changed ? ", after it had changed the skill" : "");
             tell(userId, cutOff, "🔧 Self-repair of " + skill + " stopped", "It was stopped (" + row.get("stopped_by")
-                    + ") before OwnClaw restarted, so it is not started again. The next time the problem shows, a "
-                    + "repair starts again.", null);
+                    + ") before OwnClaw restarted" + (changed ? ", after it had changed the skill: the change is in "
+                    + "place and was not checked" : "") + ". It is not started again. The next time the problem "
+                    + "shows, a repair starts again.", null);
             return;
         }
         boolean again = row.get("resumed_at") != null && Objects.equals(row.get("code_after"), row.get("code_at_resume"));
