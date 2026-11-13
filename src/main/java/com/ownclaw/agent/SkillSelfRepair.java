@@ -939,9 +939,16 @@ public class SkillSelfRepair {
             String given = image == null || String.valueOf(image).isBlank() ? null : String.valueOf(image).strip();
             if (!Objects.equals(given, had.containerImage())) out.add("another container image");
         }
-        if (Boolean.FALSE.equals(SkillManager.declared(params.get("has_side_effects")))
-                && !Boolean.FALSE.equals(had.sideEffects())) {
+        Boolean flag = SkillManager.declared(params.get("has_side_effects"));
+        if (Boolean.FALSE.equals(flag) && !Boolean.FALSE.equals(had.sideEffects())) {
             out.add("a has_side_effects: false it did not declare");
+        }
+        // A skill that has side effects keeps saying so: a null, a blank, a "no" or a 0 written here would
+        // leave its SKILL.yaml with no flag, and every later task's guards that read it -- the change never
+        // made twice, the result never retyped, the critic's warning -- would pass it by.
+        if (Boolean.TRUE.equals(had.sideEffects()) && params.containsKey("has_side_effects")
+                && !Boolean.TRUE.equals(flag)) {
+            out.add("a has_side_effects other than true");
         }
         return out.isEmpty() ? null : String.join("; ", out) + ". Leave them out, and they stay as they are.";
     }
@@ -964,7 +971,10 @@ public class SkillSelfRepair {
         var out = new LinkedHashMap<String, Object>(params == null ? Map.of() : params);
         if (!job.skill().equals(String.valueOf(out.get("name")))) return out;
         Declared had = job.declared();
-        if (!out.containsKey("has_side_effects") && had.sideEffects() != null) {
+        // Absent, or no flag at all (null, "", "no", 0): what it declared as the repair began -- and side
+        // effects declared are never taken away, whatever was given (grants refuses it first).
+        if (Boolean.TRUE.equals(had.sideEffects())
+                || SkillManager.declared(out.get("has_side_effects")) == null && had.sideEffects() != null) {
             out.put("has_side_effects", had.sideEffects());
         }
         if (!out.containsKey("requires_network")) out.put("requires_network", had.network());

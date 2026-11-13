@@ -185,6 +185,34 @@ class SelfRepairReviewTest {
                 List.of(), calls)));
     }
 
+    // R2-2 (P2): an explicit null or a non-boolean has_side_effects dropped a 'true' flag.
+    @Test
+    @DisplayName("R2-2: a skill that has side effects keeps has_side_effects: true through its repair's skill_create")
+    void aTrueFlagIsNeverDropped() {
+        var job = new SkillSelfRepair.Job(1, "smtp_send_email", "t1",
+                new SkillSelfRepair.Declared(true, true, List.of(), List.of(), null), false, List.of());
+        for (Object given : new Object[] {null, "", "no", 0, "yes", false, "false"}) {
+            var params = new java.util.LinkedHashMap<String, Object>();
+            params.put("name", "smtp_send_email");
+            params.put("description", "Send mail.");
+            params.put("parameters", "{}");
+            params.put("has_side_effects", given);
+            assertNotNull(SkillSelfRepair.outOfScope(job, AgentAction.SKILL_CREATE, params, null), "refused: " + given);
+            assertEquals(Boolean.TRUE, SkillManager.declared(SkillSelfRepair.keepDeclarations(job, params, null)
+                    .get("has_side_effects")), "kept true: " + given);
+        }
+        var params = new java.util.LinkedHashMap<String, Object>(java.util.Map.of("name", "smtp_send_email",
+                "has_side_effects", "true"));
+        assertNull(SkillSelfRepair.outOfScope(job, AgentAction.SKILL_CREATE, params, null), "true again is no grant");
+        // Undeclared, and given no flag: it stays undeclared.
+        var undeclared = new SkillSelfRepair.Job(1, "page_probe", "t1",
+                new SkillSelfRepair.Declared(null, true, List.of(), List.of(), null), false, List.of());
+        var none = new java.util.LinkedHashMap<String, Object>();
+        none.put("name", "page_probe");
+        none.put("has_side_effects", null);
+        assertNull(SkillManager.declared(SkillSelfRepair.keepDeclarations(undeclared, none, null).get("has_side_effects")));
+    }
+
     // F5: a repair that never got to try counted as "changed nothing", and the skill was left to the owner for good.
     @Test
     @DisplayName("F5: a repair cut short by an outage is no verdict: the owner is told it did not finish, and the next problem starts a repair")
