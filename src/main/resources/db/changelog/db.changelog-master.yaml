@@ -71,3 +71,6 @@ databaseChangeLog:
   - include:
       file: db/changelog/024-fact-captures.sql
       relativeToChangelogFile: false
+  - include:
+      file: db/changelog/026-skill-repairs.sql
+      relativeToChangelogFile: false

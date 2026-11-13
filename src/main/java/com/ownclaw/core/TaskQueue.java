@@ -163,7 +163,20 @@ public class TaskQueue {
     public CompletableFuture<AgentResult> submit(String userId, String message, int priority) {
         CompletableFuture<AgentResult> future = new CompletableFuture<>();
         add(new QueuedTask(userId, message, priority, System.currentTimeMillis(), added.incrementAndGet(),
-                future::complete, null, new Object()));
+                future::complete, null, new Object(), null));
+        return future;
+    }
+
+    /**
+     * Submit a self-repair of a skill ({@link com.ownclaw.agent.SkillSelfRepair}): background work
+     * from no chat, run as the repair {@code job} says -- under its task id, kept to its skill
+     * ({@link AgentLoop#executeRepair}). Queued, refused and failed as {@link #submit} is.
+     */
+    public CompletableFuture<AgentResult> submitRepair(String userId, String goal,
+                                                       com.ownclaw.agent.SkillSelfRepair.Job job) {
+        CompletableFuture<AgentResult> future = new CompletableFuture<>();
+        add(new QueuedTask(userId, goal, BACKGROUND_PRIORITY, System.currentTimeMillis(), added.incrementAndGet(),
+                future::complete, null, new Object(), job));
         return future;
     }
 
@@ -213,7 +226,8 @@ public class TaskQueue {
      */
     private QueuedTask enqueue(UserMessage message, long order) {
         var task = new QueuedTask(message.userId(), message.text(), CHAT_PRIORITY, System.currentTimeMillis(),
-                order, result -> answer(message, result), message, new Chat(message.userId(), message.sessionId()));
+                order, result -> answer(message, result), message, new Chat(message.userId(), message.sessionId()),
+                null);
         return add(task) ? task : null;
     }
 
@@ -320,8 +334,9 @@ public class TaskQueue {
             // The whole result, not only its text: the scheduler once kept only the response
             // string, and so could not tell a finished job from one that gave up and recorded
             // every run as completed.
-            task.done().accept(
-                    agentLoop.executeFull(task.userId(), task.message(), unattended, null, List.of(), null));
+            task.done().accept(task.repair() != null
+                    ? agentLoop.executeRepair(task.userId(), task.message(), task.repair())
+                    : agentLoop.executeFull(task.userId(), task.message(), unattended, null, List.of(), null));
         } catch (Exception e) {
             failed(task, e);
             task.done().accept(AgentResult.error(
@@ -356,7 +371,7 @@ public class TaskQueue {
      */
     public AgentResult runChat(UserMessage message) {
         var held = new QueuedTask(message.userId(), message.text(), CHAT_PRIORITY, System.currentTimeMillis(),
-                added.incrementAndGet(), result -> {}, message, new Chat(message.userId(), message.sessionId()));
+                added.incrementAndGet(), result -> {}, message, new Chat(message.userId(), message.sessionId()), null);
         synchronized (lock) {
             while (runningByChat.containsKey(held.chatKey()) || waitingIn(held.chatKey())) {
                 try {
@@ -579,6 +594,7 @@ public class TaskQueue {
      * @param chat       the chat message it runs, or null for a task that comes from no chat
      * @param chatKey    what one task at a time runs in: the message's {@link Chat}, or an object
      *                   of its own for a task that comes from no chat
+     * @param repair     the self-repair this task is ({@link #submitRepair}), or null
      */
     private record QueuedTask(
             String userId,
@@ -588,7 +604,8 @@ public class TaskQueue {
             long order,
             Consumer<AgentResult> done,
             UserMessage chat,
-            Object chatKey
+            Object chatKey,
+            com.ownclaw.agent.SkillSelfRepair.Job repair
     ) implements Comparable<QueuedTask> {
 
         @Override

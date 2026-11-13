@@ -615,6 +615,12 @@ public class ThinkingEngine {
     private List<com.ownclaw.llm.ToolSpec> toolset(AgentContext context, StepMode mode, boolean orchestrating) {
         var specials = new ArrayList<com.ownclaw.llm.ToolSpec>();
         for (var spec : SpecialActionSchemas.ALL) {
+            // Unattended work's answer reports what did not do its whole job (problems): nobody
+            // reads it as it is written, and code repairs the skills it names (SkillSelfRepair).
+            if (AgentAction.RESPOND.equals(spec.name()) && context.isUnattended()) {
+                specials.add(SpecialActionSchemas.RESPOND_UNATTENDED);
+                continue;
+            }
             specials.add(!AgentAction.DELEGATE.equals(spec.name()) ? spec
                     : mode.local() ? new com.ownclaw.llm.ToolSpec(spec.name(),
                             SpecialActionSchemas.DELEGATE_ON_THE_LOCAL_MODEL, spec.inputSchema(), false, true)
@@ -781,6 +787,15 @@ public class ThinkingEngine {
                     + "model can do, especially work on this machine, the LAN or private data, and ")
                     + (mode.local() ? "Never" : "never") + " stop to ask a question -- decide, and "
                     + "say which assumption you made.\n");
+            // The tools array says it in respond's own schema; the text protocol has only this.
+            if (!mode.nativeTools()) {
+                sb.append("- Problems: when you respond, add \"" + SkillSelfRepair.PROBLEMS + "\": [{\"tool\": "
+                        + "\"exact_name\", \"what\": \"one sentence\"}] to its params for every tool that "
+                        + "ran but did not do its whole job -- a part missing, a fallback taken, a warning or "
+                        + "an error in its output, data stale or wrong, even when it reported success. Each "
+                        + "skill listed is repaired after this task. Leave it out when every tool did its "
+                        + "whole job.\n");
+            }
         } else {
             sb.append("- Attendance: THE USER IS WAITING in the chat right now"
                     + (context.declinedAsReasoning() ? "." : ", and reads what you write beside "

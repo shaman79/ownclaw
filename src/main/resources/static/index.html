@@ -3513,6 +3513,8 @@
         }
         stat(formatTokenCount(outcome ? outcome.localTokens : tdSum(steps, 'localTokens')), 'Local tokens');
         view.appendChild(stats);
+        var repairs = buildTaskSelfRepair(t.selfRepair || []);
+        if (repairs) view.appendChild(repairs);
 
         var stepsPanel = node('div');
         steps.forEach(function(s) { stepsPanel.appendChild(buildTaskStepElement(s, recorded)); });
@@ -3543,6 +3545,48 @@
         view.appendChild(stepsPanel);
         view.appendChild(sentPanel);
         return view;
+    }
+
+    /**
+     * What self-repair did about this task: a skill it started repairing, a problem it added to a
+     * repair under way, one it left to the owner -- or, on a repair's own page, which skill it
+     * repairs after which task, and how it ended. Each repair or triggering task is a link to its
+     * page. Text only (node()): skill names and problems are the model's words.
+     */
+    function buildTaskSelfRepair(rows) {
+        if (!rows.length) return null;
+        var panel = node('div');
+        panel.appendChild(node('div', 'task-section-title', 'Self-repair'));
+        var outcomes = {
+            fixed: 'fixed, and checked: run again, the problem was gone',
+            unverified: 'changed, not checked',
+            not_fixed: 'changed, but run again it still showed the problem',
+            unchanged: 'ended without changing the skill',
+            interrupted: 'cut off: OwnClaw stopped while it ran',
+            not_started: 'never started'
+        };
+        rows.forEach(function(r) {
+            var item = node('div', 'task-trace-item');
+            var text = r.state === 'started' ? 'Started a repair of ' + r.skill + ': ' + (r.problem || '')
+                : r.state === 'added' ? r.skill + ' was being repaired already; this problem was added to that repair: '
+                    + (r.problem || '')
+                : r.state === 'left' ? 'Not repaired again: the last repair of ' + r.skill
+                    + ' changed nothing, so it was left to you. ' + (r.problem || '')
+                : r.state === 'repairing' ? 'This task repairs ' + r.skill + ': ' + (r.problem || '')
+                : 'The repair of ' + r.skill + ': ' + (outcomes[r.state] || r.state) + '.';
+            item.appendChild(node('div', 'task-trace-line', text));
+            var other = r.state === 'repairing' || outcomes[r.state] ? r.triggerTaskId : r.repairTaskId;
+            if (isTaskId(other)) {
+                var link = node('button', 'skill-back-btn', (other === r.triggerTaskId
+                        ? 'The task it repairs after: ' : r.state === 'left' ? 'The last repair: '
+                        : 'The repair task: ') + other + ' \u2192');
+                link.type = 'button';
+                link.addEventListener('click', function() { openTaskDetail(other, 'tasks'); });
+                item.appendChild(link);
+            }
+            panel.appendChild(item);
+        });
+        return panel;
     }
 
     function buildTaskStepElement(s, recorded) {

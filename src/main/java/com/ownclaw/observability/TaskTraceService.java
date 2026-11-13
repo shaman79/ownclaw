@@ -95,6 +95,9 @@ public class TaskTraceService {
         var artifactIds = new ArrayList<Long>();
         var pending = new ArrayList<Map<String, Object>>();
         var decisions = new LinkedHashMap<String, Integer>();
+        // What self-repair did about the task: a repair it started, a problem added to one under
+        // way, one left to the owner -- or, on a repair's own page, what it repaired and how it ended.
+        var selfRepair = new ArrayList<Map<String, Object>>();
         long bytesOut = 0, prompt = 0, completion = 0, cacheRead = 0, cacheWrite = 0;
         int scrubs = 0, identifiers = 0;
         double cost = 0;
@@ -196,6 +199,17 @@ public class TaskTraceService {
                     artifacts.add(artifact(d.path("artifact").asText(), d));
                     artifactIds.add(id);
                 }
+                case "self_repair" -> {
+                    if (d == null) continue;
+                    var r = new LinkedHashMap<String, Object>();
+                    r.put("state", d.path("state").asText(null));
+                    r.put("skill", d.path("skill").asText(null));
+                    r.put("problem", d.path("problem").asText(null));
+                    r.put("repairTaskId", d.path("repairTaskId").asText(null));
+                    r.put("triggerTaskId", d.path("triggerTaskId").asText(null));
+                    r.put("at", at);
+                    selfRepair.add(r);
+                }
                 // Local tokens billed after the ending was recorded: a summary of a private result
                 // whose reply came back just as the task ended. Part of what the task used.
                 case EventLogService.TOKENS_AFTER_END -> {
@@ -292,6 +306,7 @@ public class TaskTraceService {
         out.put("steps", steps);
         out.put("calls", calls);
         out.put("artifacts", artifacts);
+        out.put("selfRepair", selfRepair);
         out.put("notObserved", NOT_OBSERVED);
         return out;
     }

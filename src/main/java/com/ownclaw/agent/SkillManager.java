@@ -211,6 +211,18 @@ public class SkillManager {
     }
 
     /**
+     * Whether {@code name} is a generated skill that a task of {@code userId}'s may change: one on
+     * disk, and its author's or the owner's to change ({@link #changeRefusal}). What self-repair
+     * repairs: a name that is no such skill -- a typo, a special action, another account's skill --
+     * is not.
+     */
+    public boolean isChangeableSkill(String name, String userId) {
+        if (!isSkillName(name) || dynamicSkillRegistry == null || userId == null) return false;
+        var skill = dynamicSkillRegistry.getDynamic(name);
+        return skill.isPresent() && changeRefusal(name, skill.get().skillDir(), userId, "changed") == null;
+    }
+
+    /**
      * The account that first wrote this skill, from its SKILL.yaml; null when none is kept. Read
      * as every authored file is ({@link SkillJail#readAuthored}): a link at the name is refused,
      * not followed to a file that names another author.
