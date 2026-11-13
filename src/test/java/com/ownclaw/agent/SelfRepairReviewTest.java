@@ -520,6 +520,23 @@ class SelfRepairReviewTest {
         assertEquals(fix.menuCalls.get(0), fix.menuCalls.get(1), "the same input as the call it repairs after");
     }
 
+    @Test
+    @DisplayName("no vault value is stored in a repair's goal or evidence: not in an output, an argument or a description")
+    void noVaultValueInTheEvidence(@TempDir Path tmp) throws Exception {
+        String secret = "fake-router-pass-9431";
+        fix = new Fix(tmp);
+        fix.rig.jdbc.update("INSERT INTO users (id, display_name) VALUES ('u1', 'Owner')");   // the vault's salt
+        fix.rig.vault.storeCredential("u1", "ROUTER_PASS", secret);
+        fix.menuOutput.set(DEGRADED.replace("logo.png", "logo.png; tried " + secret));
+        fix.rig.cloud.think.add(LoopRig.call(MENU, java.util.Map.of("note", "with " + secret)));
+        fix.rig.cloud.think.add(problems("Done.", List.of(java.util.Map.of("tool", MENU, "what", PROBLEM))));
+        fix.unattended(TASK);
+        var row = fix.repairRow(0);
+        assertFalse(String.valueOf(row.get("evidence")).contains(secret), String.valueOf(row.get("evidence")));
+        assertFalse(String.valueOf(row.get("goal")).contains(secret), String.valueOf(row.get("goal")));
+        assertTrue(String.valueOf(row.get("evidence")).contains("logo.png; tried "), "the rest is kept");
+    }
+
     // F4: repair records were looked up by skill name alone: one account was told another's report.
     @Test
     @DisplayName("F4: another account's repair that changed nothing neither stops this account's repair nor is told to it")
