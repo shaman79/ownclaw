@@ -1058,6 +1058,7 @@ public class AgentLoop {
                 // What it says did not do its whole job, of the answer that is delivered: read when
                 // the task ends (SkillSelfRepair).
                 context.setReportedProblems(action.params().get(SkillSelfRepair.PROBLEMS));
+                context.setReportedCheck(action.params().get(SkillSelfRepair.CHECK));
                 return AgentResult.completed(
                         answer.response(),
                         context.trajectory(),

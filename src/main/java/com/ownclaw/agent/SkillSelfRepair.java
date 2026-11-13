@@ -75,6 +75,12 @@ public class SkillSelfRepair {
     /** respond's parameter for what did not do its whole job ({@link SpecialActionSchemas#RESPOND_UNATTENDED}). */
     public static final String PROBLEMS = "problems";
 
+    /** A repair's respond parameter for how its check went ({@link SpecialActionSchemas#RESPOND_REPAIR}). */
+    public static final String CHECK = "check";
+
+    /** What {@link #CHECK} may say. */
+    static final List<String> CHECKS = List.of("passed", "failed", "not_run");
+
     /**
      * The repair a task is: its record, the skill, the task's id (given before it runs, so the
      * triggering task's ending can name it), whether the skill had side effects when the repair
@@ -467,7 +473,7 @@ public class SkillSelfRepair {
         sb.append("4. Call no tool that has side effects -- sending mail, writing to other systems: in this task ")
           .append("such calls are refused.\n");
         sb.append("5. End with respond: say in a few sentences what was wrong, what you changed, and whether the ")
-          .append("check passed. If the problem is still there, name '").append(skill).append("' in problems.\n");
+          .append("check passed, and set 'check' to passed, failed or not_run.\n");
         return sb.toString();
     }
 
@@ -529,8 +535,11 @@ public class SkillSelfRepair {
     }
 
     /**
-     * Whether the skill's change was checked and passed: true or false for a repair that completed
-     * and ran the skill after its last change; null when nothing judged a run of the changed skill.
+     * Whether the skill's change was checked and passed, in a repair that completed and ran the skill
+     * after its last change: false when that run failed or the repair said the check failed; true
+     * only when the run worked AND the repair said it passed -- a run that "worked" with a degraded
+     * output is what started this, so its judgement is needed; null when nothing judged a run of
+     * the changed skill.
      */
     static Boolean checked(AgentContext ctx, AgentResult ended, String skill) {
         if (ended.terminationReason() != TerminationReason.COMPLETED) return null;
@@ -540,8 +549,9 @@ public class SkillSelfRepair {
         List<Artifact> runs = results.subList(Math.min(from, results.size()), results.size()).stream()
                 .filter(a -> skill.equals(a.tool())).toList();
         if (runs.isEmpty()) return null;
-        boolean reported = parseProblems(ctx.reportedProblems()).stream().anyMatch(p -> skill.equals(p.tool()));
-        return runs.getLast().succeeded() && !reported;
+        String check = ctx.reportedCheck() instanceof String c ? c.strip() : null;
+        if (!runs.getLast().succeeded() || "failed".equals(check)) return false;
+        return "passed".equals(check) ? Boolean.TRUE : null;
     }
 
     /**

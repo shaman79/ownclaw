@@ -596,6 +596,16 @@ public class ThinkingEngine {
     }
 
     /**
+     * Whether this task's answer is offered {@code problems}: unattended work, self-repair on, not an
+     * ops run (whose problems start no repair) and not a repair (which reports its check instead).
+     * What it says each listed skill is repaired after the task, so it is offered only where one is.
+     */
+    private boolean reportsProblems(AgentContext context) {
+        return context.isUnattended() && !context.isOps() && context.repair() == null
+                && config.getSelfRepair().isEnabled();
+    }
+
+    /**
      * The tools of a step that is offered skills, the cloud's and the local model's alike: the
      * special actions -- delegate described for the local model, a run of itself for private
      * data -- find_tools, the owner's usual skills, and every other skill deferred: sent, but read
@@ -616,8 +626,14 @@ public class ThinkingEngine {
         var specials = new ArrayList<com.ownclaw.llm.ToolSpec>();
         for (var spec : SpecialActionSchemas.ALL) {
             // Unattended work's answer reports what did not do its whole job (problems): nobody
-            // reads it as it is written, and code repairs the skills it names (SkillSelfRepair).
-            if (AgentAction.RESPOND.equals(spec.name()) && context.isUnattended()) {
+            // reads it as it is written, and code repairs the skills it names (SkillSelfRepair) --
+            // when self-repair is on, and not for an ops run, whose problems start none. A repair's
+            // answer says how its check went instead.
+            if (AgentAction.RESPOND.equals(spec.name()) && context.repair() != null) {
+                specials.add(SpecialActionSchemas.RESPOND_REPAIR);
+                continue;
+            }
+            if (AgentAction.RESPOND.equals(spec.name()) && reportsProblems(context)) {
                 specials.add(SpecialActionSchemas.RESPOND_UNATTENDED);
                 continue;
             }
@@ -788,7 +804,12 @@ public class ThinkingEngine {
                     + (mode.local() ? "Never" : "never") + " stop to ask a question -- decide, and "
                     + "say which assumption you made.\n");
             // The tools array says it in respond's own schema; the text protocol has only this.
-            if (!mode.nativeTools()) {
+            if (!mode.nativeTools() && context.repair() != null) {
+                sb.append("- Check: when you respond, add \"" + SkillSelfRepair.CHECK + "\": \"passed\", "
+                        + "\"failed\" or \"not_run\" to its params -- passed: you ran the skill after your last "
+                        + "change and it did its whole job; failed: run after your change, it still did not; "
+                        + "not_run: you did not run it after your change.\n");
+            } else if (!mode.nativeTools() && reportsProblems(context)) {
                 sb.append("- Problems: when you respond, add \"" + SkillSelfRepair.PROBLEMS + "\": [{\"tool\": "
                         + "\"exact_name\", \"what\": \"one sentence\"}] to its params for every tool that "
                         + "ran but did not do its whole job -- a part missing, a fallback taken, a warning or "

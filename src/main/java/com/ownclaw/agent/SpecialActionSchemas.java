@@ -240,6 +240,29 @@ public final class SpecialActionSchemas {
                             + "background. Leave it out when every tool did its whole job."))));
 
     /**
+     * respond as a self-repair is offered it: with {@code check}, how the check of its change went
+     * -- the repair's own judgement, which code weighs with whether it ran the skill after its last
+     * change and that run worked ({@link SkillSelfRepair}). Not {@code problems}: nothing a repair
+     * says starts another repair.
+     */
+    static final ToolSpec RESPOND_REPAIR = withCheckValues(spec(AgentAction.RESPOND,
+            "Deliver the final answer to the user and end the task. Put the whole answer "
+                    + "in 'message' — it is what the user reads.",
+            params("message", ToolParam.required("string", "The complete answer."),
+                    SkillSelfRepair.CHECK, ToolParam.optional("string", "How the check of your change "
+                            + "went: 'passed' -- you ran the skill after your last change and it did its "
+                            + "whole job; 'failed' -- run after your change, it still did not; 'not_run' -- "
+                            + "you did not run it after your change."))));
+
+    /** The spec with its 'check' parameter's values listed, which {@link ToolParam} has no way to say. */
+    @SuppressWarnings("unchecked")
+    private static ToolSpec withCheckValues(ToolSpec spec) {
+        var properties = (Map<String, Map<String, Object>>) spec.inputSchema().get("properties");
+        properties.get(SkillSelfRepair.CHECK).put("enum", SkillSelfRepair.CHECKS);
+        return spec;
+    }
+
+    /**
      * The spec with its 'problems' parameter's items declared what one is -- a tool and a sentence
      * -- which {@link ToolParam} has no way to say: OpenAI rejects an array schema with no items,
      * and an entry in any other shape is not read ({@link SkillSelfRepair#parseProblems}).

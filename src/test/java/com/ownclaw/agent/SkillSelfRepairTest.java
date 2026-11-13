@@ -180,6 +180,14 @@ class SkillSelfRepairTest {
         return call(AgentAction.RESPOND, args);
     }
 
+    /** A repair's answer, with how its check went. */
+    static LoopRig.Reply verdict(String message, String check) {
+        var args = new java.util.LinkedHashMap<String, Object>();
+        args.put("message", message);
+        args.put(SkillSelfRepair.CHECK, check);
+        return call(AgentAction.RESPOND, args);
+    }
+
     /** A repair that reads the skill, fixes it, runs it again and says so. */
     static void scriptFixAndCheck(LoopRig rig, Map<String, Object> runArgs, LoopRig.Reply last) {
         rig.cloud.think.add(call(AgentAction.SKILL_MANAGE, Map.of("action", "read", "name", MENU)));
@@ -409,8 +417,8 @@ class SkillSelfRepairTest {
         fix.rig.queue.start();
         fix.scriptMenu(true);
         scriptFixAndCheck(fix.rig, Map.of("debug", true),
-                respond("It was blocked with HTTP 455 and fell back to a logo. It now asks as a browser; run "
-                        + "again, both menus are read."));
+                verdict("It was blocked with HTTP 455 and fell back to a logo. It now asks as a browser; run "
+                        + "again, both menus are read.", "passed"));
         fix.unattended(TASK);
         var row = fix.ended(fix.lastId());
 
@@ -447,8 +455,8 @@ class SkillSelfRepairTest {
         scriptFixAndCheck(fix.rig, null, null);
         fix.rig.cloud.think.add(call(AgentAction.DELEGATE, Map.of("calls",
                 List.of(Map.of("tool", MENU, "params", Map.of("debug", true))))));
-        fix.rig.cloud.think.add(respond("Blocked by 455; now asks as a browser; run again through a delegation, "
-                + "both menus are read."));
+        fix.rig.cloud.think.add(verdict("Blocked by 455; now asks as a browser; run again through a delegation, "
+                + "both menus are read.", "passed"));
         fix.unattended(TASK);
         var row = fix.ended(fix.lastId());
 
@@ -463,8 +471,8 @@ class SkillSelfRepairTest {
         fix.fixedOutput = DEGRADED;
         fix.rig.queue.start();
         fix.scriptMenu(true);
-        scriptFixAndCheck(fix.rig, Map.of("debug", true), problems("I changed the headers, but it is still blocked.",
-                List.of(Map.of("tool", MENU, "what", "Still blocked with 455."))));
+        scriptFixAndCheck(fix.rig, Map.of("debug", true), verdict("I changed the headers, but it is still blocked.",
+                "failed"));
         fix.unattended(TASK);
         var row = fix.ended(fix.lastId());
 
@@ -710,17 +718,34 @@ class SkillSelfRepairTest {
     @DisplayName("problems is offered on an unattended task's respond, and not on a chat's")
     void problemsOfferedOnlyUnattended(@TempDir Path tmp) throws Exception {
         fix = new Fix(tmp);
+        fix.rig.cloud.think.add(respond("Nothing to do."));
+        fix.unattended("Say hello.");                                               // 0: unattended
+        fix.rig.cloud.think.add(respond("Hello."));
+        fix.rig.turn(fix.rig.chat.createSession("u1", "Hi"), "Say hello.");        // 1: a chat
+        fix.rig.cloud.think.add(respond("Hello."));
+        fix.rig.loop.executeFull("u1", "Say hello.", true, null, List.of(), TaskChat.Channel.OPS);   // 2: ops
+        fix.rig.cloud.think.add(respond("Nothing to change."));
+        fix.rig.loop.executeRepair("u1", "Repair the skill '" + MENU + "'.",
+                new SkillSelfRepair.Job(999, MENU, "abcd1234", false, false));     // 3: a repair
         fix.rig.config.getSelfRepair().setEnabled(false);
         fix.rig.cloud.think.add(respond("Nothing to do."));
-        fix.unattended("Say hello.");
-        fix.rig.cloud.think.add(respond("Hello."));
-        fix.rig.turn(fix.rig.chat.createSession("u1", "Hi"), "Say hello.");
+        fix.unattended("Say hello.");                                               // 4: switched off
 
         var thinks = fix.rig.cloud.calls("think");
+        assertEquals(5, thinks.size());
         assertTrue(propertiesOfRespond(thinks.get(0)).containsKey(SkillSelfRepair.PROBLEMS),
                 "unattended: " + propertiesOfRespond(thinks.get(0)));
-        assertFalse(propertiesOfRespond(thinks.get(thinks.size() - 1)).containsKey(SkillSelfRepair.PROBLEMS),
-                "a chat: " + propertiesOfRespond(thinks.get(thinks.size() - 1)));
+        for (int i : new int[] {1, 2, 3, 4}) {
+            assertFalse(propertiesOfRespond(thinks.get(i)).containsKey(SkillSelfRepair.PROBLEMS),
+                    i + ": " + propertiesOfRespond(thinks.get(i)));
+        }
+        assertFalse(String.valueOf(propertiesOfRespond(thinks.get(4))).contains("is repaired after this task"),
+                "switched off, nothing promises a repair");
+        // A repair is asked how its check went instead.
+        @SuppressWarnings("unchecked")
+        var check = (Map<String, Object>) propertiesOfRespond(thinks.get(3)).get(SkillSelfRepair.CHECK);
+        assertEquals(SkillSelfRepair.CHECKS, check.get("enum"), String.valueOf(check));
+        assertFalse(propertiesOfRespond(thinks.get(0)).containsKey(SkillSelfRepair.CHECK));
         @SuppressWarnings("unchecked")
         var items = (Map<String, Object>) ((Map<String, Object>) propertiesOfRespond(thinks.get(0))
                 .get(SkillSelfRepair.PROBLEMS)).get("items");
@@ -731,7 +756,6 @@ class SkillSelfRepairTest {
     @DisplayName("on the text protocol, unattended work is told of problems in its step's prompt, and a chat is not")
     void problemsOnTheTextProtocol(@TempDir Path tmp) throws Exception {
         fix = new Fix(tmp);
-        fix.rig.config.getSelfRepair().setEnabled(false);
         fix.rig.config.getMentor().setNativeTools(false);
         LoopRig.Reply text = c -> com.ownclaw.llm.Replies.of(
                 "{\"tool\": \"respond\", \"params\": {\"message\": \"Hello.\"}}", 100, 10);
@@ -745,6 +769,13 @@ class SkillSelfRepairTest {
         assertTrue(String.join("\n", LoopRig.userParts(thinks.get(0))).contains("- Problems: when you respond, add \""
                 + SkillSelfRepair.PROBLEMS + "\""), String.join("\n", LoopRig.userParts(thinks.get(0))));
         assertFalse(String.join("\n", LoopRig.userParts(thinks.get(1))).contains("- Problems:"));
+        // A repair is told to say how its check went, and nothing of problems.
+        fix.rig.cloud.think.add(text);
+        fix.rig.loop.executeRepair("u1", "Repair the skill '" + MENU + "'.",
+                new SkillSelfRepair.Job(999, MENU, "abcd1234", false, false));
+        String repair = String.join("\n", LoopRig.userParts(fix.rig.cloud.calls("think").get(2)));
+        assertTrue(repair.contains("- Check: when you respond, add \"" + SkillSelfRepair.CHECK + "\""), repair);
+        assertFalse(repair.contains("- Problems:"), repair);
     }
 
     @SuppressWarnings("unchecked")

@@ -203,6 +203,11 @@ public class AgentContext {
     public Object reportedProblems() { return reportedProblems; }
     public void setReportedProblems(Object problems) { this.reportedProblems = problems; }
 
+    /** What a repair's delivered final answer said in {@code check}, as written, or null ({@link SkillSelfRepair#checked}). */
+    private volatile Object reportedCheck;
+    public Object reportedCheck() { return reportedCheck; }
+    public void setReportedCheck(Object check) { this.reportedCheck = check; }
+
     public TaskOptions options() { return options; }
     public void setOptions(TaskOptions options) { this.options = options; }
 
