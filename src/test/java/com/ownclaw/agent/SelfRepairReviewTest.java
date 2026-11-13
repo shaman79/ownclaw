@@ -280,6 +280,29 @@ class SelfRepairReviewTest {
         assertFalse(r.response().contains((String) fix.repairRow(0).get("repair_task_id")), "u1's task named to u2");
     }
 
+    // 6: a clean run of the skill clears this account's repairs only: another's record is never touched.
+    @Test
+    @DisplayName("6: another account's clean run does not clear this account's repair that changed nothing")
+    void anotherAccountsCleanRunClearsNothingHere(@TempDir Path tmp) throws Exception {
+        fix = new Fix(tmp);
+        fix.rig.queue.start();
+        fix.scriptMenu(true);
+        fix.rig.cloud.think.add(respond("The site blocks every client; nothing to change."));
+        fix.unattended(TASK);
+        assertEquals("unchanged", fix.ended(fix.lastId()).get("outcome"));
+
+        fix.menuOutput.set(GOOD);
+        fix.scriptMenu(false);
+        fix.rig.loop.executeFull("u2", TASK, true);               // u2's run goes well
+        assertNull(fix.repairRow(0).get("cleared_at"), "u2's run cleared u1's record");
+
+        fix.menuOutput.set(DEGRADED);
+        fix.scriptMenu(true);
+        AgentResult r = fix.unattended(TASK);                      // u1's problem again
+        assertEquals("gave_up", fix.repairs().get(fix.repairs().size() - 1).get("outcome"), fix.repairs().toString());
+        assertTrue(r.response().contains("Self-repair is not tried again"), r.response());
+    }
+
     // F7: switched off, unattended respond still offered problems, saying each listed skill is repaired.
     @Test
     @DisplayName("F7: switched off, an unattended answer is offered no problems and promises no repair")

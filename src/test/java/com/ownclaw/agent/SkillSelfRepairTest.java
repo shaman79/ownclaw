@@ -779,6 +779,18 @@ class SkillSelfRepairTest {
         assertEquals("running", fix.repairRow(1).get("outcome"));
     }
 
+    @Test
+    @DisplayName("switched off since a repair began, it is not started again after a restart")
+    void notResumedWhenSwitchedOff(@TempDir Path tmp) throws Exception {
+        fix = new Fix(tmp);
+        fix.menuRun(true);
+        fix.rig.config.getSelfRepair().setEnabled(false);
+        var queue = new TaskQueue(fix.rig.loop, fix.rig.events, fix.rig.emitter, fix.rig.config, fix.rig.cancellation);
+        restarted(fix, queue).resume();
+        assertEquals("interrupted", fix.repairRow(0).get("outcome"));
+        assertEquals(0, queue.getQueueSize());
+    }
+
     static List<String> states(Fix fix, String taskId) {
         return fix.rig.jdbc.queryForList("SELECT json_extract(details, '$.state') FROM events WHERE event_type = "
                 + "'self_repair' AND task_id = ? ORDER BY id", String.class, taskId);

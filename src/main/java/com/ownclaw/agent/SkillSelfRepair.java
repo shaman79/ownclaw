@@ -208,6 +208,13 @@ public class SkillSelfRepair {
      */
     @org.springframework.context.event.EventListener(org.springframework.boot.context.event.ApplicationReadyEvent.class)
     public void resume() {
+        if (!enabled()) {
+            // Switched off since it began: what was under way is not started again.
+            int cut = jdbc.update("UPDATE skill_repairs SET outcome = ?, ended_at = datetime('now') WHERE outcome = ?",
+                    INTERRUPTED, RUNNING);
+            if (cut > 0) log.info("Self-repair is off: {} repair(s) cut off by the restart are not started again.", cut);
+            return;
+        }
         for (var row : jdbc.queryForList("SELECT * FROM skill_repairs WHERE outcome = ? ORDER BY id", RUNNING)) {
             try {
                 resume(row);
@@ -343,11 +350,13 @@ public class SkillSelfRepair {
                         .what().add(LAST_CALL_FAILED);
             }
         }
-        // In the order the skills first ran.
+        // In the order the skills first ran: an order only -- what is a problem was decided above.
+        var order = new ArrayList<>(callsOf.keySet());
         var ordered = new LinkedHashMap<String, Found>();
-        for (String name : callsOf.keySet()) {
-            if (found.containsKey(name)) ordered.put(name, found.get(name));
-        }
+        found.entrySet().stream()
+                .sorted(java.util.Comparator.comparingInt(e -> order.indexOf(e.getKey()) < 0 ? Integer.MAX_VALUE
+                        : order.indexOf(e.getKey())))
+                .forEach(e -> ordered.put(e.getKey(), e.getValue()));
         return ordered;
     }
 
