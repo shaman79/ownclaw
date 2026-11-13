@@ -45,7 +45,10 @@ class SkillCodegenTest {
         return c -> Replies.of("```python\n" + code + "\n```\n", 3_000, 4_000, 0, 0, "end_turn");
     }
 
-    /** A reply stopped at the model's maximum output, as Anthropic reports one. */
+    /**
+     * A reply stopped at the model's maximum output, as Anthropic reports one: continued, not
+     * refused (SkillCodeInPartsTest).
+     */
     static Reply cutOff(String text) {
         return c -> new LlmResponse(text, List.of(), null, "max_tokens", null,
                 "claude-opus-5", 128_000, 1_000_000,
@@ -54,22 +57,6 @@ class SkillCodegenTest {
 
     static AgentContext task() {
         return new AgentContext("u1", "a1b2c3d4", "audit the routers");
-    }
-
-    @Test
-    @DisplayName("a reply cut off at the output limit is refused after one call, says which limit, and is not an outage")
-    void aCutOffReplyIsRefusedNotRepaired(@TempDir Path tmp) throws Exception {
-        var rig = new LoopRig(tmp, List.of());
-        for (int i = 0; i < 4; i++) rig.cloud.codegen.add(cutOff("```python\n" + module("    an =")));
-        var ctx = task();
-        AgentLoop.Codegen out = rig.loop.generateSkillCode(spec(), ctx);
-        assertEquals(1, rig.cloud.calls("codegen").size(), "a cut-off file was sent back for repair");
-        assertNull(out.params());
-        assertTrue(out.error().startsWith("ERROR: the code for 'openwrt_audit' did not fit in one reply "
-                + "([anthropic] the reply reached the model's maximum output of 128,000 tokens and was cut off)."),
-                out.error());
-        assertFalse(out.error().toLowerCase().contains("unavailable"), out.error());
-        assertEquals(131_000, ctx.cloudTokens(), "the cut-off reply was billed, and counted");
     }
 
     /**
@@ -103,7 +90,7 @@ class SkillCodegenTest {
     }
 
     @Test
-    @DisplayName("a repair sends the specification and the latest attempt only, so it does not grow")
+    @DisplayName("a repair sends the specification, the latest attempt as the model's own turn and the error -- no earlier attempt, so it does not grow")
     void aRepairSendsOnlyTheLatestAttempt(@TempDir Path tmp) throws Exception {
         var rig = new LoopRig(tmp, List.of());
         rig.skills.syntax = SkillCodegenTest::brokenAt;
@@ -113,16 +100,21 @@ class SkillCodegenTest {
 
         var calls = rig.cloud.calls("codegen");
         assertEquals(5, calls.size(), "the first reply, and repairs until one brought back code already tried");
-        assertTrue(out.error().startsWith("ERROR: Python syntax error:\n  File \"skill.py\", line 5\n    def broken3(:"),
-                out.error());
-        String theSpec = calls.get(0).messages().get(1).content();
+        assertEquals("ERROR: Python syntax error: line 5: SyntaxError: invalid syntax", out.error(),
+                "Python's line and words for it, never the code it quotes");
+        List<LlmMessage> theSpec = calls.get(0).messages();
         for (int k = 1; k < 5; k++) {
             List<LlmMessage> sent = calls.get(k).messages();
-            assertEquals(2, sent.size(), "repair " + k + " carried earlier attempts");
-            assertEquals(LlmMessage.Role.USER, sent.get(1).role());
-            assertTrue(sent.get(1).content().startsWith(theSpec), "repair " + k + " lost the specification");
-            assertTrue(sent.get(1).content().contains("# " + (k - 1)) && !sent.get(1).content().contains("# " + (k - 2)),
-                    "repair " + k + " must carry the latest attempt and no earlier one");
+            assertEquals(4, sent.size(), "repair " + k + " carried earlier attempts: " + sent);
+            assertEquals(theSpec, sent.subList(0, 2), "repair " + k + " lost the specification");
+            assertEquals(LlmMessage.Role.ASSISTANT, sent.get(2).role());
+            assertTrue(sent.get(2).content().contains("# " + (k - 1)), "repair " + k + " must carry the latest attempt");
+            String earlier = "# " + (k - 2);
+            assertTrue(sent.stream().noneMatch(m -> m.content().contains(earlier)), "and no earlier one");
+            assertEquals(LlmMessage.Role.USER, sent.get(3).role());
+            assertEquals("The code failed Python's syntax check at line 5: SyntaxError: invalid syntax.\nLine 5, as you "
+                    + "wrote it:\ndef broken" + (k - 1) + "(:\n\nFix the error. Return the COMPLETE corrected code in a "
+                    + "```python fence, and the ```requirements fence as asked.", sent.get(3).content());
         }
     }
 
@@ -143,7 +135,7 @@ class SkillCodegenTest {
         for (int i = 0; i < 6; i++) again.cloud.codegen.add(finished(module("def broken(:\n    pass  # " + i)));
         AgentLoop.Codegen stuck = again.loop.generateSkillCode(spec(), task());
         assertEquals(2, again.cloud.calls("codegen").size(), "the same error after a repair: it is not getting past it");
-        assertEquals("ERROR: Python syntax error:\nline 5: invalid syntax", stuck.error());
+        assertEquals("ERROR: Python syntax error: line 5: invalid syntax", stuck.error());
         // Mutation: stop after three repairs, as before -> the working fifth repair is never asked for.
     }
 
@@ -157,7 +149,7 @@ class SkillCodegenTest {
         for (int i = 0; i < 4; i++) rig.cloud.codegen.add(finished(module("# round " + i + "\n\ndef broken(:\n    pass")));
         AgentLoop.Codegen out = rig.loop.generateSkillCode(spec(), task());
         assertEquals(2, rig.cloud.calls("codegen").size(), "a comment and a line shift are no progress");
-        assertTrue(out.error().contains("def broken(:"), out.error());
+        assertEquals("ERROR: Python syntax error: line 6: SyntaxError: invalid syntax", out.error());
 
         var failing = new LoopRig(tmp.resolve("failing"), List.of());
         failing.skills.syntax = code -> SkillManager.CHECK_FAILED + "exit 127: python3: not found";

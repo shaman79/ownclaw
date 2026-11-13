@@ -66,6 +66,8 @@ final class LoopRig {
         volatile boolean available = true;
         /** The provider's name, which decides how the think prompt renders the steps so far. */
         volatile String name = "anthropic";
+        /** Whether it is sent a thinking effort, as claude-opus-5-5 is; false plays one that is not (OpenAI). */
+        volatile boolean effort = true;
 
         @Override
         public LlmResponse chat(List<LlmMessage> messages, LlmRequestConfig config) {
@@ -101,6 +103,8 @@ final class LoopRig {
             lookups.add(System.currentTimeMillis());
             return window.apply(progress);
         }
+
+        @Override public boolean takesEffort() { return effort; }
     }
 
     /** The model calls a tool. */
@@ -140,15 +144,46 @@ final class LoopRig {
         volatile Function<String, String> files = name -> "ERROR: '" + name + "' is not a skill or does not exist.";
         volatile Function<String, String> syntax = code -> null;
         volatile Function<Map<String, Object>, String> create = p -> "Skill '" + p.get("name") + "' created.";
+        /** Where the real Python that puts values back into code is set up, on first use. */
+        private final Path pythonDir;
+        private volatile SkillManager python;
 
-        Skills(SkillCuratorService curator, ToolRegistry registry) { super(null, registry, null, null, null, curator, null); }
+        Skills(SkillCuratorService curator, ToolRegistry registry, Path pythonDir) {
+            super(null, registry, null, null, null, curator, null);
+            this.pythonDir = pythonDir;
+        }
 
+        /** A test's own putting back of the values, instead of the real one. */
+        volatile java.util.function.BiFunction<String, Map<String, String>, CodeValues.Restored> restore = null;
+
+        /** The values put back by the real script on the system's Python, as for real. */
+        @Override CodeValues.Restored restoreValues(String code, Map<String, String> values) {
+            if (restore != null) return restore.apply(code, values);
+            if (values.isEmpty()) return CodeValues.Restored.unchanged(code);
+            try {
+                if (python == null) python = SyntaxCheckTest.manager(pythonDir);
+            } catch (Exception e) {
+                throw new IllegalStateException(e);
+            }
+            return python.restoreValues(code, values);
+        }
+
+        /** Each skill's code as the model wrote it, where one was kept; and what each create kept. */
+        volatile Function<String, String> asWritten = name -> null;
+        final List<String> keptAsWritten = new java.util.concurrent.CopyOnWriteArrayList<>();
+
+        @Override public String readAsWritten(String name, String userId) { return asWritten.apply(name); }
         @Override public String readSkillCode(String name) { return source.apply(name); }
         @Override public String readSkill(String name) { return files.apply(name); }
         @Override String checkPythonSyntax(String code) { return syntax.apply(code); }
         @Override public String createSkill(Map<String, Object> params, String requester,
                                             java.util.function.BooleanSupplier stopped,
                                             Runnable waiting) { return create.apply(params); }
+        @Override public String createSkill(Map<String, Object> params, String kept, String requester,
+                                            java.util.function.BooleanSupplier stopped, Runnable waiting) {
+            if (kept != null) keptAsWritten.add(kept);
+            return create.apply(params);
+        }
     }
 
     final JdbcTemplate jdbc;
@@ -207,7 +242,7 @@ final class LoopRig {
         vault.init();
         var curator = new SkillCuratorService(jdbc, registry,
                 new DynamicSkillRegistry(null, null, null, null, null, null, null));
-        skills = new Skills(curator, registry);
+        skills = new Skills(curator, registry, dir.resolve("restore-python"));
         loop = new AgentLoop(engine.make(registry, config, router),
                 new CriticAgent(registry), registry, emitter, config, router, new SqliteAgentMemory(jdbc),
                 curator, skills, debug,

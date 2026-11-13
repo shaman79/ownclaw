@@ -1978,7 +1978,13 @@ public class AgentLoop {
         String name = params.get("name") != null ? params.get("name").toString() : null;
 
         return switch (action) {
-            case "read" -> skillManager.readSkill(name);
+            case "read" -> {
+                String read = skillManager.readSkill(name);
+                // Its code, the user's values in it, is sent as code wherever it is replayed; the
+                // rest of what was read as any text.
+                context.declareSkillCode(skillManager.readSkillCode(name), com.ownclaw.privacy.Redactor.Declared.CODE);
+                yield read;
+            }
             case "delete" -> skillManager.deleteSkill(name, context.userId(), context::isCancelled,
                     () -> waitingForSkill(context, name));
             case "list" -> skillManager.listSkills();
@@ -2725,17 +2731,6 @@ public class AgentLoop {
         return s.length() <= maxLen ? s : s.substring(0, maxLen) + "...";
     }
 
-    /** Add line numbers to code for precise error location in repair prompts. */
-    private String numberCodeLines(String code) {
-        if (code == null) return "";
-        String[] lines = code.split("\n", -1);
-        var sb = new StringBuilder(code.length() + lines.length * 5);
-        for (int i = 0; i < lines.length; i++) {
-            sb.append(String.format("%3d| %s\n", i + 1, lines[i]));
-        }
-        return sb.toString();
-    }
-
     /**
      * The task's running totals for status messages: its steps, and its tokens -- the cloud's
      * kind by kind with what they cost ({@link AgentContext#cloudUse}), which the page shows, and
@@ -2775,9 +2770,9 @@ public class AgentLoop {
      * quietly on the case nobody thought about. Showing the failures to the model repairing the
      * code gets most of the benefit with none of that risk.
      */
-    private String pastFailureEvidence(String skillName) {
+    private String pastFailureEvidence(String skillName, String userId) {
         try {
-            var failures = curatorService.failures(skillName);
+            var failures = curatorService.failures(skillName, userId);
             if (failures.isEmpty()) return null;
             var sb = new StringBuilder("Real calls to this skill that FAILED previously "
                     + "(parameters are redacted where they looked sensitive):\n");
@@ -2801,7 +2796,11 @@ public class AgentLoop {
      * causes, and the caller named one of them, "Cloud LLM unavailable": a cloud model that had
      * answered with code cut off at its output limit was reported to the owner as an outage.
      */
-    record Codegen(Map<String, Object> params, String error) {
+    record Codegen(Map<String, Object> params, String error, String asWritten) {
+        Codegen(Map<String, Object> params, String error) {
+            this(params, error, null);
+        }
+
         static Codegen failed(String why) {
             return new Codegen(null, "ERROR: " + why);
         }
@@ -2835,8 +2834,13 @@ public class AgentLoop {
         if (result == null) {
             Codegen code = generateSkillCode(action.params(), context);
             result = code.error() != null ? code.error()
-                    : skillManager.createSkill(code.params(), context.userId(), context::isCancelled,
+                    : skillManager.createSkill(code.params(), code.asWritten(), context.userId(), context::isCancelled,
                             () -> waitingForSkill(context, str(action.params(), "name")));
+            // A load error is Python's traceback of the code, the user's values put back in it: what a
+            // skill printed, filtered as text and its known values replaced wherever they stand.
+            if (code.error() == null && result.startsWith("ERROR")) {
+                context.declareSkillCode(result, com.ownclaw.privacy.Redactor.Declared.OUTPUT);
+            }
         }
         // The skill the model has just created is one of its tools from the next step.
         if (!result.startsWith("ERROR") && context.toolsAdded() != null) {
@@ -2859,13 +2863,27 @@ public class AgentLoop {
      * brings back code or an error already seen is going round, and so would the next: there the
      * code is given up. No count of attempts ends it (the owner's rule: no step limits, 2026-10-01);
      * each repair is shown as it runs, and Stop ends it. Three repairs used to be all there was, and
-     * a fourth that would have worked was never asked for. A repair sends the specification and the
-     * latest attempt only, in the
-     * specification's own message so the roles still alternate. Each used to append the reply and
-     * a numbered copy of it to everything sent before, so the third repair resent both earlier
-     * attempts twice over: 195,723 bytes for a 6,434-byte request. A reply that reached the
-     * model's maximum output is refused -- never syntax-checked, never repaired: the file is
-     * incomplete, and asking for the complete corrected code asks for the same length again.
+     * a fourth that would have worked was never asked for. A repair sends the specification, the
+     * latest attempt only -- as the model's own turns, exactly as it wrote them -- and the error
+     * ({@link #repairRequest}). Each used to append the reply and a numbered copy of it to
+     * everything sent before, so the third repair resent both earlier attempts twice over: 195,723
+     * bytes for a 6,434-byte request.
+     * <p>
+     * Every attempt's reply is taken whole ({@link CodeWriting#reply}): one that reaches the
+     * model's maximum output is continued from where it stopped, part after part, until a part
+     * ends by itself, and the parts joined ({@link ReplySeam}) are the reply that is checked and,
+     * when it must be, repaired -- a repair's reply too, which is the complete corrected code and
+     * so as long again. A reply cut off at the maximum output used to be refused, never checked
+     * and never repaired, so a skill longer than one reply could not be made at all; the owner,
+     * 2026-11-11: if the skill is needed to finish the task, the skill must be finished. Before a
+     * reply in parts that fails the checks is repaired, its seams are read otherwise, one at a time
+     * ({@link ReplySeam#readings}): each such reading costs a check here, a repair of a long skill
+     * another generation in parts.
+     * <p>
+     * The replies come back as the model wrote them, its placeholders in them: they go back to the
+     * model so, as its own turns, and the user's values are put back once, in the text that is
+     * checked and kept ({@link CodeWriting#restored}). Nothing the values were put back into goes
+     * to the cloud.
      * <p>
      * Every call streams with the task's progress hook, so a long one is seen as alive and a
      * Stop ends it; between calls the stop is checked before the next is sent. Every call's
@@ -2891,6 +2909,19 @@ public class AgentLoop {
         String oldCode = skillManager.readSkillCode(name);
         String lastError = null;
         if (oldCode != null) {
+            // The code as the model wrote it, where it was kept with this skill.py: its placeholders
+            // where the values are, and sent so. Otherwise skill.py itself, every value the user's
+            // table holds replaced in it wherever it stands (AgentContext#declareSkillCode).
+            // Only on the cloud, where the placeholders are put back: the local model is shown the values
+            // themselves, and nothing would put back what it copied of a placeholder. And only one kept
+            // for this account's placeholders (SkillManager#readAsWritten).
+            String asWritten = local ? null : skillManager.readAsWritten(name, context.userId());
+            if (asWritten != null) {
+                oldCode = asWritten;
+                context.declareSkillCode(asWritten, com.ownclaw.privacy.Redactor.Declared.CODE_AS_WRITTEN);
+            } else {
+                context.declareSkillCode(oldCode, com.ownclaw.privacy.Redactor.Declared.CODE);
+            }
             // Walk trajectory backwards to find the most recent failed execution of this skill
             var turns = context.trajectory().turns();
             for (int i = turns.size() - 1; i >= 0; i--) {
@@ -2905,11 +2936,14 @@ public class AgentLoop {
             // blind, against an error it could not see. skill_usage now keeps the parameters
             // and the error of real failures, which is evidence rather than guesswork: the
             // exact calls that broke, so the fix can be aimed at them.
-            String history = pastFailureEvidence(name);
+            String history = pastFailureEvidence(name, context.userId());
             if (history != null) {
                 context.givenEarlier(history);
                 lastError = lastError == null ? history : lastError + "\n\n" + history;
             }
+            // A run's output and traceback, its values in them: filtered as text, and its known values
+            // replaced wherever they stand.
+            context.declareSkillCode(lastError, com.ownclaw.privacy.Redactor.Declared.OUTPUT);
             log.info("Skill '{}' exists — will attempt targeted fix{}{}",
                     name,
                     lastError != null ? " (error available)" : " (no error known)",
@@ -2928,14 +2962,20 @@ public class AgentLoop {
         // and the local model is sent its own settings (OwnClawConfig.Executor#getThinking).
         // At the task's thinking effort, as the steps are: writing a skill is part of the task's
         // work. On the local model, low means the code is written without reasoning first.
+        // Every reply is handed back as the model wrote it: its parts go back to the model as its
+        // own turns, and the values are put back once, in what is kept (CodeWriting).
         LlmRequestConfig codeGenConfig = new LlmRequestConfig(null, 0.2, false)
                 .withEgress(context.egress("codegen"))
-                .withEffort(context.options().effort());
+                .withEffort(context.options().effort())
+                .repliesAsWritten();
 
+        var writing = new CodeWriting(context, provider, local, name, providerLabel, codeGenConfig);
         List<LlmMessage> prompt = spec;
         // What the attempts have brought back: a repair that brings either again has not got past it.
         var triedCode = new java.util.HashSet<String>();
         var seenErrors = new java.util.HashSet<String>();
+        // The characters of code a repair's request carries back: none for the first attempt.
+        int carried = 0;
         for (int attempt = 0; ; attempt++) {
             if (context.isCancelled()) return Codegen.stopped(name);
             if (attempt > 0) {
@@ -2943,107 +2983,602 @@ public class AgentLoop {
                         "Repairing syntax error · " + providerLabel + " (attempt " + attempt + ")",
                         tokenData(context));
             }
-            // The task's own hook goes with the call, and while it runs its chat is shown what it is
-            // doing (AgentContext#call).
-            LiveCall live = context.call(provider, local, context.atStep(
-                    (attempt == 0 ? "the code of skill '" : "repairing the code of skill '") + name + "'"));
-            LlmResponse reply;
-            try {
-                LlmProvider writer = provider;
-                List<LlmMessage> asked = prompt;
-                LlmRequestConfig asking = codeGenConfig.withProgress(live);
-                java.util.function.Supplier<LlmResponse> call = () -> writer.chat(asked, asking);
-                // On the local model, when the cloud is not available: work the task waits on.
-                reply = local ? lane.foreground(context, call) : call.get();
-            } catch (TaskCancellationService.TaskCancelledException stop) {
-                return Codegen.stopped(name);
-            } catch (ProviderRefused declined) {
-                account(context, local, provider, declined.reply());
-                return Codegen.failed("the model declined to write the code for '" + name + "' ("
-                        + declined.getMessage() + "), so nothing was created.");
-            } catch (OutputTruncated cutOff) {
-                account(context, local, provider, cutOff.reply());
-                if (cutOff.replyRanOn()) {
-                    context.chat().ranOn(cutOff, live, "the code of '" + name + "' was not written");
-                    return Codegen.failed("writing the code for '" + name + "' did not end: " + cutOff.getMessage()
+            Written reply = writing.reply(prompt,
+                    (attempt == 0 ? "the code of skill '" : "repairing the code of skill '") + name + "'", carried);
+            // Written from the start on the local model, whose prompt is its own.
+            if (reply.onLocal()) return generateSkillCode(originalParams, context);
+            if (reply.ended() != null) return reply.ended();
+
+            Checked first = checked(writing, ReplySeam.first(reply.parts()));
+            Checked chosen = first;
+            if (first.mendable() && reply.parts().size() > 1) {
+                // Before a repair, which asks for the whole code again -- for a long skill another
+                // generation in parts -- the seams read otherwise, one at a time: each a check here.
+                for (ReplySeam.Reading other : ReplySeam.readings(reply.parts())) {
+                    if (context.isCancelled()) return Codegen.stopped(name);
+                    Checked again = checked(writing, other);
+                    // A check that could not run ends the code as the first reading's would: no
+                    // repair of the code can mend it, and the next reading's check would fail too.
+                    if (again.outcome() == Checked.Outcome.CHECK_FAILED) {
+                        chosen = again;
+                        break;
+                    }
+                    if (again.outcome() == Checked.Outcome.PASSED) {
+                        log.info("Skill '{}': its code passes the checks with the seam before part {} read otherwise "
+                                + "-- {} -- not as it was joined", name, other.part(), other.how());
+                        chosen = again;
+                        break;
+                    }
+                }
+            }
+            String code = chosen.code();
+            switch (chosen.outcome()) {
+                case NO_CODE, NO_RUN -> {
+                    log.warn("Skill '{}': a reply of {} chars held {}", name, chosen.asWritten().length(),
+                            code == null ? "no Python code" : "Python code without def run(params)");
+                    return Codegen.failed(code == null
+                            ? "the reply for '" + name + "' held no Python code, so nothing was created."
+                            : "the reply for '" + name + "' held Python code but no def run(params), which "
+                                    + "every skill needs, so nothing was created.");
+                }
+                case REMOVED_SECRET -> {
+                    log.warn("Skill '{}': the code holds a removed secret — refused.", name);
+                    return Codegen.failed("the code for '" + name + "' holds a removed secret, so nothing "
+                            + "was created. " + REMOVED_SECRET);
+                }
+                case CHECK_FAILED -> {
+                    // The check could not run: nothing a repair of the code could fix, and every
+                    // repair would fail it the same way.
+                    log.error("Skill '{}': the syntax check could not run: {}", name, oneLine(chosen.syntaxError()));
+                    return Codegen.failed("the code for '" + name + "' could not be checked ("
+                            + oneLine(chosen.syntaxError()) + "), so nothing was created.");
+                }
+                case RESTORE_REFUSED -> {
+                    log.error("Skill '{}': the code {}", name, chosen.syntaxError());
+                    return Codegen.failed("the code for '" + name + "' " + chosen.syntaxError()
                             + ", so nothing was created.");
                 }
-                return Codegen.failed(cutOff.limit() == OutputTruncated.Limit.MAX_OUTPUT
-                        ? "the code for '" + name + "' did not fit in one reply (" + cutOff.getMessage()
-                                + "). It was discarded, not repaired, and nothing was created. A "
-                                + "smaller skill fits: one job per skill, or split this one into several."
-                        : "the request for the code of '" + name + "' did not fit ("
-                                + cutOff.getMessage() + "), so nothing was created.");
-            } catch (EgressRefused refused) {
-                return Codegen.failed("the request for the code of '" + name + "' was not sent ("
-                        + refused.getMessage() + "), so nothing was created.");
-            } catch (LlmException callFailed) {
-                if (!local && callFailed.unreachable() && goesOnWithoutTheCloud(context, provider, callFailed)) {
-                    if (!context.onLocal()) {
-                        attempt--; // the same attempt, asked of the cloud once more
-                        continue;
+                case RESTORE_BROKE -> {
+                    log.error("Skill '{}': its code compiles as written but not with the values put back{}", name,
+                            chosen.syntaxError());
+                    return Codegen.failed("the code for '" + name + "' compiles as the model wrote it but not with "
+                            + "your values put back" + chosen.syntaxError() + " -- a fault in putting them back, "
+                            + "not in the code -- so nothing was created.");
+                }
+                case PASSED -> {
+                    log.info("{} generated {} chars of skill code for '{}' ({} tokens{})",
+                            local ? "Local LLM (fallback)" : "Cloud LLM", code.length(), name, reply.tokens(),
+                            reply.parts().size() > 1 ? ", in " + reply.parts().size() + " parts" : "");
+                    Map<String, Object> enhanced = new HashMap<>(originalParams);
+                    enhanced.put("code", chosen.restored());
+                    // The model may also name better requirements: its values put back only where each is
+                    // one plain token, which pip cannot read as an option or a second line.
+                    String cloudRequirements = extractRequirements(chosen.asWritten());
+                    if (cloudRequirements != null) {
+                        for (String value : CodeValues.valuesIn(cloudRequirements, writing::restored).values()) {
+                            if (!PLAIN_TOKEN.matcher(value).matches()) {
+                                log.error("Skill '{}': its requirements name a value that is not a plain token", name);
+                                return Codegen.failed("the requirements for '" + name + "' name a value of yours that "
+                                        + "is not a plain package name or version -- put back there it could be a pip "
+                                        + "option or another line -- so nothing was created.");
+                            }
+                        }
+                        enhanced.put("requirements", writing.restored(cloudRequirements));
                     }
-                    // Written from the start on the local model, whose prompt is its own.
-                    live.close();
-                    return generateSkillCode(originalParams, context);
+                    // Whatever named them -- the reply, or the planner's call, its values put back as
+                    // text -- the requirements are plain ones or the skill is not made.
+                    String notPlain = SkillManager.requirementsRefusal(str(enhanced, "requirements"));
+                    if (notPlain != null) {
+                        log.error("Skill '{}': its requirements are not plain ones", name);
+                        return Codegen.failed("the requirements for '" + name + "' were not taken: " + notPlain);
+                    }
+                    return new Codegen(enhanced, null, code);
                 }
-                return Codegen.failed("the request for the code of '" + name + "' failed ("
-                        + callFailed.getMessage() + "), so nothing was created.");
-            } finally {
-                live.close();
+                case SYNTAX_ERROR, DROPS_CODE -> { }
             }
-            // A reply came back: the task is alive, whatever the reply holds.
-            context.markProgress();
-            if (!local) context.cloudAnswered();
-            account(context, local, provider, reply);
-
-            String code = extractPythonCode(reply.content());
-            if (code == null || !code.contains("def run(")) {
-                log.warn("Skill '{}': a reply of {} chars held {}", name,
-                        reply.content() == null ? 0 : reply.content().length(),
-                        code == null ? "no Python code" : "Python code without def run(params)");
-                return Codegen.failed(code == null
-                        ? "the reply for '" + name + "' held no Python code, so nothing was created."
-                        : "the reply for '" + name + "' held Python code but no def run(params), which "
-                                + "every skill needs, so nothing was created.");
-            }
-            if (Redactor.holdsRemovedSecret(code)) {
-                log.warn("Skill '{}': the code holds a removed secret — refused.", name);
-                return Codegen.failed("the code for '" + name + "' holds a removed secret, so nothing "
-                        + "was created. " + REMOVED_SECRET);
-            }
-            String syntaxError = skillManager.checkPythonSyntax(code);
-            if (syntaxError != null && syntaxError.startsWith(SkillManager.CHECK_FAILED)) {
-                // The check could not run: nothing a repair of the code could fix, and every repair
-                // would fail it the same way.
-                log.error("Skill '{}': the syntax check could not run: {}", name, syntaxError);
-                return Codegen.failed("the code for '" + name + "' could not be checked (" + syntaxError
-                        + "), so nothing was created.");
-            }
-            if (syntaxError == null) {
-                log.info("{} generated {} chars of skill code for '{}' ({} tokens)",
-                        local ? "Local LLM (fallback)" : "Cloud LLM", code.length(), name, reply.totalTokens());
-                Map<String, Object> enhanced = new HashMap<>(originalParams);
-                enhanced.put("code", code);
-                // The model may also name better requirements
-                String cloudRequirements = extractRequirements(reply.content());
-                if (cloudRequirements != null) {
-                    enhanced.put("requirements", cloudRequirements);
-                }
-                return new Codegen(enhanced, null);
-            }
+            String syntaxError = chosen.syntaxError();
             boolean newCode = triedCode.add(code);
             boolean newError = seenErrors.add(errorKey(syntaxError, code));
             if (!newCode || !newError) {
                 log.error("Skill '{}': attempt {} brought back {} already seen, so the repairs are not getting past "
-                        + "it: {}", name, attempt + 1, !newCode ? "code" : "an error", syntaxError);
-                return Codegen.failed("Python syntax error:\n" + syntaxError);
+                        + "it: {}", name, attempt + 1, !newCode ? "code" : "an error", oneLine(syntaxError));
+                return Codegen.failed(chosen.outcome() == Checked.Outcome.DROPS_CODE
+                        ? "the code for '" + name + "' kept coming back in pieces: " + syntaxError
+                                + ", so nothing was created."
+                        : "Python syntax error: " + oneLine(syntaxError));
             }
-            log.warn("Skill '{}' syntax error (repair {}): {}", name, attempt + 1, syntaxError);
-            prompt = List.of(spec.get(0), LlmMessage.user(spec.get(1).content()
-                    + "\n\nThe previous attempt failed the syntax check:\n" + syntaxError
-                    + "\n\nNumbered code:\n" + numberCodeLines(code)
-                    + "\n\nFix the error. Return the COMPLETE corrected code in a ```python fence."));
+            log.warn("Skill '{}' syntax error (repair {}): {}", name, attempt + 1, oneLine(syntaxError));
+            prompt = repairRequest(spec, reply.parts(), chosen, context);
+            carried = reply.text().length();
+            // The attempts before this one never go back: the gateway forgets what it handed out of them.
+            writing.forgetAllBut(prompt);
+        }
+    }
+
+    /**
+     * One reading of a reply, checked as the skill would be made from it: put back with the user's
+     * values once ({@link CodeWriting#restored}), its code extracted, and that checked.
+     *
+     * @param asWritten the reply as the model wrote it, its parts joined
+     * @param text      the reply with the user's values put back
+     * @param code      its code, or null when it holds none
+     * @param syntaxError the syntax check's error, for {@link Outcome#SYNTAX_ERROR} and
+     *                  {@link Outcome#CHECK_FAILED}; null otherwise
+     */
+    private record Checked(String asWritten, String code, String restored, Outcome outcome, String syntaxError) {
+        /**
+         * DROPS_CODE: the code ends at a seam while more code follows it in the reply
+         * ({@link ReplySeam#dropsCode}) -- a reading that would make the skill of the code before
+         * the seam only. RESTORE_REFUSED: a value's placeholder stands where, put back, the value
+         * would be code ({@link CodeValues}). RESTORE_BROKE: the code compiles as written and not
+         * with the values put back -- the restore's fault, never the code's.
+         */
+        enum Outcome { NO_CODE, NO_RUN, REMOVED_SECRET, CHECK_FAILED, SYNTAX_ERROR, DROPS_CODE, RESTORE_REFUSED,
+            RESTORE_BROKE, PASSED }
+
+        /** Whether another reading of the seams could mend it: code missing, in pieces, or not compiling. */
+        boolean mendable() {
+            return outcome == Outcome.NO_CODE || outcome == Outcome.NO_RUN || outcome == Outcome.SYNTAX_ERROR
+                    || outcome == Outcome.DROPS_CODE;
+        }
+    }
+
+    /**
+     * One reading of a reply, checked as the skill would be made from it. Its code is checked as the
+     * model wrote it, placeholders and all -- Python's words for an error in it then hold nothing of
+     * the user's, and are what the repairs are told and compare. Only code that passes has the
+     * user's values put back, by Python's own tokenizer ({@link CodeValues}): each into the literal it
+     * stands in, escaped for it; and that is checked again, so code that compiles as written and not
+     * restored is the restore's fault, said so, and never sent to a repair.
+     *
+     * @param asWritten the reading: the reply as the model wrote it, its parts joined
+     */
+    private Checked checked(CodeWriting writing, ReplySeam.Reading reading) {
+        String asWritten = reading.text();
+        if (reading.dropsCode()) {
+            String pieces = extractPythonCode(asWritten);
+            return new Checked(asWritten, pieces, null, Checked.Outcome.DROPS_CODE, "line "
+                    + pieces.split("\n", -1).length + ": " + DROPS_CODE);
+        }
+        String code = extractPythonCode(asWritten);
+        if (code == null) return new Checked(asWritten, null, null, Checked.Outcome.NO_CODE, null);
+        if (!code.contains("def run(")) return new Checked(asWritten, code, null, Checked.Outcome.NO_RUN, null);
+        if (Redactor.holdsRemovedSecret(code)) {
+            return new Checked(asWritten, code, null, Checked.Outcome.REMOVED_SECRET, null);
+        }
+        String syntaxError = skillManager.checkPythonSyntax(code);
+        if (syntaxError != null) {
+            return new Checked(asWritten, code, null, syntaxError.startsWith(SkillManager.CHECK_FAILED)
+                    ? Checked.Outcome.CHECK_FAILED : Checked.Outcome.SYNTAX_ERROR, syntaxError);
+        }
+        CodeValues.Restored restored = writing.restoredCode(code);
+        if (restored.failed() != null) {
+            return new Checked(asWritten, code, null, Checked.Outcome.CHECK_FAILED,
+                    SkillManager.CHECK_FAILED + "the values could not be put back: " + restored.failed());
+        }
+        if (restored.refused() != null) {
+            return new Checked(asWritten, code, null, Checked.Outcome.RESTORE_REFUSED, restored.why());
+        }
+        String again = skillManager.checkPythonSyntax(restored.code());
+        if (again != null) {
+            if (again.startsWith(SkillManager.CHECK_FAILED)) {
+                return new Checked(asWritten, code, null, Checked.Outcome.CHECK_FAILED, oneLine(again));
+            }
+            // Its words would quote the restored line: only where it is.
+            Integer line = errorLine(again);
+            return new Checked(asWritten, code, null, Checked.Outcome.RESTORE_BROKE,
+                    line == null ? "" : " (at line " + line + ")");
+        }
+        return new Checked(asWritten, code, restored.code(), Checked.Outcome.PASSED, null);
+    }
+
+    /**
+     * A syntax check's error as one line, "line N: Python's last line" -- what the code generation
+     * ends with and the log keeps: never the code Python quotes above it. A check that could not
+     * run keeps its own words' last line.
+     */
+    static String oneLine(String error) {
+        String[] lines = error.strip().split("\n");
+        String last = lines[lines.length - 1].strip().replaceFirst("^Sorry: ", "")
+                .replaceFirst("\\s*\\(skill\\.py, line \\d+\\)$", "").replaceFirst("^line \\d+:\\s*", "");
+        if (error.startsWith(SkillManager.CHECK_FAILED)) {
+            return last.startsWith(SkillManager.CHECK_FAILED) ? last : SkillManager.CHECK_FAILED + last;
+        }
+        Integer line = errorLine(error);
+        return line == null ? last : "line " + line + ": " + last;
+    }
+
+    /**
+     * A value that may be put back into a skill's requirements: one token of the characters a package
+     * name or a version is made of, not beginning with "-". Anything else -- a line break, a blank, a
+     * leading "-", an "@" or a ";" -- would let the value add a pip option, an index URL, a direct
+     * reference or another requirement.
+     */
+    private static final java.util.regex.Pattern PLAIN_TOKEN = java.util.regex.Pattern.compile("[A-Za-z0-9][A-Za-z0-9._+-]*");
+
+    /** What a reading whose code ends at a seam while more follows is told as: its "error". */
+    static final String DROPS_CODE = "the code ends where its ```python fence closes, and more code follows it in "
+            + "another block";
+
+    /** Text in a placeholder's shape, {@code <kind_n>}: the gateway's, or one the user wrote as text. */
+    private static final java.util.regex.Pattern PLACEHOLDER_SHAPE = java.util.regex.Pattern.compile("<[a-z]+_\\d+>");
+
+    /**
+     * The repair of code that failed the syntax check: the specification, the attempt's own parts as
+     * the model's turns -- each exactly as the gateway handed it out, so each goes back as an echo,
+     * with the request to go on between them where it took several -- and the error. Only the
+     * latest attempt, never the ones before it, so a repair is as long as the attempt it mends.
+     * <p>
+     * Nothing of the code that the user's values were put back into is sent: the error is told by
+     * its line's number and Python's words for it, read from the check of the code as it was
+     * restored, and the line as the model wrote it -- only when the gateway's filter would send it
+     * unchanged and learn nothing from it, and the restore left the code's lines where they were.
+     * The numbered code, restored, used to be quoted whole, and the filter did not take every value
+     * out of it again: one inside a longer word, or a short one known only by what stood around it,
+     * went to the cloud in clear.
+     */
+    private List<LlmMessage> repairRequest(List<LlmMessage> spec, List<String> parts, Checked failed,
+                                           AgentContext context) {
+        var request = new ArrayList<>(spec);
+        boolean any = false;
+        for (int i = 0; i < parts.size(); i++) {
+            String turn = ReplySeam.kept(parts, i).stripTrailing();
+            if (turn.isEmpty()) continue;
+            if (any) request.add(LlmMessage.user(CONTINUE));
+            request.add(LlmMessage.assistant(turn));
+            any = true;
+        }
+        if (failed.outcome() == Checked.Outcome.DROPS_CODE) {
+            request.add(LlmMessage.user("Your reply's code is in pieces: " + failed.syntaxError().strip()
+                    + ". Return the COMPLETE code in ONE ```python fence, and the ```requirements fence as asked."));
+            return List.copyOf(request);
+        }
+        String error = failed.syntaxError().strip();
+        Integer line = errorLine(error);
+        String[] errorLines = error.split("\n");
+        String kind = errorLines[errorLines.length - 1].strip()
+                .replaceFirst("^Sorry: ", "")
+                .replaceFirst("\\s*\\(skill\\.py, line \\d+\\)$", "")
+                .replaceFirst("^line \\d+:\\s*", "");
+        String quoted = null;
+        if (line != null) {
+            String[] written = failed.code().split("\n", -1);
+            if (line >= 1 && line <= written.length && sentAsItIs(written[line - 1], context)) quoted = written[line - 1];
+        }
+        var turn = new StringBuilder("The code failed Python's syntax check")
+                .append(line == null ? ": " : " at line " + line + ": ").append(kind).append('.');
+        if (quoted != null) turn.append("\nLine ").append(line).append(", as you wrote it:\n").append(quoted);
+        turn.append("\n\nFix the error. Return the COMPLETE corrected code in a ```python fence, and the ")
+                .append("```requirements fence as asked.");
+        request.add(LlmMessage.user(turn.toString()));
+        return List.copyOf(request);
+    }
+
+    /**
+     * The line of skill.py a syntax error is at, as Python names it: in a traceback's
+     * {@code File "skill.py", line N}, or in py_compile's one-line form "... (skill.py, line N)";
+     * only without either, the first "line N" in it. The first "line N" used to be taken, and
+     * py_compile's IndentationError -- "expected an indented block after 'if' statement on line 4
+     * (skill.py, line 5)" -- names the block's line before its own: the repair was told and shown
+     * line 4, which is not wrong.
+     */
+    static Integer errorLine(String syntaxError) {
+        for (String pattern : List.of("File \"skill\\.py\", line (\\d{1,9})", "\\(skill\\.py, line (\\d{1,9})\\)",
+                "line (\\d{1,9})")) {
+            var m = java.util.regex.Pattern.compile(pattern).matcher(syntaxError);
+            if (m.find()) return Integer.parseInt(m.group(1));
+        }
+        return null;
+    }
+
+    /**
+     * Whether a line of the model's code would go to the cloud as it stands: no placeholder's shape
+     * in it -- the filter would show one to the model as a placeholder of its own, and the model
+     * could copy that into its code -- and nothing the filter removes or replaces, so nothing of it
+     * is learned as the user's.
+     */
+    private boolean sentAsItIs(String line, AgentContext context) {
+        if (redactor == null || line.isBlank() || PLACEHOLDER_SHAPE.matcher(line).find()) return false;
+        return !redactor.count(context.userId(), line, context.secretValues()).any();
+    }
+
+    /**
+     * What a reply cut off at the model's maximum output is followed by: the request to go on. The
+     * words only help -- the join is the code's, whatever the model does with them ({@link ReplySeam}).
+     */
+    static final String CONTINUE = "Your reply was cut off at the model's maximum output. Continue it from "
+            + "the exact character where it stops: repeat nothing already written, do not reopen a code "
+            + "fence that is already open, and do not explain. When the code is complete, close the "
+            + "```python fence and give the ```requirements fence as asked.";
+
+    /**
+     * What one attempt at a skill's code brought back ({@link CodeWriting#reply}): the reply whole,
+     * as the model wrote it, or -- when there is none -- how the code generation ends instead.
+     *
+     * @param text    the reply as the model wrote it, its parts joined (read first): placeholders
+     *                where it wrote them, none put back; null when the attempt ends the code
+     *                generation
+     * @param parts   its parts as the model wrote them, every one but the last cut off: each of
+     *                those, in whole lines without its trailing whitespace
+     *                ({@link ReplySeam#wholeLines}), is what went back to the model as its turn
+     * @param tokens  their prompt and completion tokens together, for the log
+     * @param ended   how the code generation ends, when it ends with this attempt; otherwise null
+     * @param onLocal the cloud could not be reached and the task has moved to the local model,
+     *                which writes the code from the start
+     */
+    private record Written(String text, List<String> parts, int tokens, Codegen ended, boolean onLocal) {
+        static Written ending(Codegen how) {
+            return new Written(null, List.of(), 0, how, false);
+        }
+    }
+
+    /** {@code parts} and {@code last} after them, as a list of its own. */
+    private static List<String> add(List<String> parts, String last) {
+        var all = new ArrayList<>(parts);
+        all.add(last);
+        return List.copyOf(all);
+    }
+
+    /**
+     * The calls that write one skill's code, on one model: each attempt's reply taken whole
+     * ({@link #reply}), the first part of each at the task's thinking effort -- or at low effort, from
+     * the first that spent the model's whole maximum output reasoning and wrote nothing, on -- and
+     * the parts after it at low effort, where the provider takes one.
+     */
+    private final class CodeWriting {
+        private final AgentContext context;
+        private final LlmProvider provider;
+        private final boolean local;
+        private final String name;
+        /** How the steps the page shows name the model: "cloud", "local (degraded)". */
+        private final String label;
+        /** What every first part is sent with; its replies are handed back as written. */
+        private LlmRequestConfig config;
+
+        CodeWriting(AgentContext context, LlmProvider provider, boolean local, String name, String label,
+                    LlmRequestConfig config) {
+            this.context = context;
+            this.provider = provider;
+            this.local = local;
+            this.name = name;
+            this.label = label;
+            this.config = config;
+        }
+
+        /**
+         * {@code asWritten} -- a reply of these calls, or a reading of its seams -- with the user's
+         * values put back where it names their placeholders: once, on the whole of it.
+         */
+        String restored(String asWritten) {
+            return provider.restored(asWritten, config);
+        }
+
+        /**
+         * {@code code} -- as the model wrote it, compiling -- with the user's values put back where
+         * Python reads them as text ({@link CodeValues}, {@link SkillManager#restoreValues}).
+         */
+        CodeValues.Restored restoredCode(String code) {
+            return skillManager.restoreValues(code, CodeValues.valuesIn(code, this::restored));
+        }
+
+        /**
+         * The texts handed out to these calls that {@code request} does not send back, forgotten
+         * ({@link com.ownclaw.llm.EgressContext.HandedOut#keepOnlyEchoedBy}): a repair sends the
+         * latest attempt's parts only, and a long skill's earlier attempts were each as long.
+         */
+        void forgetAllBut(List<LlmMessage> request) {
+            if (config.egress() == null) return;
+            config.egress().handedOut().keepOnlyEchoedBy(request.stream()
+                    .filter(m -> m.role() == LlmMessage.Role.ASSISTANT).map(LlmMessage::content).toList());
+        }
+
+        /**
+         * The reply to {@code prompt}, whole, as the model wrote it. A reply that reaches the
+         * model's maximum output with text in it is kept as the reply so far, and the model is asked
+         * to go on: the request again, with that text as the model's turn and {@link #CONTINUE}
+         * after it. Each part that stops at the maximum output again is joined to the ones before
+         * ({@link ReplySeam}) and asked to go on in its turn, until one ends by itself: joined to
+         * them, that is the reply. The model's own limit ends each part, never a count of them.
+         * <p>
+         * A cut-off part is kept, and sent back, in whole lines ({@link ReplySeam#wholeLines}):
+         * through its last line break, without the whitespace before it -- the line it was cut in
+         * is dropped, and the model writes it again whole, from its first character, after the
+         * line it was shown. Read through the middle of a line, a part was joined wrong where its
+         * first characters could be either the cut line's next ones or its last ones again: the
+         * cut after "    s" of "    ssh = ..." continued exactly with "sh = ..." lost no character,
+         * and continued with "ssh = ..." was read the same; kept as it fell, a cut inside an
+         * indentation joined the next line at a depth the model had not written, and a `continue`
+         * or an `os.remove` moved out of its block and still compiled. A part that holds no whole
+         * line is kept whole, without the whitespace it ends with.
+         * <p>
+         * Every reply is handed back as the model wrote it ({@link LlmRequestConfig#asWritten}):
+         * each part goes back as the model's turn exactly so, which the gateway recognises as its
+         * own words coming back -- no identifier replaced in it, none learned from it -- and the
+         * values are put back once, in what is kept ({@link #restored}).
+         * <p>
+         * Every continuation appends to the request before it and rewrites nothing, so its request
+         * begins with the one before -- which the provider's cache holds: Anthropic's sliding mark
+         * is on the turn before the newest, the part just written -- and it ends with a turn of the
+         * caller's, as it must: a request that ends on the model's own words, a prefill, is refused
+         * with HTTP 400 by claude-opus-5-5 and every Claude model since the 4.6 ones. A part's turn
+         * is its visible text alone, never its reasoning -- which is why the parts after the first
+         * are asked at low effort, where the provider takes one: at the task's effort each planned
+         * the skill again from nothing before it wrote a character, and a model that wrote a few
+         * characters a part reasoned through a whole maximum output for each.
+         * <p>
+         * Where it ends without a reply:
+         * <ul>
+         *   <li>Stop, before a call or during one.</li>
+         *   <li>No progress: a part after the first that reached the maximum output again and added
+         *   nothing past the seam -- no text, or the end of the reply so far written again. It was
+         *   asked at low effort already, where the provider takes one; the next part would be asked
+         *   the same, and get no further.</li>
+         *   <li>Nothing written: a first part that reached the maximum output with no text at all --
+         *   the model reasoned through all of it -- has nothing to go on from. Less reasoning first is
+         *   the remedy, so where the provider takes an effort the same request is asked again at
+         *   low effort, and every first part after it too; at low effort, or where the provider
+         *   takes none -- asking again would be the same request -- a first part that writes nothing
+         *   ends the code. A part of nothing but blanks is one of these: the provider refuses a turn
+         *   of only blanks, and there is nothing in it to go on from.</li>
+         *   <li>The window: a first part that ran on until the window was full, or a request refused
+         *   as too long for it, as before; after the first, or for a repair's first -- its request
+         *   carries the code it mends -- that is where the code outgrew the window, and is said so.</li>
+         *   <li>A refusal, a request the gateway did not send, a failed call, and a cloud that
+         *   cannot be reached, each as the first call meets them: a connection that failed is asked
+         *   again once; a cloud given up on hands the task to the local model, which writes the
+         *   code from the start -- the parts so far were written for a prompt it is not sent, and
+         *   its window holds less than they can fill.</li>
+         * </ul>
+         * Each part is a live call of its own, shown in the chat as it streams and ended by Stop;
+         * each continuation is said in the chat ({@link TaskChat#continuing}) and logged; and each
+         * part's tokens are counted once, against the tier that did the work.
+         *
+         * @param what    what the first part's call is for, as the owner reads it
+         * @param carried the characters of code the request carries back -- a repair's, the attempt
+         *                it mends; 0 for the first attempt: where its first part does not fit the
+         *                window, the code outgrew it
+         */
+        Written reply(List<LlmMessage> prompt, String what, int carried) {
+            List<LlmMessage> asked = prompt;
+            var parts = new ArrayList<String>();
+            // The reply so far, as the model wrote it, from its first part that reached the maximum
+            // output on.
+            String sofar = null;
+            int tokens = 0;
+            while (true) {
+                int part = parts.size() + 1;
+                if (context.isCancelled()) return Written.ending(Codegen.stopped(name));
+                // The task's own hook goes with the call, and while it runs its chat is shown what it
+                // is doing (AgentContext#call).
+                LiveCall live = context.call(provider, local, context.atStep(part == 1 ? what
+                        : "continuing the code of skill '" + name + "' (part " + part + ")"));
+                LlmResponse reply;
+                OutputTruncated cut = null;
+                try {
+                    List<LlmMessage> sent = asked;
+                    LlmRequestConfig asking = (part > 1 && provider.takesEffort() ? config.withEffort("low") : config)
+                            .withProgress(live);
+                    java.util.function.Supplier<LlmResponse> call = () -> provider.chat(sent, asking);
+                    // On the local model, when the cloud is not available: work the task waits on.
+                    reply = local ? lane.foreground(context, call) : call.get();
+                } catch (TaskCancellationService.TaskCancelledException stop) {
+                    return Written.ending(Codegen.stopped(name));
+                } catch (ProviderRefused declined) {
+                    account(context, local, provider, declined.reply());
+                    return Written.ending(Codegen.failed("the model declined to write the code for '" + name
+                            + "' (" + declined.getMessage() + "), so nothing was created."));
+                } catch (OutputTruncated cutOff) {
+                    account(context, local, provider, cutOff.reply());
+                    if (cutOff.limit() != OutputTruncated.Limit.MAX_OUTPUT) {
+                        if (cutOff.replyRanOn()) {
+                            context.chat().ranOn(cutOff, live, "the code of '" + name + "' was not written");
+                        }
+                        if (part == 1 && carried > 0) {
+                            // A repair carries the code it mends: that is what no longer fits.
+                            return Written.ending(Codegen.failed(String.format(Locale.ROOT, "the code for '%s' "
+                                    + "outgrew the model's context window: its repair, with the %,d characters of "
+                                    + "the code it mends, no longer fit (%s), so nothing was created. A smaller "
+                                    + "skill fits: one job per skill, or split this one into several.",
+                                    name, carried, cutOff.getMessage())));
+                        }
+                        if (part > 1) {
+                            // The parts so far fill the window: the code itself is longer than the model
+                            // can hold, not a request grown too long.
+                            return Written.ending(Codegen.failed(String.format(Locale.ROOT, "the code for '%s' "
+                                    + "outgrew the model's context window: written in %s so far, its %,d "
+                                    + "characters and the request no longer fit (%s), so nothing was created. A "
+                                    + "smaller skill fits: one job per skill, or split this one into several.",
+                                    name, part == 2 ? "1 part" : (part - 1) + " parts", sofar.length(),
+                                    cutOff.getMessage())));
+                        }
+                        if (cutOff.replyRanOn()) {
+                            return Written.ending(Codegen.failed("writing the code for '" + name
+                                    + "' did not end: " + cutOff.getMessage() + ", so nothing was created."));
+                        }
+                        return Written.ending(Codegen.failed("the request for the code of '" + name
+                                + "' did not fit (" + cutOff.getMessage() + "), so nothing was created."));
+                    }
+                    cut = cutOff;
+                    reply = cutOff.reply();
+                } catch (EgressRefused refused) {
+                    return Written.ending(Codegen.failed("the request for the code of '" + name
+                            + "' was not sent (" + refused.getMessage() + "), so nothing was created."));
+                } catch (LlmException callFailed) {
+                    if (!local && callFailed.unreachable() && goesOnWithoutTheCloud(context, provider, callFailed)) {
+                        if (context.onLocal()) return new Written(null, List.of(), 0, null, true);
+                        continue; // the same request, asked of the cloud once more
+                    }
+                    return Written.ending(Codegen.failed("the request for the code of '" + name
+                            + "' failed (" + callFailed.getMessage() + "), so nothing was created."));
+                } finally {
+                    live.close();
+                }
+                // A reply came back: the task is alive, whatever the reply holds.
+                context.markProgress();
+                if (!local) context.cloudAnswered();
+                if (reply != null) tokens += reply.totalTokens();
+                String text = reply == null || reply.content() == null ? "" : reply.content();
+                if (cut == null) {
+                    account(context, local, provider, reply);
+                    return new Written(sofar == null ? text : ReplySeam.join(sofar, text, ReplySeam.tailOf(parts.getLast())),
+                            add(parts, text), tokens, null, false);
+                }
+
+                // Kept in whole lines, the line it was cut in dropped, and sent back without the
+                // whitespace it ends with: the model is shown the end of a line, and writes the cut
+                // line again whole (ReplySeam#wholeLines).
+                String kept = ReplySeam.wholeLines(text);
+                if (kept.isEmpty()) {
+                    if (part > 1) return Written.ending(gotNoFurther(part, cut, sofar));
+                    if (!provider.takesEffort() || "low".equals(config.effort())) {
+                        log.error("Skill '{}': its code reached the model's maximum output with nothing written, {}",
+                                name, provider.takesEffort() ? "at low effort" : "and the model takes no effort");
+                        return Written.ending(Codegen.failed("the model reasoned through its whole maximum output "
+                                + "without writing any of the code for '" + name + "' (" + cut.getMessage() + ")"
+                                + (provider.takesEffort() ? ", even at low effort,"
+                                        : "; asking again would be the same request -- this model is sent no "
+                                                + "thinking effort --")
+                                + " so nothing was created. A smaller skill fits: one job per skill, or split "
+                                + "this one into several."));
+                    }
+                    config = config.withEffort("low");
+                    log.warn("Skill '{}': its code reached the model's maximum output with nothing written; asking "
+                            + "again at low effort", name);
+                    // Stopped meanwhile: nothing is asked again, and the chat is not told it will be.
+                    if (context.isCancelled()) return Written.ending(Codegen.stopped(name));
+                    context.chat().askedAgainAtLowEffort(name, cut);
+                    statusEmitter.emitForTask(context.userId(), context.taskId(), StatusMessage.Type.STEP,
+                            "Asking again at low effort · " + label, tokenData(context));
+                    continue; // the same request, at low effort
+                }
+                String joined = sofar == null ? kept : ReplySeam.join(sofar, kept, ReplySeam.tailOf(parts.getLast()));
+                if (sofar != null && joined.length() == sofar.length()) {
+                    return Written.ending(gotNoFurther(part, cut, sofar));
+                }
+                sofar = joined;
+                parts.add(text);
+                var next = new ArrayList<>(asked);
+                next.add(LlmMessage.assistant(kept.stripTrailing()));
+                next.add(LlmMessage.user(CONTINUE));
+                asked = List.copyOf(next);
+                log.info("Skill '{}': part {} of its code reached the model's maximum output; {} characters so "
+                        + "far, asking for part {}", name, part, sofar.length(), part + 1);
+                if (context.isCancelled()) return Written.ending(Codegen.stopped(name));
+                context.chat().continuing(name, cut, part + 1);
+                statusEmitter.emitForTask(context.userId(), context.taskId(), StatusMessage.Type.STEP,
+                        "Continuing skill code · " + label + " (part " + (part + 1) + ")", tokenData(context));
+            }
+        }
+
+        /** A part after the first that added nothing past the seam: where the code got no further. */
+        private Codegen gotNoFurther(int part, OutputTruncated cut, String sofar) {
+            boolean lowered = provider.takesEffort();
+            log.error("Skill '{}': part {} reached the model's maximum output again{} and added nothing to the {} "
+                    + "characters before it", name, part, lowered ? " at low effort" : "", sofar.length());
+            return Codegen.failed(String.format(Locale.ROOT, "continuing the code for '%s' got no further: part "
+                    + "%d%s was cut off again (%s) and added nothing to the %,d characters written before it, so "
+                    + "nothing was created. A smaller skill fits: one job per skill, or split this one into "
+                    + "several.", name, part, lowered ? ", asked at low effort," : "", cut.getMessage(), sofar.length()));
         }
     }
 
@@ -3310,7 +3845,7 @@ public class AgentLoop {
      * code, a ```python fence that is never closed, or -- with no fence -- everything from the
      * first line that starts a module.
      */
-    private String extractPythonCode(String response) {
+    static String extractPythonCode(String response) {
         if (response == null || response.isBlank()) return null;
 
         // Try to find ```python ... ``` fence (case-insensitive, handles ```Python too)
@@ -3334,8 +3869,9 @@ public class AgentLoop {
         }
 
         // Handle a ```python fence that is never closed. A reply cut off at the model's maximum
-        // output never gets here -- the provider path refuses it (OutputTruncated) -- so this is
-        // a model that left the fence open.
+        // output gets here only whole -- continued until a part of it ended by itself, the parts
+        // joined (CodeWriting#reply) -- so this is a model that left the fence open, not where a
+        // cut fell.
         java.util.regex.Matcher unclosedPy = java.util.regex.Pattern
                 .compile("```[Pp]ython\\s*\n(.*)", java.util.regex.Pattern.DOTALL)
                 .matcher(response);
@@ -3374,7 +3910,7 @@ public class AgentLoop {
      * Extract pip requirements from a cloud LLM response if it included a
      * ```requirements fence.
      */
-    private String extractRequirements(String response) {
+    static String extractRequirements(String response) {
         if (response == null) return null;
 
         int start = response.indexOf("```requirements");

@@ -174,8 +174,19 @@ public class SkillManager {
      */
     public String createSkill(Map<String, Object> params, String requester,
                               java.util.function.BooleanSupplier stopped, Runnable waiting) {
+        return createSkill(params, null, requester, stopped, waiting);
+    }
+
+    /**
+     * {@link #createSkill(Map, String, java.util.function.BooleanSupplier, Runnable)} of code a model
+     * wrote with placeholders, and the user's values put back: {@code asWritten} is that code as the
+     * model wrote it, kept beside the skill ({@link #readAsWritten}) -- null for code written
+     * otherwise, which keeps none.
+     */
+    public String createSkill(Map<String, Object> params, String asWritten, String requester,
+                              java.util.function.BooleanSupplier stopped, Runnable waiting) {
         String name = str(params, "name");
-        if (name == null) return createSkillHeld(params, requester);
+        if (name == null) return createSkillHeld(params, requester, asWritten);
         // Held to write while its files are written, checked and registered: another task's
         // skill_create of the same name waits, and so does every run of it.
         var changing = com.ownclaw.agent.tools.SkillLocks.of(name).writeLock();
@@ -183,7 +194,7 @@ public class SkillManager {
             return "ERROR: Stopped while a run of skill '" + name + "' was under way: nothing was written.";
         }
         try {
-            return createSkillHeld(params, requester);
+            return createSkillHeld(params, requester, asWritten);
         } finally {
             changing.unlock();
         }
@@ -227,7 +238,7 @@ public class SkillManager {
         }
     }
 
-    private String createSkillHeld(Map<String, Object> params, String requester) {
+    private String createSkillHeld(Map<String, Object> params, String requester, String asWritten) {
         String name = str(params, "name");
         String description = str(params, "description");
         String code = str(params, "code");
@@ -265,6 +276,8 @@ public class SkillManager {
         if (syntaxError != null) return "ERROR: Python syntax error:\n" + syntaxError;
 
         String requirements = str(params, "requirements");
+        String notPlain = requirementsRefusal(requirements);
+        if (notPlain != null) return "ERROR: the requirements for '" + name + "' were not taken: " + notPlain;
         boolean requiresNetwork = Boolean.TRUE.equals(params.get("requires_network"));
         boolean hasSideEffects = Boolean.TRUE.equals(params.get("has_side_effects"));
         int timeout = toInt(params.get("timeout"), 30);
@@ -333,7 +346,9 @@ public class SkillManager {
                 // the next deploy silently registered a skill that had already been rejected, and
                 // the agent would pick it from the manifest and fail on first use, with the
                 // context that produced it long gone. Quarantine keeps the code recoverable.
-                log.warn("New skill '{}' failed to load: {}", name, loadError.replace('\n', ' '));
+                // Not its words: Python's traceback quotes the code, the user's values in it.
+                log.warn("New skill '{}' failed to load ({} lines of Python's error, returned to the task)", name,
+                        loadError.lines().count());
                 dynamicSkillRegistry.quarantineUnregistered(skillDir,
                         "Rejected at creation: it does not import.\n" + loadError);
                 return "ERROR: '" + name + "' was written but does not load, so it was not "
@@ -347,6 +362,7 @@ public class SkillManager {
             // Registered over the old one, not after unregistering it: in between, another task's
             // look-up of the skill found no such tool.
             dynamicSkillRegistry.register(skill);
+            keepAsWritten(name, asWritten, code, requester);
 
             return "Skill '" + name + "' " + (isUpdate ? "updated" : "created") +
                     " and registered. It is now available as a tool.";
@@ -372,6 +388,112 @@ public class SkillManager {
         } catch (IOException e) {
             log.warn("Failed to read skill code for '{}': {}", name, e.getMessage());
             return null;
+        }
+    }
+
+    /** One requirement as pip reads a plain one: a package name, its extras, and its version specifiers. */
+    private static final java.util.regex.Pattern PLAIN_REQUIREMENT = java.util.regex.Pattern.compile(
+            "[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?"
+            + "(?:\\[\\s*[A-Za-z0-9._-]+(?:\\s*,\\s*[A-Za-z0-9._-]+)*\\s*\\])?"
+            + "(?:\\s*(?:===|==|!=|<=|>=|~=|<|>)\\s*[A-Za-z0-9.*+!_-]+"
+            + "(?:\\s*,\\s*(?:===|==|!=|<=|>=|~=|<|>)\\s*[A-Za-z0-9.*+!_-]+)*)?");
+
+    /**
+     * Why {@code requirements} -- what requirements.txt would hold, for {@code pip install -r} --
+     * is not taken, or null when every line is a plain requirement or a comment. Whatever wrote it:
+     * the code's reply, or the planner's skill_create, whose arguments come back with the user's
+     * values put back as text -- and a value with a line break, or a line of the model's own, could
+     * add a pip option (an index URL, -e, -r, --trusted-host), a direct reference (name @ URL), an
+     * environment marker or a line continuation. Said by its line's number, never its text.
+     */
+    static String requirementsRefusal(String requirements) {
+        if (requirements == null || requirements.isBlank()) return null;
+        String[] lines = requirements.split("\r\n|\r|\n", -1);
+        for (int i = 0; i < lines.length; i++) {
+            String line = lines[i];
+            // pip's comment: a # at the line's start or after a blank.
+            int hash = -1;
+            for (int j = 0; j < line.length() && hash < 0; j++) {
+                if (line.charAt(j) == '#' && (j == 0 || Character.isWhitespace(line.charAt(j - 1)))) hash = j;
+            }
+            String requirement = (hash >= 0 ? line.substring(0, hash) : line).strip();
+            if (requirement.isEmpty()) continue;
+            if (!PLAIN_REQUIREMENT.matcher(requirement).matches()) {
+                return "line " + (i + 1) + " is not a plain requirement -- a package name, its extras and its "
+                        + "version; pip options, URLs, direct references, environment markers and continued lines "
+                        + "are not taken -- so nothing was written.";
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Where the code of skill {@code name} is kept as the model wrote it: beside the skills' own
+     * directories, never in one -- a skill's directory is its working directory, writable by the
+     * skill, and a copy there could be rewritten by the skill's own run, for the next fix of it to
+     * send with whatever it put in. Under the skills' root, which the jail hides from every run.
+     */
+    private Path asWrittenFile(String name) {
+        return Path.of(config.getSkills().getGeneratedPath()).toAbsolutePath().normalize().getParent()
+                .resolve("_as_written").resolve(name + ".py");
+    }
+
+    /** The first line of a kept copy: the digest of the skill.py it was kept with, and whose placeholders it holds. */
+    private static final String KEPT_WITH = "# skill.py sha256 ";
+
+    /** The first line of the copy kept with {@code code}, {@code userId}'s placeholders in it. */
+    private static String keptWith(String code, String userId) {
+        return KEPT_WITH + sha256(code) + " for " + sha256(userId == null ? "" : userId);
+    }
+
+    /**
+     * Keeps {@code asWritten} -- skill {@code name}'s code as the model wrote it, {@code userId}'s
+     * placeholders in it -- with the digest of {@code code}, the skill.py it was made into; or, null,
+     * forgets any copy kept: code written otherwise has none.
+     */
+    private void keepAsWritten(String name, String asWritten, String code, String userId) {
+        try {
+            Path file = asWrittenFile(name);
+            if (asWritten == null) {
+                Files.deleteIfExists(file);
+                return;
+            }
+            Files.createDirectories(file.getParent());
+            Files.writeString(file, keptWith(code, userId) + "\n" + asWritten, StandardCharsets.UTF_8);
+        } catch (IOException | RuntimeException e) {
+            log.warn("The code of '{}' as written could not be kept: {}", name, e.getClass().getSimpleName());
+        }
+    }
+
+    /**
+     * Skill {@code name}'s code exactly as the model wrote it -- its placeholders where the user's
+     * values are in skill.py -- when one was kept with the skill.py the skill has now, for
+     * {@code userId}: the placeholders are one account's, and read in another's table they are that
+     * account's values -- the owner fixing another account's skill put his own network's name into
+     * it. Otherwise null: a skill made before copies were kept, changed since by hand or by a page,
+     * or made by another account.
+     */
+    public String readAsWritten(String name, String userId) {
+        String code = readSkillCode(name);
+        if (code == null) return null;
+        try {
+            Path file = asWrittenFile(name);
+            if (!Files.isRegularFile(file, java.nio.file.LinkOption.NOFOLLOW_LINKS)) return null;
+            String kept = Files.readString(file, StandardCharsets.UTF_8);
+            int newline = kept.indexOf('\n');
+            if (newline < 0 || !kept.substring(0, newline).equals(keptWith(code, userId))) return null;
+            return kept.substring(newline + 1);
+        } catch (IOException | RuntimeException e) {
+            return null;
+        }
+    }
+
+    private static String sha256(String text) {
+        try {
+            return java.util.HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256")
+                    .digest(text.getBytes(StandardCharsets.UTF_8)));
+        } catch (java.security.NoSuchAlgorithmException e) {
+            throw new IllegalStateException(e);
         }
     }
 
@@ -465,6 +587,7 @@ public class SkillManager {
         dynamicSkillRegistry.unregister(name);
 
         boolean dirGone = SkillJail.deleteTree(skill.skillDir());
+        keepAsWritten(name, null, null, null);
         // The environment too. This deleted the code and kept the 7 GB of packages the code had
         // pulled in, for every skill ever deleted.
         boolean envsGone = pythonEnv.removeEnvironments(name);
@@ -631,6 +754,33 @@ public class SkillManager {
             return CHECK_FAILED + (result.timedOut() ? "it timed out" : "exit " + result.exitCode() + ": " + said.strip());
         } catch (Exception e) {
             return CHECK_FAILED + e.getMessage();
+        } finally {
+            if (tempDir != null) SkillJail.deleteTree(tempDir);
+        }
+    }
+
+    /**
+     * {@code code} -- as the model wrote it, compiling -- with {@code values} put back where its
+     * placeholders stand, by Python's own tokenizer ({@link CodeValues}): run as the syntax check
+     * runs, in the sandbox on the system's Python, the values on its standard input and never on a
+     * command line or in a file. Nothing to put back, nothing is run. What it could not do is said
+     * by why, never with what Python wrote: that could quote the values.
+     */
+    CodeValues.Restored restoreValues(String code, Map<String, String> values) {
+        if (values.isEmpty()) return CodeValues.Restored.unchanged(code);
+        Path tempDir = null;
+        try {
+            tempDir = Files.createTempDirectory("ownclaw_restore_");
+            Path script = tempDir.resolve("restore_values.py");
+            Files.writeString(script, CodeValues.SCRIPT, StandardCharsets.UTF_8);
+            SandboxResult result = sandbox.execute(pythonEnv.getSystemPython(), script, tempDir,
+                    CodeValues.input(code, values), Map.of(), 60, null, List.of());
+            if (!result.isSuccess()) {
+                return CodeValues.Restored.couldNotRun(result.timedOut() ? "it timed out" : "exit " + result.exitCode());
+            }
+            return CodeValues.Restored.of(result.stdout());
+        } catch (Exception e) {
+            return CodeValues.Restored.couldNotRun(e.getClass().getSimpleName());
         } finally {
             if (tempDir != null) SkillJail.deleteTree(tempDir);
         }

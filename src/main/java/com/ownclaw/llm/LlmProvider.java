@@ -23,6 +23,24 @@ public interface LlmProvider {
     LlmResponse chat(List<LlmMessage> messages, LlmRequestConfig config);
 
     /**
+     * {@code asWritten} -- text the caller built from replies to calls made with {@code config},
+     * which asked for them as the model wrote them ({@link LlmRequestConfig#asWritten}): a skill's
+     * code, its parts joined -- with the user's values put back where it names their placeholders,
+     * once. Put back in each reply, a placeholder the cut between two fell in was whole in neither,
+     * and its quotes could stand in another; put back twice, a placeholder's shape the user wrote
+     * as text would turn into a value. The cloud gateway puts them back; a provider that hands back
+     * no placeholders returns the text as it is.
+     */
+    default String restored(String asWritten, LlmRequestConfig config) { return asWritten; }
+
+    /**
+     * Whether a request's thinking effort ({@link LlmRequestConfig#effort}) changes what this
+     * provider sends: asking again at another effort is then another request, and not the same one
+     * again. False unless a provider says otherwise.
+     */
+    default boolean takesEffort() { return false; }
+
+    /**
      * Quick health check — can we reach the provider?
      */
     boolean isAvailable();

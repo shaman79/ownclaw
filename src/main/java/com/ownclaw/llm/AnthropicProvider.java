@@ -888,4 +888,8 @@ class AnthropicProvider implements LlmProvider {
             return null;
         }
     }
+
+    /** Whether the configured model is sent an effort at all ({@link #supportsEffort}). */
+    @Override
+    public boolean takesEffort() { return supportsEffort(model()); }
 }

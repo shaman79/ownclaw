@@ -1436,7 +1436,24 @@ public class AgentContext {
      */
     public com.ownclaw.llm.EgressContext egress(String purpose) {
         return new com.ownclaw.llm.EgressContext(userId, taskId, purpose, privateIndex,
-                secretValues(), new Excuses(), this::toolOf);
+                secretValues(), new Excuses(), this::toolOf, null, Map.copyOf(skillCode));
+    }
+
+    /** Texts of this task that are skill code, or what a skill printed, each with what it is ({@link #declareSkillCode}). */
+    private final Map<String, com.ownclaw.privacy.Redactor.Declared> skillCode = new java.util.concurrent.ConcurrentHashMap<>();
+
+    /**
+     * {@code text} is a skill's code -- as the model wrote it, kept beside the skill (CODE_AS_WRITTEN),
+     * or as it is on disk, its values in it (CODE) -- or what a skill printed: a run's output, a
+     * traceback, a load error (OUTPUT). Wherever it stands in a call this task makes, the gateway
+     * filters the part as any, and inside it also replaces every value the user's table holds
+     * wherever it stands ({@code Redactor#filter(String, String, Map, Redactor.Tally, Map)}): the
+     * filter of text, which replaces a value only as a word, left one inside a longer word, or a
+     * short one, in clear. Declared twice as different things, it is the one filtered most as text.
+     */
+    public void declareSkillCode(String text, com.ownclaw.privacy.Redactor.Declared what) {
+        if (text == null || text.isBlank() || what == null) return;
+        skillCode.merge(text, what, (was, now) -> was.ordinal() >= now.ordinal() ? was : now);
     }
 
     /** The tool that produced result {@code n}, or null when there is no such result. */
