@@ -3669,10 +3669,13 @@
             if (totals.images || totals.imagesFailed) {
                 panel.appendChild(node('div', 'task-trace-line', (totals.images
                         ? tdCount(totals.images, 'image', 'images') + ' you pasted went with '
-                            + tdCount(totals.imageRequests, 'request', 'requests') + ', each at the size the model reads it'
+                            + tdCount(totals.imageRequests, 'request', 'requests')
+                            + (totals.imageRequestsFailed ? ' (' + totals.imageRequestsFailed + ' failed after the model had read '
+                                + (totals.imageRequestsFailed === 1 ? 'it)' : 'them)') : '')
+                            + ', each at the size the model reads it'
                         : 'No image you pasted went with a request that reached the cloud model')
                         + (totals.imagesFailed ? '; ' + tdCount(totals.imagesFailed, 'image was', 'images were')
-                            + ' only in requests that failed, which may not have reached the provider' : '')
+                            + ' only in requests that failed with nothing billed, which may not have reached the provider' : '')
                         + ' -- not filtered: the privacy filter reads text, not pictures. Each request below names its images.'));
             }
             if (dec.OBSERVED_LEAK) {
@@ -3760,6 +3763,8 @@
                 // Shown only when a request that went carried it: none on a Free task, or with no cloud.
                 item.appendChild(node('div', 'task-trace-line muted', a.shownWith
                         ? 'Shown to the cloud model with ' + tdCount(a.shownWith, 'request', 'requests')
+                            + (a.shownFailed ? ' (' + a.shownFailed + ' failed after the model had read '
+                                + (a.shownFailed === 1 ? 'it)' : 'them)') : '')
                             + (a.width !== a.imageWidth || a.height !== a.imageHeight ? ', at ' + a.width + '×' + a.height
                                 + ' px, the size it reads' : '')
                             + (a.mediaType && a.mediaType !== a.contentType ? ', as ' + a.mediaType : '')

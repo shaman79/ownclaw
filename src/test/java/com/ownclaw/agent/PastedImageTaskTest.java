@@ -316,6 +316,47 @@ class PastedImageTaskTest {
     }
 
     @Test
+    @DisplayName("a request the provider billed and then failed -- a stream cut after message_start -- was read, its image with it: the page and the ending count it as shown, and say it failed")
+    @SuppressWarnings("unchecked")
+    void readThenFailedIsShown(@TempDir Path tmp) throws Exception {
+        for (boolean billed : List.of(true, false)) {
+            var rig = new LoopRig(tmp.resolve("b" + billed), List.of(LocalModeTest.NOOP));
+            for (int i = 0; i < 8; i++) {
+                rig.cloud.think.add(c -> {
+                    // message_start had come: the provider read the whole request, the image with it.
+                    if (billed) c.progress().billed(new com.ownclaw.llm.LlmResponse.Usage("claude-opus-5", 6_200, 0, 0, 0));
+                    throw new com.ownclaw.llm.LlmException("anthropic", "Connection failed: timeout", 0,
+                            new java.net.SocketTimeoutException("timeout"));
+                });
+            }
+            AgentResult r = rig.turn(LocalModeTest.session(rig), "what does this screenshot say?", pasteMany(rig, 1));
+            var page = (Map<String, Object>) new com.ownclaw.interfaces.web.TaskTraceController(
+                    new com.ownclaw.observability.TaskTraceService(rig.events), rig.files).trace("u1", r.taskId()).getBody();
+            var totals = (Map<String, Object>) page.get("totals");
+            int calls = rig.cloud.calls("think").size();
+            assertTrue(calls > 0, "the requests were made");
+            var artifact = ((List<Map<String, Object>>) page.get("artifacts")).getFirst();
+            if (billed) {
+                assertEquals(1, totals.get("images"), "read by the model: " + totals);
+                assertEquals(calls, totals.get("imageRequests"));
+                assertEquals(calls, totals.get("imageRequestsFailed"));
+                assertEquals(0, totals.get("imagesFailed"), "not 'may not have reached'");
+                assertEquals(calls, artifact.get("shownWith"));
+                assertEquals(calls, artifact.get("shownFailed"));
+                assertTrue(r.response().contains("shown to the cloud model with " + calls + (calls == 1 ? " request" : " requests")
+                        + " (" + calls + " failed after the model had read " + (calls == 1 ? "it)" : "them)")), r.response());
+            } else {
+                assertEquals(0, totals.get("images"), "nothing billed: it may not have reached the provider");
+                assertEquals(1, totals.get("imagesFailed"));
+                assertEquals(0, artifact.get("shownWith"));
+                assertTrue(r.response().contains("not shown to a model in this task"), r.response());
+            }
+        }
+        // Mutation: count only SENT rows again -> the page says "not shown" beside "failed after the
+        // provider had begun to answer".
+    }
+
+    @Test
     @DisplayName("a message pasted with more images than one request takes is refused before any call, saying how to send them")
     void tooManyImagesForOneRequest(@TempDir Path tmp) throws Exception {
         var rig = new LoopRig(tmp, List.of(LocalModeTest.NOOP));

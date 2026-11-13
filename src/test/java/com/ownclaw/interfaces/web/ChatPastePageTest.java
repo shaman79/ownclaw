@@ -208,7 +208,9 @@ class ChatPastePageTest {
         assertTrue(panel.contains("if (totals.images || totals.imagesFailed) {"), panel);
         assertTrue(panel.contains("tdCount(totals.images, 'image', 'images') + ' you pasted went with ' + tdCount(totals.imageRequests, 'request', 'requests')"),
                 "each image once, with how many requests: " + panel);
-        assertTrue(panel.contains("only in requests that failed, which may not have reached the provider"), panel);
+        assertTrue(panel.contains("only in requests that failed with nothing billed, which may not have reached the provider"), panel);
+        assertTrue(panel.contains("(totals.imageRequestsFailed ? ' (' + totals.imageRequestsFailed + ' failed after the model had read '"), panel);
+        assertTrue(page.contains("+ (a.shownFailed ? ' (' + a.shownFailed + ' failed after the model had read '"), "and each image's line");
         assertTrue(panel.contains("the privacy filter reads text, not pictures"), panel);
         assertTrue(panel.contains("if (a.kind === 'pasted image') {"), "a pasted image is said as one: " + panel);
         assertTrue(panel.contains("a.shownWith ? 'Shown to the cloud model with ' + tdCount(a.shownWith, 'request', 'requests')"), panel);

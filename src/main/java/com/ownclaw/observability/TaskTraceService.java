@@ -277,15 +277,18 @@ public class TaskTraceService {
         totals.put("scrubs", scrubs);
         totals.put("identifiers", identifiers);
         // The images that left: each pasted image once, however many requests carried it -- the
-        // requests that went (a refused one carries none: CloudGateway); and apart, those only on
-        // requests that failed, which may not have reached the provider.
+        // requests the model read (a refused one carries none: CloudGateway), a failed one among
+        // them when the provider had billed it, which it does once it has read the request; and
+        // apart, those only on requests that failed with nothing billed, which may not have
+        // reached the provider.
         var went = new java.util.LinkedHashSet<String>();
         var failed = new java.util.LinkedHashSet<String>();
-        int imageRequests = 0;
+        int imageRequests = 0, imageRequestsFailed = 0;
         for (var c : calls) {
             var ids = imageIds(c);
-            if (answered(c) && !ids.isEmpty()) {
+            if (read(c) && !ids.isEmpty()) {
                 imageRequests++;
+                if (isError(c)) imageRequestsFailed++;
                 went.addAll(ids);
             } else if (isError(c)) {
                 failed.addAll(ids);
@@ -294,12 +297,15 @@ public class TaskTraceService {
         failed.removeAll(went);
         totals.put("images", went.size());
         totals.put("imageRequests", imageRequests);
+        totals.put("imageRequestsFailed", imageRequestsFailed);
         totals.put("imagesFailed", failed.size());
-        // And each pasted image: how many requests that went carried it -- none on a Free task, or
-        // one whose cloud could not be called.
+        // And each pasted image: how many requests the model read carried it, and how many of those
+        // then failed -- none on a Free task, or one whose cloud could not be called.
         for (var a : artifacts) {
             if (!"pasted image".equals(a.get("kind")) || a.get("fileId") == null) continue;
-            a.put("shownWith", (int) calls.stream().filter(c -> answered(c) && imageIds(c).contains(a.get("fileId"))).count());
+            a.put("shownWith", (int) calls.stream().filter(c -> read(c) && imageIds(c).contains(a.get("fileId"))).count());
+            a.put("shownFailed", (int) calls.stream().filter(c -> read(c) && isError(c)
+                    && imageIds(c).contains(a.get("fileId"))).count());
         }
         totals.put("costUsd", cost);
         totals.put("costIsFloor", costIsFloor);
@@ -335,16 +341,26 @@ public class TaskTraceService {
     }
 
     /**
-     * How many requests of a task that went carried the image of file {@code fileId}, as its page
-     * counts them ({@link #trace}): 0 when none did -- a Free task, or one with no cloud to call.
+     * How many requests of a task the model read carried the image of file {@code fileId}, as its
+     * page counts them ({@link #trace}): 0 when none did -- a Free task, or one with no cloud to
+     * call. One that failed after the provider had billed it was read.
      */
-    @SuppressWarnings("unchecked")
     public static int requestsCarrying(Map<String, Object> trace, String fileId) {
+        return carrying(trace, fileId, false);
+    }
+
+    /** Of {@link #requestsCarrying}, how many failed after the model had read them. */
+    public static int failedRequestsCarrying(Map<String, Object> trace, String fileId) {
+        return carrying(trace, fileId, true);
+    }
+
+    @SuppressWarnings("unchecked")
+    private static int carrying(Map<String, Object> trace, String fileId, boolean failedOnly) {
         if (!(trace.get("calls") instanceof List<?> calls)) return 0;
         int n = 0;
         for (Object c : calls) {
             var call = (Map<String, Object>) c;
-            if (answered(call) && imageIds(call).contains(fileId)) n++;
+            if (read(call) && (!failedOnly || isError(call)) && imageIds(call).contains(fileId)) n++;
         }
         return n;
     }
@@ -352,6 +368,15 @@ public class TaskTraceService {
     /** Whether a request came back with a reply: a refused one never left, a failed one got none. */
     private static boolean answered(Map<String, Object> c) {
         return "SENT".equals(c.get("decision")) || "OBSERVED_LEAK".equals(c.get("decision"));
+    }
+
+    /**
+     * Whether the model read a request: answered, or failed after the provider had billed it --
+     * a stream cut after message_start, a dropped connection -- which it does only once it has read
+     * the whole request, its images with it.
+     */
+    private static boolean read(Map<String, Object> c) {
+        return answered(c) || isError(c) && c.get("promptTokens") != null;
     }
 
     private static boolean isError(Map<String, Object> c) {
