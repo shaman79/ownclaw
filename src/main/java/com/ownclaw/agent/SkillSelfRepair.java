@@ -1003,13 +1003,14 @@ public class SkillSelfRepair {
      * the repair began and now, at the call ({@code now}: the registry's skill, which the repair's
      * own skill_create may have rewritten; null to judge the start alone). The flag is the model's
      * own optional claim about the OLD code, and the repair runs code it has just written. What the
-     * rule rests on is the credentials: a skill run by a repair is handed no vault value, so whatever
-     * its new code does it cannot sign in as the owner anywhere -- no router, file server, mailbox or
-     * account. It is not isolated: it shares the host's network (the LAN, loopback, OwnClaw's own
-     * port) and the account's /tmp, and can reach whatever there asks for no login. A skill holding a
-     * router's root password, a file server's key or a mailbox is never run by a repair. A skill
-     * written before the flag had three states says false wherever its author gave none, and is held
-     * to the same rule.
+     * rule rests on is the credentials: OwnClaw hands a skill a repair runs no vault value, so it is
+     * not given the owner's login to a router, a file server, a mailbox or an account. That is all it
+     * guarantees. The skill is not isolated: it shares the host's network (the LAN, loopback,
+     * OwnClaw's own port) and the account's /tmp, and reaches whatever there asks for no login; what
+     * else it can read is whatever the skill jail, on or off, leaves it. A skill holding a router's
+     * root password, a file server's key or a mailbox is never run by a repair. A skill written
+     * before the flag had three states says false wherever its author gave none, and is held to the
+     * same rule.
      */
     static String notRunBecause(Declared began, Tool now) {
         var credentials = new java.util.LinkedHashSet<>(began.credentials());
