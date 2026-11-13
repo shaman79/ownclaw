@@ -86,7 +86,40 @@ public class SkillSelfRepair {
      * triggering task's ending can name it), whether the skill had side effects when the repair
      * began, and whether the work it repairs after was local only -- then the repair is too.
      */
-    public record Job(long id, String skill, String taskId, boolean sideEffects, boolean localOnly) {}
+    public record Job(long id, String skill, String taskId, Declared declared, boolean localOnly) {}
+
+    /**
+     * What the skill under repair declared as its repair began: its side effects in three states
+     * ({@link Tool#declaredSideEffects}), its network, its credentials, its system packages and its
+     * container image. A repair runs the skill only when it was declared free of side effects, and
+     * its skill_create may grant the skill nothing beyond this ({@link #outOfScope}).
+     */
+    public record Declared(Boolean sideEffects, boolean network, List<String> credentials,
+                           List<String> systemPackages, String containerImage) {
+        public Declared {
+            credentials = credentials == null ? List.of() : List.copyOf(credentials);
+            systemPackages = systemPackages == null ? List.of() : List.copyOf(systemPackages);
+        }
+
+        /** What {@code tool} declares now; nothing at all for a tool that is not there. */
+        static Declared of(Tool tool) {
+            if (tool == null) return new Declared(null, false, List.of(), List.of(), null);
+            var dynamic = tool instanceof com.ownclaw.agent.tools.DynamicSkill d ? d : null;
+            return new Declared(tool.declaredSideEffects(), tool.requiresNetwork(), tool.requiredCredentials(),
+                    dynamic == null ? List.of() : dynamic.systemPackages(),
+                    dynamic == null ? null : dynamic.containerImage());
+        }
+
+        /** Declared free of side effects, explicitly: the one skill a repair may run. */
+        boolean runnable() {
+            return Boolean.FALSE.equals(sideEffects);
+        }
+
+        /** As the record keeps it: true, false or undeclared. */
+        String sideEffectsText() {
+            return sideEffects == null ? "undeclared" : sideEffects.toString();
+        }
+    }
 
     /** One entry of an answer's {@code problems}, as it was read: a tool's name and what it did not do. */
     public record Reported(String tool, String what) {}
@@ -361,7 +394,8 @@ public class SkillSelfRepair {
                             problem, side_effects, code_before, code_after, outcome, report, previous_id, ended_at)
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
                         """, ctx.userId(), skill, ctx.taskId(), ctx.originalMessage(), startedAt(ctx), problem,
-                        sideEffects(skill) ? 1 : 0, code, code, GAVE_UP, last.get("report"), id(last));
+                        Declared.of(tools.find(skill).orElse(null)).sideEffectsText(), code, code, GAVE_UP,
+                        last.get("report"), id(last));
                 log.warn("Task {}: '{}' showed its problem again after a repair that changed nothing (task {}): no "
                         + "repair starts, the owner is told.", ctx.taskId(), skill, last.get("repair_task_id"));
                 event(ctx.userId(), ctx.taskId(), "left", skill, problem, str(last, "repair_task_id"), ctx.taskId());
@@ -388,11 +422,11 @@ public class SkillSelfRepair {
     private String start(AgentContext ctx, Found f, String problem, String code, Map<String, Object> previous) {
         String skill = f.skill();
         Tool tool = tools.find(skill).orElse(null);
-        boolean sideEffects = tool != null && tool.hasSideEffects();
+        Declared declared = Declared.of(tool);
         boolean debug = tool != null && tool.inputSchema() != null && tool.inputSchema().containsKey("debug");
         String taskId = UUID.randomUUID().toString().substring(0, 8);
         String goal = goal(skill, ctx.originalMessage(), Instant.ofEpochMilli(ctx.startTimeMs()), zone, ctx.taskId(),
-                f.what(), f.calls(), sideEffects, debug, previous);
+                f.what(), f.calls(), declared, debug, previous);
         // Stored and sent: no vault value goes either way, as nothing stored for display does.
         goal = Redactor.scrubVault(goal, ctx.secretValues()).text();
         long id = insertReturningId("""
@@ -400,9 +434,9 @@ public class SkillSelfRepair {
                     repair_task_id, problem, goal, side_effects, code_before, outcome, previous_id)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, ctx.userId(), skill, ctx.taskId(), ctx.originalMessage(), startedAt(ctx), taskId, problem, goal,
-                sideEffects ? 1 : 0, code, RUNNING, previous == null ? null : id(previous));
+                declared.sideEffectsText(), code, RUNNING, previous == null ? null : id(previous));
         boolean localOnly = ctx.options() != null && ctx.options().localOnly();
-        var job = new Job(id, skill, taskId, sideEffects, localOnly);
+        var job = new Job(id, skill, taskId, declared, localOnly);
         log.info("Task {}: '{}' did not do its whole job -- self-repair {} started as task {}.", ctx.taskId(), skill,
                 id, taskId);
         event(ctx.userId(), ctx.taskId(), "started", skill, problem, taskId, ctx.taskId());
@@ -425,7 +459,8 @@ public class SkillSelfRepair {
      * whether the skill has side effects.
      */
     static String goal(String skill, String message, Instant at, ZoneId zone, String triggerTaskId, List<String> what,
-                       List<Artifact> calls, boolean sideEffects, boolean debug, Map<String, Object> previous) {
+                       List<Artifact> calls, Declared declared, boolean debug, Map<String, Object> previous) {
+        boolean runnable = declared.runnable();
         var sb = new StringBuilder();
         sb.append("Repair the skill '").append(skill).append("'. This is a self-repair: OwnClaw started it by itself, ")
           .append("nobody is waiting for it, and it changes that one skill and nothing else.\n\n");
@@ -459,24 +494,29 @@ public class SkillSelfRepair {
         sb.append("\nWhat to do:\n");
         sb.append("1. Find the cause. Read the skill: skill_manage with action 'read' and name '").append(skill)
           .append("'.");
-        if (!sideEffects && debug) {
+        if (runnable && debug) {
             sb.append(" It has a 'debug' parameter: run it with debug set to true to see what it does.");
         }
-        sb.append(" Probe the source it reads if that helps, with a tool that changes nothing.\n");
+        sb.append(runnable
+                ? " No other tool runs in this task: find the cause in its code, the evidence above and its own "
+                        + "runs -- you may change it to report more of what it does, then run it.\n"
+                : " No tool runs in this task, this skill included: find the cause in its code and the evidence "
+                        + "above.\n");
         sb.append("2. Fix it with skill_create under the same name, '").append(skill).append("', as a targeted ")
           .append("change: describe what it does and what to change, and keep its parameters, credentials, ")
           .append("requirements and system packages unless one of them is the cause.\n");
-        if (sideEffects) {
-            sb.append("3. Do not run it: its SKILL.yaml says has_side_effects: true, so a run would change ")
-              .append("something. Check the new code by reading it instead.\n");
+        if (!runnable) {
+            sb.append("3. Do not run it: its SKILL.yaml ").append(declared.sideEffects() == null
+                    ? "does not say has_side_effects: false" : "says has_side_effects: true")
+              .append(", so a run could change something. Check the new code by reading it instead.\n");
         } else {
             sb.append("3. Run '").append(skill).append("' again, with the arguments of the call above")
               .append(debug ? " and debug set to true" : "").append(", and check that the problem is gone. If ")
               .append("you are not given the skill to call yourself, run it through delegate, as an exact call ")
               .append("in 'calls'.\n");
         }
-        sb.append("4. Call no tool that has side effects -- sending mail, writing to other systems: in this task ")
-          .append("such calls are refused.\n");
+        sb.append("4. Call no other tool, and grant the skill nothing it did not have -- no credential, no ")
+          .append("network, no system package or container image: in this task such calls are refused.\n");
         sb.append("5. End with respond: say in a few sentences what was wrong, what you changed, and whether the ")
           .append("check passed, and set 'check' to passed, failed or not_run.\n");
         return sb.toString();
@@ -495,14 +535,14 @@ public class SkillSelfRepair {
         Job job = ctx.repair();
         Map<String, Object> row;
         String outcome;
-        boolean sideEffects;
+        boolean runnable;
         synchronized (lock) {
             row = row("WHERE id = ?", job.id());
             if (row == null) return;
             String after = codeHash(job.skill());
             boolean changed = !Objects.equals(row.get("code_before"), after);
-            sideEffects = job.sideEffects() || sideEffects(job.skill());
-            Boolean check = changed && !sideEffects ? checked(ctx, ended, job.skill()) : null;
+            runnable = job.declared().runnable();
+            Boolean check = changed && runnable ? checked(ctx, ended, job.skill()) : null;
             // "Changed nothing" is a verdict only of a repair that finished: one stopped, cut short by
             // an outage, the watchdog or the window, or left waiting for an answer never really tried.
             TerminationReason how = ended.terminationReason();
@@ -515,7 +555,7 @@ public class SkillSelfRepair {
                     str(row, "trigger_task_id"));
         }
         log.info("Self-repair {} of '{}' (task {}) ended: {}.", job.id(), job.skill(), ctx.taskId(), outcome);
-        String said = said(outcome, sideEffects, ended);
+        String said = said(outcome, !runnable, ended);
         String head = "After " + trigger(str(row, "trigger_message"), str(row, "trigger_at")) + " it did not do its "
                 + "whole job: " + row.get("problem") + "\n\n" + said + "\n\n";
         String rerun = FIXED.equals(outcome) || UNVERIFIED.equals(outcome)
@@ -533,7 +573,7 @@ public class SkillSelfRepair {
         return switch (outcome) {
             case FIXED -> "Fixed and checked: it was run again, and the problem is gone. " + which;
             case UNVERIFIED -> (sideEffects
-                    ? "Changed, but not run again to check it: it has side effects."
+                    ? "Changed, but not run again to check it: its SKILL.yaml does not say it has no side effects."
                     : completed ? "Changed, but the repair did not run it again to check the change."
                     : "Changed, but the repair did not finish, so the change was not checked.") + " " + which;
             case NOT_FIXED -> "Changed, but run again it still shows the problem. When the problem shows again, "
@@ -592,10 +632,12 @@ public class SkillSelfRepair {
     /**
      * Why a repair task may not take this action, or null when it may: the one rule, for the
      * loop's steps and for every call of a delegation, the model's and the cloud's exact ones
-     * alike. A repair reads, runs what changes nothing, and changes its one skill: skill_create
-     * only under its name; skill_manage, memory_manage and schedule_manage only to look; and no
-     * tool with side effects -- nor the skill under repair when it had them as the repair began,
-     * whatever its new SKILL.yaml says.
+     * alike. A repair reads, changes its one skill and runs only that skill: skill_create only under
+     * its name and granting it nothing it did not have ({@link #grants}); skill_manage,
+     * memory_manage and schedule_manage only to look; no registered tool but the skill under repair,
+     * and that one only when its SKILL.yaml said has_side_effects: false, in so many words, as the
+     * repair began -- the flag is the model's own optional claim, and a skill that says nothing can
+     * move mail.
      *
      * @param registered the registry's tool of that name, or null for a special action or a name
      *                   no tool has (the loop says so itself)
@@ -611,8 +653,11 @@ public class SkillSelfRepair {
             }
             case AgentAction.SKILL_CREATE -> {
                 Object skill = params == null ? null : params.get("name");
-                return skill != null && job.skill().equals(String.valueOf(skill)) ? null
-                        : repairs + "changes no other skill: skill_create only under the name '" + job.skill() + "'.";
+                if (skill == null || !job.skill().equals(String.valueOf(skill))) {
+                    return repairs + "changes no other skill: skill_create only under the name '" + job.skill() + "'.";
+                }
+                String grants = grants(job.declared(), params);
+                return grants == null ? null : repairs + "grants it nothing it did not have: " + grants;
             }
             case AgentAction.SKILL_MANAGE -> {
                 return List.of("read", "list", "analyze").contains(action) ? null
@@ -628,26 +673,89 @@ public class SkillSelfRepair {
             default -> { }
         }
         if (registered == null) return null;
-        boolean changes = registered.hasSideEffects() || registered.name().equals(job.skill()) && job.sideEffects();
-        return changes ? "'" + name + "' has side effects, and " + repairs + "calls no tool that changes anything -- "
-                + "sending mail, writing to other systems." : null;
+        if (!registered.name().equals(job.skill())) {
+            return repairs + "runs no other tool: the cause is found in its code, the evidence and "
+                    + (job.declared().runnable() ? "its own runs." : "nothing else.");
+        }
+        if (job.declared().runnable()) return null;
+        return "'" + name + "' is not run in its own repair: its SKILL.yaml "
+                + (job.declared().sideEffects() == null ? "did not say has_side_effects: false"
+                        : "said has_side_effects: true")
+                + " as the repair began, so a run could change something. Read its code and the evidence instead.";
     }
 
     /**
-     * A repair's skill_create of its skill, with what the skill declares and the model left out kept
-     * -- its credentials, its network, its timeout -- and its side effects never taken away: the
-     * refusal of a side-effecting run ({@link #outOfScope}) is decided by that flag.
+     * What a repair's skill_create would grant its skill beyond what it declared as the repair began,
+     * in words, or null: a credential it did not have (any vault key, the owner's passwords among
+     * them), network it did not have, other system packages or another container image, or a claim
+     * to be free of side effects it did not make. Left out, each is kept as it was
+     * ({@link #keepDeclarations}). Requirements and the code itself are what a repair changes.
+     */
+    static String grants(Declared had, Map<String, Object> params) {
+        var out = new ArrayList<String>();
+        if (params.get("credentials") != null) {
+            try {
+                var added = new ArrayList<>(com.ownclaw.agent.tools.DynamicSkillRegistry.credentialNames(
+                        params.get("credentials")));
+                added.removeAll(had.credentials());
+                if (!added.isEmpty()) {
+                    out.add("the credential" + (added.size() == 1 ? " " : "s ") + String.join(", ", added));
+                }
+            } catch (IllegalArgumentException refused) {
+                // A name no skill may declare: skill_create refuses it itself.
+            }
+        }
+        Object network = params.get("requires_network");
+        if (!had.network() && (Boolean.TRUE.equals(network) || "true".equalsIgnoreCase(String.valueOf(network).strip()))) {
+            out.add("network");
+        }
+        if (params.containsKey("system_packages")
+                && !packages(params.get("system_packages")).equals(had.systemPackages())) {
+            out.add("other system packages");
+        }
+        if (params.containsKey("container_image")) {
+            Object image = params.get("container_image");
+            String given = image == null || String.valueOf(image).isBlank() ? null : String.valueOf(image).strip();
+            if (!Objects.equals(given, had.containerImage())) out.add("another container image");
+        }
+        if (Boolean.FALSE.equals(SkillManager.declared(params.get("has_side_effects"))) && !had.runnable()) {
+            out.add("a has_side_effects: false it did not declare");
+        }
+        return out.isEmpty() ? null : String.join("; ", out) + ". Leave them out, and they stay as they are.";
+    }
+
+    /** System packages as SKILL.yaml keeps them (SkillManager#buildSkillYaml): comma or blank separated, sane names. */
+    static List<String> packages(Object given) {
+        String text = given == null ? "" : String.valueOf(given);
+        String delimiter = text.contains(",") ? "," : "\\s+";
+        return java.util.Arrays.stream(text.split(delimiter)).map(String::trim).filter(p -> !p.isBlank())
+                .filter(p -> p.matches("[a-zA-Z0-9._+:-]+")).toList();
+    }
+
+    /**
+     * A repair's skill_create of its skill, with what the skill declared as the repair began and the
+     * model left out kept -- its side effects (left undeclared when they were), its network, its
+     * credentials, its system packages, its container image -- and its timeout as it is now. What it
+     * gave is checked before this ({@link #grants}).
      */
     static Map<String, Object> keepDeclarations(Job job, Map<String, Object> params, Tool current) {
         var out = new LinkedHashMap<String, Object>(params == null ? Map.of() : params);
-        if (current == null || !job.skill().equals(String.valueOf(out.get("name")))) return out;
-        if (job.sideEffects() || current.hasSideEffects()) out.put("has_side_effects", true);
-        if (!out.containsKey("requires_network")) out.put("requires_network", current.requiresNetwork());
-        if (!out.containsKey("has_side_effects")) out.put("has_side_effects", current.hasSideEffects());
-        if (!out.containsKey("credentials") && !current.requiredCredentials().isEmpty()) {
-            out.put("credentials", String.join(",", current.requiredCredentials()));
+        if (!job.skill().equals(String.valueOf(out.get("name")))) return out;
+        Declared had = job.declared();
+        if (!out.containsKey("has_side_effects") && had.sideEffects() != null) {
+            out.put("has_side_effects", had.sideEffects());
         }
-        if (!out.containsKey("timeout")) out.put("timeout", current.estimatedMaxDurationSeconds());
+        if (!out.containsKey("requires_network")) out.put("requires_network", had.network());
+        if (!out.containsKey("credentials") && !had.credentials().isEmpty()) {
+            out.put("credentials", String.join(",", had.credentials()));
+        }
+        if (!out.containsKey("system_packages") && !had.systemPackages().isEmpty()) {
+            out.put("system_packages", String.join(" ", had.systemPackages()));
+        }
+        if (!out.containsKey("container_image") && had.containerImage() != null) {
+            out.put("container_image", had.containerImage());
+        }
+        if (!out.containsKey("timeout") && current != null) out.put("timeout", current.estimatedMaxDurationSeconds());
         return out;
     }
 
@@ -682,10 +790,6 @@ public class SkillSelfRepair {
     private void addProblem(long id, AgentContext ctx, String problem) {
         jdbc.update("UPDATE skill_repairs SET added_problems = COALESCE(added_problems || char(10), '') || ? "
                 + "WHERE id = ?", "task " + ctx.taskId() + ": " + problem, id);
-    }
-
-    private boolean sideEffects(String skill) {
-        return tools.find(skill).map(Tool::hasSideEffects).orElse(false);
     }
 
     /** The sha256 of the skill's code, or null when it has none. */

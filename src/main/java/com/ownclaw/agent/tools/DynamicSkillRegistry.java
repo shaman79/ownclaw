@@ -354,7 +354,8 @@ public class DynamicSkillRegistry {
 
         Map<String, ToolParam> parameters = parseParameters(yaml);
         boolean requiresNetwork = Boolean.TRUE.equals(yaml.get("requires_network"));
-        boolean hasSideEffects = Boolean.TRUE.equals(yaml.get("has_side_effects"));
+        // Three states: a SKILL.yaml that says nothing is not one that says false (Tool#declaredSideEffects).
+        Boolean hasSideEffects = yaml.get("has_side_effects") instanceof Boolean b ? b : null;
         int timeout = yaml.containsKey("timeout") ? toInt(yaml.get("timeout"), 30) : 30;
         List<String> credentials = parseCredentials(yaml);
         List<String> systemPackages = parseStringList(yaml, "system_packages");

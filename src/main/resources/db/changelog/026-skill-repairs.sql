@@ -15,6 +15,7 @@
 -- (OwnClaw stopped while it ran) | not_started (the queue never ran it) | stopped (Stopped before it
 -- changed anything) | not_finished (ended before it finished -- an outage, the stall watchdog, the
 -- window, a question -- without changing anything). The last four are no verdict on the skill.
+-- side_effects: what the skill's SKILL.yaml said as the repair began; a repair runs it only on 'false'.
 -- code_before / code_after: the sha256 of the skill's skill.py when the repair was started and when
 -- it ended. previous_id: the repair whose report this one was given (it changed the code and the
 -- problem came back), or for a 'gave_up' row the repair that changed nothing. cleared_at: a later
@@ -31,7 +32,7 @@ CREATE TABLE IF NOT EXISTS skill_repairs (
     problem          TEXT    NOT NULL,
     added_problems   TEXT,
     goal             TEXT,
-    side_effects     INTEGER NOT NULL DEFAULT 0,
+    side_effects     TEXT    NOT NULL CHECK (side_effects IN ('true', 'false', 'undeclared')),
     code_before      TEXT,
     code_after       TEXT,
     outcome          TEXT    NOT NULL CHECK (outcome IN ('running', 'fixed', 'unverified', 'not_fixed',

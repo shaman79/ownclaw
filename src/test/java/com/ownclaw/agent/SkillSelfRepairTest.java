@@ -43,7 +43,8 @@ class SkillSelfRepairTest {
     static final String PROBLEM = "The menu of Cafe Two was not read: OCR failed on a fallback picture.";
 
     /** A fake skill: records its calls, answers with {@code body}. */
-    static Tool skill(String name, boolean sideEffects, List<String> credentials, boolean debug,
+    /** @param sideEffects what its SKILL.yaml says of its side effects: true, false, or null for nothing */
+    static Tool skill(String name, Boolean sideEffects, List<String> credentials, boolean debug,
                       List<Map<String, Object>> calls, Function<Map<String, Object>, ToolResult> body) {
         return new Tool() {
             public String name() { return name; }
@@ -52,7 +53,8 @@ class SkillSelfRepairTest {
                 return debug ? Map.of("debug", ToolParam.optional("boolean", "say what it does")) : Map.of();
             }
             public List<String> requiredCredentials() { return credentials; }
-            public boolean hasSideEffects() { return sideEffects; }
+            public boolean hasSideEffects() { return Boolean.TRUE.equals(sideEffects); }
+            public Boolean declaredSideEffects() { return sideEffects; }
             public boolean requiresNetwork() { return true; }
             public ToolResult execute(Map<String, Object> p, ToolExecutionContext c) {
                 calls.add(Map.copyOf(p));
@@ -178,6 +180,12 @@ class SkillSelfRepairTest {
         args.put("message", message);
         args.put(SkillSelfRepair.PROBLEMS, problems);
         return call(AgentAction.RESPOND, args);
+    }
+
+    /** A repair of {@code skill}, which declared {@code sideEffects}, as its task is handed one. */
+    static SkillSelfRepair.Job job(String skill, Boolean sideEffects) {
+        return new SkillSelfRepair.Job(999, skill, "abcd1234",
+                new SkillSelfRepair.Declared(sideEffects, true, List.of(), List.of(), null), false);
     }
 
     /** A repair's answer, with how its check went. */
@@ -611,7 +619,7 @@ class SkillSelfRepairTest {
         assertEquals(0, fix.rig.cloud.calls("codegen").size());
         String sent = String.join("\n", LoopRig.userParts(fix.rig.cloud.calls("think")
                 .get(fix.rig.cloud.calls("think").size() - 1)));
-        assertTrue(sent.contains("'smtp_send_email' has side effects"), sent);
+        assertTrue(sent.contains("runs no other tool"), sent);
         assertTrue(sent.contains("changes no other skill: skill_create only under the name '" + MENU + "'"), sent);
         assertTrue(sent.contains("deletes nothing"), sent);
     }
@@ -626,25 +634,28 @@ class SkillSelfRepairTest {
         fix.rig.cloud.think.add(call("menu_mailer", Map.of()));
         fix.rig.cloud.think.add(problems("Sent, one menu missing.", List.of(Map.of("tool", "menu_mailer",
                 "what", "It sent the mail without the second menu."))));
-        // The repair: tries to run it, then fixes it without the flag, then says so.
+        // The repair: tries to run it, then to declare it free of side effects, then fixes it.
         fix.rig.cloud.think.add(call("menu_mailer", Map.of()));
         fix.rig.cloud.think.add(call(AgentAction.SKILL_CREATE, Map.of("name", "menu_mailer",
                 "description", "Mail the menus; wait for both.", "parameters", "{}", "has_side_effects", false)));
+        fix.rig.cloud.think.add(call(AgentAction.SKILL_MANAGE, Map.of("action", "read", "name", "menu_mailer")));
+        fix.rig.cloud.think.add(call(AgentAction.SKILL_CREATE, Map.of("name", "menu_mailer",
+                "description", "Mail the menus; wait for both.", "parameters", "{}")));
         fix.rig.cloud.codegen.add(SkillCodegenTest.finished(SkillCodegenTest.module("# v2")));
         fix.rig.cloud.think.add(respond("It mailed before the second menu arrived; now it waits for both."));
         fix.unattended("Using menu_mailer, mail me the menus.");
         var row = fix.ended(fix.lastId());
 
         assertEquals(1, sent.size(), "run only by the scheduled task, never by its repair: " + sent);
-        assertEquals(1, fix.created.size());
+        assertEquals(1, fix.created.size(), "the claim of no side effects was refused: " + fix.created);
         assertEquals(Boolean.TRUE, fix.created.get(0).get("has_side_effects"), fix.created.get(0).toString());
         assertEquals("SMTP_PASS", fix.created.get(0).get("credentials"), "kept: " + fix.created.get(0));
         assertEquals("unverified", row.get("outcome"));
-        assertEquals(1, ((Number) row.get("side_effects")).intValue());
+        assertEquals("true", row.get("side_effects"));
         assertTrue(String.valueOf(row.get("goal")).contains("Do not run it: its SKILL.yaml says has_side_effects: true"),
                 String.valueOf(row.get("goal")));
         String note = fix.told().get(fix.told().size() - 1);
-        assertTrue(note.contains("Changed, but not run again to check it: it has side effects."), note);
+        assertTrue(note.contains("Changed, but not run again to check it"), note);
     }
 
     @Test
@@ -707,7 +718,7 @@ class SkillSelfRepairTest {
         fix.rig.cloud.think.add(call(AgentAction.SKILL_MANAGE, Map.of("action", "read", "name", MENU)));
         fix.rig.cloud.think.add(respond("Nothing to change."));
         fix.rig.loop.executeRepair("u1", "Repair the skill '" + MENU + "'. " + asks,
-                new SkillSelfRepair.Job(999, MENU, "abcd1234", false, false));
+                job(MENU, false));
         assertEquals(1, fix.created.size(), "a repair made a skill by itself: " + fix.created);
         assertEquals(1, fix.rig.cloud.calls("codegen").size());
     }
@@ -726,7 +737,7 @@ class SkillSelfRepairTest {
         fix.rig.loop.executeFull("u1", "Say hello.", true, null, List.of(), TaskChat.Channel.OPS);   // 2: ops
         fix.rig.cloud.think.add(respond("Nothing to change."));
         fix.rig.loop.executeRepair("u1", "Repair the skill '" + MENU + "'.",
-                new SkillSelfRepair.Job(999, MENU, "abcd1234", false, false));     // 3: a repair
+                job(MENU, false));     // 3: a repair
         fix.rig.config.getSelfRepair().setEnabled(false);
         fix.rig.cloud.think.add(respond("Nothing to do."));
         fix.unattended("Say hello.");                                               // 4: switched off
@@ -772,7 +783,7 @@ class SkillSelfRepairTest {
         // A repair is told to say how its check went, and nothing of problems.
         fix.rig.cloud.think.add(text);
         fix.rig.loop.executeRepair("u1", "Repair the skill '" + MENU + "'.",
-                new SkillSelfRepair.Job(999, MENU, "abcd1234", false, false));
+                job(MENU, false));
         String repair = String.join("\n", LoopRig.userParts(fix.rig.cloud.calls("think").get(2)));
         assertTrue(repair.contains("- Check: when you respond, add \"" + SkillSelfRepair.CHECK + "\""), repair);
         assertFalse(repair.contains("- Problems:"), repair);
@@ -826,19 +837,21 @@ class SkillSelfRepairTest {
     @Test
     @DisplayName("the scope rule: a repair reads, runs what changes nothing, and changes its one skill")
     void scopeRule() {
-        var job = new SkillSelfRepair.Job(1, MENU, "t1", false, false);
+        var job = job(MENU, false);
         var calls = new ArrayList<Map<String, Object>>();
         Tool reads = skill("web_snapshot", false, List.of(), false, calls, p -> ToolResult.success(""));
         Tool sends = skill("smtp_send_email", true, List.of(), false, calls, p -> ToolResult.success(""));
         Tool menu = skill(MENU, false, List.of(), false, calls, p -> ToolResult.success(""));
 
         assertNull(SkillSelfRepair.outOfScope(null, "smtp_send_email", Map.of(), sends), "not a repair");
-        assertNull(SkillSelfRepair.outOfScope(job, "web_snapshot", Map.of(), reads));
+        // Its own skill, declared free of side effects as the repair began: run.
         assertNull(SkillSelfRepair.outOfScope(job, MENU, Map.of(), menu));
+        // No other tool, whatever it declares.
+        assertNotNull(SkillSelfRepair.outOfScope(job, "web_snapshot", Map.of(), reads));
         assertNotNull(SkillSelfRepair.outOfScope(job, "smtp_send_email", Map.of(), sends));
-        // The skill under repair had side effects when it began: refused, whatever it says now.
-        var sideJob = new SkillSelfRepair.Job(1, MENU, "t1", true, false);
-        assertNotNull(SkillSelfRepair.outOfScope(sideJob, MENU, Map.of(), menu));
+        // Its own skill, declared to have side effects, or declaring nothing: not run, whatever it says now.
+        assertNotNull(SkillSelfRepair.outOfScope(job(MENU, true), MENU, Map.of(), menu));
+        assertNotNull(SkillSelfRepair.outOfScope(job(MENU, null), MENU, Map.of(), menu));
         assertNull(SkillSelfRepair.outOfScope(job, AgentAction.SKILL_CREATE, Map.of("name", MENU), null));
         assertNotNull(SkillSelfRepair.outOfScope(job, AgentAction.SKILL_CREATE, Map.of("name", "other"), null));
         assertNotNull(SkillSelfRepair.outOfScope(job, AgentAction.SKILL_CREATE, Map.of(), null));
@@ -850,5 +863,45 @@ class SkillSelfRepairTest {
         assertNotNull(SkillSelfRepair.outOfScope(job, AgentAction.SCHEDULE_MANAGE, Map.of("action", "cancel"), null));
         assertNull(SkillSelfRepair.outOfScope(job, AgentAction.DELEGATE, Map.of("goal", "x"), null));
         assertNull(SkillSelfRepair.outOfScope(job, AgentAction.RESPOND, Map.of("message", "x"), null));
+    }
+
+    @Test
+    @DisplayName("a repair's skill_create grants its skill nothing it did not have: no credential, network, system package, container image, or claim of no side effects")
+    void grantsNothing() {
+        var had = new SkillSelfRepair.Declared(null, false, List.of("MENU_API_KEY"), List.of("tesseract-ocr"), null);
+        var job = new SkillSelfRepair.Job(1, MENU, "t1", had, false);
+        java.util.function.Function<Map<String, Object>, String> create = extra -> {
+            var p = new java.util.HashMap<String, Object>(Map.of("name", MENU, "description", "x", "parameters", "{}"));
+            p.putAll(extra);
+            return SkillSelfRepair.outOfScope(job, AgentAction.SKILL_CREATE, p, null);
+        };
+        assertNull(create.apply(Map.of()), "left out, all stays as it was");
+        assertNull(create.apply(Map.of("credentials", "MENU_API_KEY")));
+        assertNull(create.apply(Map.of("credentials", "")), "dropping one is no grant");
+        assertNull(create.apply(Map.of("requires_network", false)));
+        assertNull(create.apply(Map.of("system_packages", "tesseract-ocr")));
+        assertNull(create.apply(Map.of("has_side_effects", true)), "claiming side effects is safe");
+        assertNull(create.apply(Map.of("requirements", "requests\nPillow")), "its Python libraries are a repair's to change");
+        assertNotNull(create.apply(Map.of("credentials", "MENU_API_KEY,SMTP_PASS")));
+        assertTrue(create.apply(Map.of("credentials", "SMTP_PASS")).contains("the credential SMTP_PASS"));
+        assertNotNull(create.apply(Map.of("requires_network", true)));
+        assertNotNull(create.apply(Map.of("requires_network", "true")));
+        assertNotNull(create.apply(Map.of("system_packages", "tesseract-ocr curl")));
+        assertNotNull(create.apply(Map.of("system_packages", "")), "taking them away changes where it runs");
+        assertNotNull(create.apply(Map.of("container_image", "python:3.12")));
+        assertNotNull(create.apply(Map.of("has_side_effects", false)), "undeclared is not free of side effects");
+        assertNotNull(create.apply(Map.of("has_side_effects", "false")));
+        // Declared false: saying so again is no grant.
+        var free = new SkillSelfRepair.Job(1, MENU, "t1",
+                new SkillSelfRepair.Declared(false, true, List.of(), List.of(), "python:3.12"), false);
+        var same = new java.util.HashMap<String, Object>(Map.of("name", MENU, "has_side_effects", false,
+                "requires_network", true, "container_image", "python:3.12"));
+        assertNull(SkillSelfRepair.outOfScope(free, AgentAction.SKILL_CREATE, same, null));
+        // What it left out is kept as it was declared.
+        var kept = SkillSelfRepair.keepDeclarations(job, Map.of("name", MENU), null);
+        assertEquals("MENU_API_KEY", kept.get("credentials"));
+        assertEquals(false, kept.get("requires_network"));
+        assertEquals("tesseract-ocr", kept.get("system_packages"));
+        assertFalse(kept.containsKey("has_side_effects"), "undeclared stays undeclared: " + kept);
     }
 }

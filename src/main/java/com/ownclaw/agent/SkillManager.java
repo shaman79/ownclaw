@@ -278,7 +278,9 @@ public class SkillManager {
 
         String requirements = str(params, "requirements");
         boolean requiresNetwork = Boolean.TRUE.equals(params.get("requires_network"));
-        boolean hasSideEffects = Boolean.TRUE.equals(params.get("has_side_effects"));
+        // Written as given, and not at all when not given: "false" by default made every skill that
+        // said nothing look declared free of side effects (Tool#declaredSideEffects).
+        Boolean hasSideEffects = declared(params.get("has_side_effects"));
         int timeout = toInt(params.get("timeout"), 30);
         String systemPackagesStr = str(params, "system_packages");
         String containerImage = str(params, "container_image");
@@ -648,8 +650,17 @@ public class SkillManager {
         }
     }
 
+    /** A flag as a model writes one -- true, "true", "False" -- or null when it wrote none, or no flag. */
+    static Boolean declared(Object v) {
+        if (v instanceof Boolean b) return b;
+        if (v instanceof String s && (s.strip().equalsIgnoreCase("true") || s.strip().equalsIgnoreCase("false"))) {
+            return Boolean.valueOf(s.strip());
+        }
+        return null;
+    }
+
     private String buildSkillYaml(String name, String author, String description, Map<String, Object> parametersDef,
-                                  boolean requiresNetwork, boolean hasSideEffects, int timeout,
+                                  boolean requiresNetwork, Boolean hasSideEffects, int timeout,
                                   List<String> credentials, String systemPackages, String containerImage)
             throws IOException {
         Map<String, Object> yaml = new LinkedHashMap<>();
@@ -662,7 +673,7 @@ public class SkillManager {
             yaml.put("parameters", parametersDef);
         }
         yaml.put("requires_network", requiresNetwork);
-        yaml.put("has_side_effects", hasSideEffects);
+        if (hasSideEffects != null) yaml.put("has_side_effects", hasSideEffects);
         yaml.put("timeout", timeout);
         if (!credentials.isEmpty()) yaml.put("credentials", credentials);
         if (systemPackages != null && !systemPackages.isBlank()) {

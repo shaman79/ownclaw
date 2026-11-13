@@ -31,6 +31,75 @@ class SelfRepairReviewTest {
                 + "ORDER BY c.rowid", String.class, user);
     }
 
+    // F1: a skill whose SKILL.yaml says nothing of side effects was run by a repair -- and so was any
+    // other tool declared free of them.
+    @Test
+    @DisplayName("F1: a repair runs no tool but its own skill: one declaring nothing, or declaring no side effects, is refused")
+    void noOtherToolRuns(@TempDir Path tmp) throws Exception {
+        var moved = new java.util.concurrent.CopyOnWriteArrayList<java.util.Map<String, Object>>();
+        var fetched = new java.util.concurrent.CopyOnWriteArrayList<java.util.Map<String, Object>>();
+        fix = new Fix(tmp,
+                skill("imap_move_to_trash_by_sender", null, List.of(), false, moved,
+                        p -> com.ownclaw.agent.tools.ToolResult.success("{\"moved\": 12}")),
+                skill("web_snapshot", false, List.of(), false, fetched,
+                        p -> com.ownclaw.agent.tools.ToolResult.success("<html></html>")));
+        fix.rig.queue.start();
+        fix.scriptMenu(true);
+        fix.rig.cloud.think.add(LoopRig.call("imap_move_to_trash_by_sender", java.util.Map.of("sender", "news@example.com")));
+        fix.rig.cloud.think.add(LoopRig.call(AgentAction.SKILL_MANAGE, java.util.Map.of("action", "read", "name", MENU)));
+        fix.rig.cloud.think.add(LoopRig.call("web_snapshot", java.util.Map.of("url", "https://example.com/menu")));
+        fix.rig.cloud.think.add(LoopRig.call(MENU, java.util.Map.of("debug", true)));
+        fix.rig.cloud.think.add(respond("Probed."));
+        fix.unattended(TASK);
+        var row = fix.ended(fix.lastId());
+        assertEquals("Probed.", row.get("report"), "it ended by its answer");
+        assertTrue(moved.isEmpty(), "the repair ran a skill that declares nothing: " + moved);
+        assertTrue(fetched.isEmpty(), "the repair ran another tool: " + fetched);
+        assertEquals(2, fix.menuCalls.size(), "its own skill, declared free of side effects, ran: " + fix.menuCalls);
+    }
+
+    // F1b: the skill under repair, declaring nothing, was replayed with the trigger's arguments, as the goal said.
+    @Test
+    @DisplayName("F1b: a skill under repair that declares nothing is never run in its repair, and its goal says not to")
+    void undeclaredSkillIsNotReplayed(@TempDir Path tmp) throws Exception {
+        var moved = new java.util.concurrent.CopyOnWriteArrayList<java.util.Map<String, Object>>();
+        fix = new Fix(tmp, skill("imap_move_to_trash_by_sender", null, List.of(), false, moved,
+                p -> com.ownclaw.agent.tools.ToolResult.success("{\"moved\": 12, \"warning\": \"3 left behind\"}")));
+        fix.rig.queue.start();
+        fix.rig.cloud.think.add(LoopRig.call("imap_move_to_trash_by_sender", java.util.Map.of("sender", "news@example.com")));
+        fix.rig.cloud.think.add(problems("Done.", List.of(java.util.Map.of("tool", "imap_move_to_trash_by_sender",
+                "what", "It left 3 mails behind."))));
+        fix.rig.cloud.think.add(LoopRig.call("imap_move_to_trash_by_sender", java.util.Map.of("sender", "news@example.com")));
+        fix.rig.cloud.think.add(respond("Read the code instead."));
+        fix.unattended("Using imap_move_to_trash_by_sender, trash news@example.com mail.");
+        var row = fix.ended(fix.lastId());
+        String goal = (String) row.get("goal");
+        assertFalse(goal.contains("again, with the arguments of the call above"), goal);
+        assertTrue(goal.contains("3. Do not run it: its SKILL.yaml does not say has_side_effects: false"), goal);
+        assertEquals("undeclared", row.get("side_effects"));
+        assertEquals(1, moved.size(), "run by the task, never by its repair: " + moved);
+    }
+
+    // F2: a repair's skill_create could add credentials and network the skill never had, then run it.
+    @Test
+    @DisplayName("F2: a repair's skill_create that grants its skill a credential or network is refused")
+    void noGrants(@TempDir Path tmp) throws Exception {
+        fix = new Fix(tmp);
+        fix.rig.queue.start();
+        fix.scriptMenu(true);
+        fix.rig.cloud.think.add(LoopRig.call(AgentAction.SKILL_CREATE, java.util.Map.of("name", MENU, "description", "x",
+                "parameters", "{}", "credentials", "SMTP_PASS,ROUTER_PIN", "requires_network", true)));
+        fix.rig.cloud.think.add(LoopRig.call(MENU, java.util.Map.of()));
+        fix.rig.cloud.think.add(respond("Done."));
+        fix.unattended(TASK);
+        fix.ended(fix.lastId());
+        assertTrue(fix.created.isEmpty(), "granted: " + fix.created);
+        assertEquals(0, fix.rig.cloud.calls("codegen").size(), "refused before any code was written");
+        var thinks = fix.rig.cloud.calls("think");
+        String told = String.join("\n", LoopRig.userParts(thinks.get(thinks.size() - 1)));
+        assertTrue(told.contains("grants it nothing it did not have: the credentials SMTP_PASS, ROUTER_PIN"), told);
+    }
+
     // F5: a repair that never got to try counted as "changed nothing", and the skill was left to the owner for good.
     @Test
     @DisplayName("F5: a repair cut short by an outage is no verdict: the owner is told it did not finish, and the next problem starts a repair")
