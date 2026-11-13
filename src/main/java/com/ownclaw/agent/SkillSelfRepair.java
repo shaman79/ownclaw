@@ -662,14 +662,33 @@ public class SkillSelfRepair {
                     .append("be said of it: ").append(d).append('\n');
                 continue;
             }
-            // The arguments as they ran, references filled in: a {{1}} of that task's would be another
-            // result in this one. A call that pulled in a PRIVATE result is PRIVATE itself, and never here.
+            // The arguments as they ran: a {{1}} of that task's would be another result in this one. Each
+            // value a reference filled in is handed over as a result of its own -- a fetched page is folded to
+            // fit like any result and read with read_result -- and the call's arguments name it by its handle
+            // here, so a re-run reads the very same input by reference and nobody retypes it. A call that
+            // pulled in a PRIVATE result is PRIVATE itself, and never here.
+            var args = new LinkedHashMap<String, Object>(a.written());
+            for (var arg : a.resolved().entrySet()) {
+                Object ran = arg.getValue();
+                if (Objects.equals(a.written().get(arg.getKey()), ran)) continue;   // written as it ran
+                if (!(ran instanceof String text)) {
+                    args.put(arg.getKey(), ran);                                  // structured: as it ran
+                    continue;
+                }
+                evidence.add(new Evidence("the value of '" + arg.getKey() + "' in " + call + ", as it ran (a "
+                        + "reference of that task's, filled in)", Map.of("task", triggerTaskId, "skill", skill,
+                        "call", i + 1, "argument", arg.getKey()), text, true));
+                String handle = ArtifactRef.handle(evidence.size());
+                list.append("- ").append(handle).append(": the value of argument '").append(arg.getKey())
+                    .append("' of ").append(call).append(", as it ran.\n");
+                args.put(arg.getKey(), handle);
+            }
             var about = new LinkedHashMap<String, Object>();
             about.put("task", triggerTaskId);
             about.put("skill", skill);
             about.put("call", i + 1);
-            about.put("arguments", a.resolved());
-            evidence.add(new Evidence(call + ", called with " + json(a.resolved()) + " -- it "
+            about.put("arguments", args);
+            evidence.add(new Evidence(call + ", called with " + json(args) + " -- it "
                     + (a.succeeded() ? "reported success" : "FAILED") + "; its " + (a.succeeded() ? "output" : "error"),
                     about, a.output(), a.succeeded()));
             list.append("- ").append(ArtifactRef.handle(evidence.size())).append(": ").append(call)

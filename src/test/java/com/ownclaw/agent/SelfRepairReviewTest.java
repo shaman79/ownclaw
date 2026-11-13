@@ -499,15 +499,14 @@ class SelfRepairReviewTest {
         fix.rig.cloud.think.add(LoopRig.call(MENU, java.util.Map.of("html", "{{1}}")));
         fix.rig.cloud.think.add(problems("Done.", List.of(java.util.Map.of("tool", MENU, "what", PROBLEM))));
         // The repair does as its goal says: runs the skill with the arguments of the call in the evidence,
-        // as the step that hands it over shows them.
+        // as the step that hands it over shows them -- the input by the repair's own handle.
         String[] shown = {null};
         fix.rig.cloud.think.add(c -> {
             var thinks = fix.rig.cloud.calls("think");
-            shown[0] = String.join("\n", LoopRig.userParts(thinks.get(thinks.size() - 1)))
-                    + String.join("\n", thinks.get(thinks.size() - 1).messages().stream()
+            shown[0] = String.join("\n", thinks.get(thinks.size() - 1).messages().stream()
                     .filter(m -> m.role() == com.ownclaw.llm.LlmMessage.Role.ASSISTANT).map(m -> m.content()).toList());
             var m = java.util.regex.Pattern.compile("\"arguments\":\\{\"html\":\"([^\"]*)\"").matcher(shown[0]);
-            return LoopRig.call(MENU, java.util.Map.of("html", m.find() ? m.group(1) : "{{1}}")).answer(c);
+            return LoopRig.call(MENU, java.util.Map.of("html", m.find() ? m.group(1) : "not shown")).answer(c);
         });
         fix.rig.cloud.think.add(respond("Ran it."));
         fix.unattended(TASK);
@@ -515,7 +514,10 @@ class SelfRepairReviewTest {
         String evidence = String.valueOf(row.get("evidence"));
         assertFalse(evidence.contains("{{1}}"), evidence);
         assertTrue(evidence.contains("<html>Cafe Two: Goulash</html>"), evidence);
-        assertFalse(shown[0].contains("\"html\":\"{{1}}\""), "the repair is shown the trigger's reference: " + shown[0]);
+        assertTrue(shown[0].contains("\"arguments\":{\"html\":\"{{2}}\"}"), "by the repair's own handle: " + shown[0]);
+        assertFalse(shown[0].contains("Goulash"), "the value is a result, not in the step's action: " + shown[0]);
+        assertTrue(String.valueOf(row.get("goal")).contains("- {{2}}: the value of argument 'html' of call 1 of 1"),
+                String.valueOf(row.get("goal")));
         assertEquals(2, fix.menuCalls.size(), fix.menuCalls.toString());
         assertEquals(fix.menuCalls.get(0), fix.menuCalls.get(1), "the same input as the call it repairs after");
     }
@@ -535,6 +537,37 @@ class SelfRepairReviewTest {
         assertFalse(String.valueOf(row.get("evidence")).contains(secret), String.valueOf(row.get("evidence")));
         assertFalse(String.valueOf(row.get("goal")).contains(secret), String.valueOf(row.get("goal")));
         assertTrue(String.valueOf(row.get("evidence")).contains("logo.png; tried "), "the rest is kept");
+    }
+
+    // R3-1 (E): the arguments as they ran went whole into the evidence step's action, which is never folded.
+    @Test
+    @DisplayName("R3-1 (E): a repair whose evidence call took a long result by reference still fits its window")
+    void aLongArgumentStillFits(@TempDir Path tmp) throws Exception {
+        String page = "<p>Cafe Two: Goulash 120 Kc, Svickova 150 Kc</p>\n".repeat(6_000);   // ~300,000 chars
+        var fetched = new java.util.concurrent.CopyOnWriteArrayList<java.util.Map<String, Object>>();
+        fix = new Fix(tmp, skill("page_fetch", false, List.of(), false, fetched,
+                p -> com.ownclaw.agent.tools.ToolResult.success(page)));
+        fix.rig.queue.start();
+        fix.rig.cloud.think.add(LoopRig.call("page_fetch", java.util.Map.of("url", "https://example.com/two")));
+        fix.rig.cloud.think.add(LoopRig.call(MENU, java.util.Map.of("html", "{{1}}")));
+        fix.rig.cloud.think.add(problems("Done.", List.of(java.util.Map.of("tool", MENU, "what", PROBLEM))));
+        // The repair's model: a window of 100,000 tokens (200,000 chars by ContextFit's estimate).
+        for (int i = 0; i < 12; i++) {
+            fix.rig.cloud.think.add(c -> {
+                var thinks = fix.rig.cloud.calls("think");
+                long chars = thinks.get(thinks.size() - 1).messages().stream()
+                        .mapToLong(m -> m.content() == null ? 0 : m.content().length()).sum();
+                if (chars > 200_000) {
+                    throw new com.ownclaw.llm.OutputTruncated("anthropic",
+                            com.ownclaw.llm.OutputTruncated.Limit.CONTEXT_WINDOW, 100_000, null);
+                }
+                return respond("Read the evidence.").answer(c);
+            });
+        }
+        fix.unattended(TASK);
+        var row = fix.ended(fix.lastId());
+        assertEquals("Read the evidence.", row.get("report"), "the repair never got a step in: " + row.get("outcome")
+                + " / " + row.get("report"));
     }
 
     // F4: repair records were looked up by skill name alone: one account was told another's report.
