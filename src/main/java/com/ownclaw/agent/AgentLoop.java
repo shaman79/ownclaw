@@ -2648,7 +2648,11 @@ public class AgentLoop {
      * causes, and the caller named one of them, "Cloud LLM unavailable": a cloud model that had
      * answered with code cut off at its output limit was reported to the owner as an outage.
      */
-    record Codegen(Map<String, Object> params, String error) {
+    record Codegen(Map<String, Object> params, String error, String asWritten) {
+        Codegen(Map<String, Object> params, String error) {
+            this(params, error, null);
+        }
+
         static Codegen failed(String why) {
             return new Codegen(null, "ERROR: " + why);
         }
@@ -2838,11 +2842,10 @@ public class AgentLoop {
                     }
                 }
             }
-            String text = chosen.text();
             String code = chosen.code();
             switch (chosen.outcome()) {
                 case NO_CODE, NO_RUN -> {
-                    log.warn("Skill '{}': a reply of {} chars held {}", name, text == null ? 0 : text.length(),
+                    log.warn("Skill '{}': a reply of {} chars held {}", name, chosen.asWritten().length(),
                             code == null ? "no Python code" : "Python code without def run(params)");
                     return Codegen.failed(code == null
                             ? "the reply for '" + name + "' held no Python code, so nothing was created."
@@ -2857,22 +2860,34 @@ public class AgentLoop {
                 case CHECK_FAILED -> {
                     // The check could not run: nothing a repair of the code could fix, and every
                     // repair would fail it the same way.
-                    log.error("Skill '{}': the syntax check could not run: {}", name, chosen.syntaxError());
+                    log.error("Skill '{}': the syntax check could not run: {}", name, oneLine(chosen.syntaxError()));
                     return Codegen.failed("the code for '" + name + "' could not be checked ("
-                            + chosen.syntaxError() + "), so nothing was created.");
+                            + oneLine(chosen.syntaxError()) + "), so nothing was created.");
+                }
+                case RESTORE_REFUSED -> {
+                    log.error("Skill '{}': the code {}", name, chosen.syntaxError());
+                    return Codegen.failed("the code for '" + name + "' " + chosen.syntaxError()
+                            + ", so nothing was created.");
+                }
+                case RESTORE_BROKE -> {
+                    log.error("Skill '{}': its code compiles as written but not with the values put back{}", name,
+                            chosen.syntaxError());
+                    return Codegen.failed("the code for '" + name + "' compiles as the model wrote it but not with "
+                            + "your values put back" + chosen.syntaxError() + " -- a fault in putting them back, "
+                            + "not in the code -- so nothing was created.");
                 }
                 case PASSED -> {
                     log.info("{} generated {} chars of skill code for '{}' ({} tokens{})",
                             local ? "Local LLM (fallback)" : "Cloud LLM", code.length(), name, reply.tokens(),
                             reply.parts().size() > 1 ? ", in " + reply.parts().size() + " parts" : "");
                     Map<String, Object> enhanced = new HashMap<>(originalParams);
-                    enhanced.put("code", code);
-                    // The model may also name better requirements
-                    String cloudRequirements = extractRequirements(text);
+                    enhanced.put("code", chosen.restored());
+                    // The model may also name better requirements: text, its values put back as text.
+                    String cloudRequirements = extractRequirements(chosen.asWritten());
                     if (cloudRequirements != null) {
-                        enhanced.put("requirements", cloudRequirements);
+                        enhanced.put("requirements", writing.restored(cloudRequirements));
                     }
-                    return new Codegen(enhanced, null);
+                    return new Codegen(enhanced, null, code);
                 }
                 case SYNTAX_ERROR, DROPS_CODE -> { }
             }
@@ -2881,10 +2896,13 @@ public class AgentLoop {
             boolean newError = seenErrors.add(errorKey(syntaxError, code));
             if (!newCode || !newError) {
                 log.error("Skill '{}': attempt {} brought back {} already seen, so the repairs are not getting past "
-                        + "it: {}", name, attempt + 1, !newCode ? "code" : "an error", syntaxError);
-                return Codegen.failed("Python syntax error:\n" + syntaxError);
+                        + "it: {}", name, attempt + 1, !newCode ? "code" : "an error", oneLine(syntaxError));
+                return Codegen.failed(chosen.outcome() == Checked.Outcome.DROPS_CODE
+                        ? "the code for '" + name + "' kept coming back in pieces: " + syntaxError
+                                + ", so nothing was created."
+                        : "Python syntax error: " + oneLine(syntaxError));
             }
-            log.warn("Skill '{}' syntax error (repair {}): {}", name, attempt + 1, syntaxError);
+            log.warn("Skill '{}' syntax error (repair {}): {}", name, attempt + 1, oneLine(syntaxError));
             prompt = repairRequest(spec, reply.parts(), chosen, context);
             carried = reply.text().length();
             // The attempts before this one never go back: the gateway forgets what it handed out of them.
@@ -2902,13 +2920,16 @@ public class AgentLoop {
      * @param syntaxError the syntax check's error, for {@link Outcome#SYNTAX_ERROR} and
      *                  {@link Outcome#CHECK_FAILED}; null otherwise
      */
-    private record Checked(String asWritten, String text, String code, Outcome outcome, String syntaxError) {
+    private record Checked(String asWritten, String code, String restored, Outcome outcome, String syntaxError) {
         /**
          * DROPS_CODE: the code ends at a seam while more code follows it in the reply
          * ({@link ReplySeam#dropsCode}) -- a reading that would make the skill of the code before
-         * the seam only.
+         * the seam only. RESTORE_REFUSED: a value's placeholder stands where, put back, the value
+         * would be code ({@link CodeValues}). RESTORE_BROKE: the code compiles as written and not
+         * with the values put back -- the restore's fault, never the code's.
          */
-        enum Outcome { NO_CODE, NO_RUN, REMOVED_SECRET, CHECK_FAILED, SYNTAX_ERROR, DROPS_CODE, PASSED }
+        enum Outcome { NO_CODE, NO_RUN, REMOVED_SECRET, CHECK_FAILED, SYNTAX_ERROR, DROPS_CODE, RESTORE_REFUSED,
+            RESTORE_BROKE, PASSED }
 
         /** Whether another reading of the seams could mend it: code missing, in pieces, or not compiling. */
         boolean mendable() {
@@ -2917,26 +2938,69 @@ public class AgentLoop {
         }
     }
 
+    /**
+     * One reading of a reply, checked as the skill would be made from it. Its code is checked as the
+     * model wrote it, placeholders and all -- Python's words for an error in it then hold nothing of
+     * the user's, and are what the repairs are told and compare. Only code that passes has the
+     * user's values put back, by Python's own tokenizer ({@link CodeValues}): each into the literal it
+     * stands in, escaped for it; and that is checked again, so code that compiles as written and not
+     * restored is the restore's fault, said so, and never sent to a repair.
+     *
+     * @param asWritten the reading: the reply as the model wrote it, its parts joined
+     */
     private Checked checked(CodeWriting writing, ReplySeam.Reading reading) {
         String asWritten = reading.text();
         if (reading.dropsCode()) {
             String pieces = extractPythonCode(asWritten);
-            return new Checked(asWritten, null, pieces, Checked.Outcome.DROPS_CODE, "line "
+            return new Checked(asWritten, pieces, null, Checked.Outcome.DROPS_CODE, "line "
                     + pieces.split("\n", -1).length + ": " + DROPS_CODE);
         }
-        String text = writing.restored(asWritten);
-        String code = extractPythonCode(text);
-        if (code == null) return new Checked(asWritten, text, null, Checked.Outcome.NO_CODE, null);
-        if (!code.contains("def run(")) return new Checked(asWritten, text, code, Checked.Outcome.NO_RUN, null);
+        String code = extractPythonCode(asWritten);
+        if (code == null) return new Checked(asWritten, null, null, Checked.Outcome.NO_CODE, null);
+        if (!code.contains("def run(")) return new Checked(asWritten, code, null, Checked.Outcome.NO_RUN, null);
         if (Redactor.holdsRemovedSecret(code)) {
-            return new Checked(asWritten, text, code, Checked.Outcome.REMOVED_SECRET, null);
+            return new Checked(asWritten, code, null, Checked.Outcome.REMOVED_SECRET, null);
         }
         String syntaxError = skillManager.checkPythonSyntax(code);
-        if (syntaxError != null && syntaxError.startsWith(SkillManager.CHECK_FAILED)) {
-            return new Checked(asWritten, text, code, Checked.Outcome.CHECK_FAILED, syntaxError);
+        if (syntaxError != null) {
+            return new Checked(asWritten, code, null, syntaxError.startsWith(SkillManager.CHECK_FAILED)
+                    ? Checked.Outcome.CHECK_FAILED : Checked.Outcome.SYNTAX_ERROR, syntaxError);
         }
-        return new Checked(asWritten, text, code,
-                syntaxError == null ? Checked.Outcome.PASSED : Checked.Outcome.SYNTAX_ERROR, syntaxError);
+        CodeValues.Restored restored = writing.restoredCode(code);
+        if (restored.failed() != null) {
+            return new Checked(asWritten, code, null, Checked.Outcome.CHECK_FAILED,
+                    SkillManager.CHECK_FAILED + "the values could not be put back: " + restored.failed());
+        }
+        if (restored.refused() != null) {
+            return new Checked(asWritten, code, null, Checked.Outcome.RESTORE_REFUSED, restored.why());
+        }
+        String again = skillManager.checkPythonSyntax(restored.code());
+        if (again != null) {
+            if (again.startsWith(SkillManager.CHECK_FAILED)) {
+                return new Checked(asWritten, code, null, Checked.Outcome.CHECK_FAILED, oneLine(again));
+            }
+            // Its words would quote the restored line: only where it is.
+            Integer line = errorLine(again);
+            return new Checked(asWritten, code, null, Checked.Outcome.RESTORE_BROKE,
+                    line == null ? "" : " (at line " + line + ")");
+        }
+        return new Checked(asWritten, code, restored.code(), Checked.Outcome.PASSED, null);
+    }
+
+    /**
+     * A syntax check's error as one line, "line N: Python's last line" -- what the code generation
+     * ends with and the log keeps: never the code Python quotes above it. A check that could not
+     * run keeps its own words' last line.
+     */
+    static String oneLine(String error) {
+        String[] lines = error.strip().split("\n");
+        String last = lines[lines.length - 1].strip().replaceFirst("^Sorry: ", "")
+                .replaceFirst("\\s*\\(skill\\.py, line \\d+\\)$", "").replaceFirst("^line \\d+:\\s*", "");
+        if (error.startsWith(SkillManager.CHECK_FAILED)) {
+            return last.startsWith(SkillManager.CHECK_FAILED) ? last : SkillManager.CHECK_FAILED + last;
+        }
+        Integer line = errorLine(error);
+        return line == null ? last : "line " + line + ": " + last;
     }
 
     /** What a reading whose code ends at a seam while more follows is told as: its "error". */
@@ -2983,15 +3047,10 @@ public class AgentLoop {
                 .replaceFirst("^Sorry: ", "")
                 .replaceFirst("\\s*\\(skill\\.py, line \\d+\\)$", "")
                 .replaceFirst("^line \\d+:\\s*", "");
-        String asWrittenCode = extractPythonCode(failed.asWritten());
         String quoted = null;
-        if (line != null && asWrittenCode != null) {
-            String[] written = asWrittenCode.split("\n", -1);
-            String[] restored = failed.code().split("\n", -1);
-            if (written.length == restored.length && line >= 1 && line <= written.length
-                    && sentAsItIs(written[line - 1], context)) {
-                quoted = written[line - 1];
-            }
+        if (line != null) {
+            String[] written = failed.code().split("\n", -1);
+            if (line >= 1 && line <= written.length && sentAsItIs(written[line - 1], context)) quoted = written[line - 1];
         }
         var turn = new StringBuilder("The code failed Python's syntax check")
                 .append(line == null ? ": " : " at line " + line + ": ").append(kind).append('.');
@@ -3092,6 +3151,14 @@ public class AgentLoop {
          */
         String restored(String asWritten) {
             return provider.restored(asWritten, config);
+        }
+
+        /**
+         * {@code code} -- as the model wrote it, compiling -- with the user's values put back where
+         * Python reads them as text ({@link CodeValues}, {@link SkillManager#restoreValues}).
+         */
+        CodeValues.Restored restoredCode(String code) {
+            return skillManager.restoreValues(code, CodeValues.valuesIn(code, this::restored));
         }
 
         /**

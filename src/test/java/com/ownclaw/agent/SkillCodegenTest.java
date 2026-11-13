@@ -100,8 +100,8 @@ class SkillCodegenTest {
 
         var calls = rig.cloud.calls("codegen");
         assertEquals(5, calls.size(), "the first reply, and repairs until one brought back code already tried");
-        assertTrue(out.error().startsWith("ERROR: Python syntax error:\n  File \"skill.py\", line 5\n    def broken3(:"),
-                out.error());
+        assertEquals("ERROR: Python syntax error: line 5: SyntaxError: invalid syntax", out.error(),
+                "Python's line and words for it, never the code it quotes");
         List<LlmMessage> theSpec = calls.get(0).messages();
         for (int k = 1; k < 5; k++) {
             List<LlmMessage> sent = calls.get(k).messages();
@@ -135,7 +135,7 @@ class SkillCodegenTest {
         for (int i = 0; i < 6; i++) again.cloud.codegen.add(finished(module("def broken(:\n    pass  # " + i)));
         AgentLoop.Codegen stuck = again.loop.generateSkillCode(spec(), task());
         assertEquals(2, again.cloud.calls("codegen").size(), "the same error after a repair: it is not getting past it");
-        assertEquals("ERROR: Python syntax error:\nline 5: invalid syntax", stuck.error());
+        assertEquals("ERROR: Python syntax error: line 5: invalid syntax", stuck.error());
         // Mutation: stop after three repairs, as before -> the working fifth repair is never asked for.
     }
 
@@ -149,7 +149,7 @@ class SkillCodegenTest {
         for (int i = 0; i < 4; i++) rig.cloud.codegen.add(finished(module("# round " + i + "\n\ndef broken(:\n    pass")));
         AgentLoop.Codegen out = rig.loop.generateSkillCode(spec(), task());
         assertEquals(2, rig.cloud.calls("codegen").size(), "a comment and a line shift are no progress");
-        assertTrue(out.error().contains("def broken(:"), out.error());
+        assertEquals("ERROR: Python syntax error: line 6: SyntaxError: invalid syntax", out.error());
 
         var failing = new LoopRig(tmp.resolve("failing"), List.of());
         failing.skills.syntax = code -> SkillManager.CHECK_FAILED + "exit 127: python3: not found";

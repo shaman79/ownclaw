@@ -132,8 +132,29 @@ final class LoopRig {
         volatile Function<String, String> files = name -> "ERROR: '" + name + "' is not a skill or does not exist.";
         volatile Function<String, String> syntax = code -> null;
         volatile Function<Map<String, Object>, String> create = p -> "Skill '" + p.get("name") + "' created.";
+        /** Where the real Python that puts values back into code is set up, on first use. */
+        private final Path pythonDir;
+        private volatile SkillManager python;
 
-        Skills(SkillCuratorService curator, ToolRegistry registry) { super(null, registry, null, null, null, curator, null); }
+        Skills(SkillCuratorService curator, ToolRegistry registry, Path pythonDir) {
+            super(null, registry, null, null, null, curator, null);
+            this.pythonDir = pythonDir;
+        }
+
+        /** A test's own putting back of the values, instead of the real one. */
+        volatile java.util.function.BiFunction<String, Map<String, String>, CodeValues.Restored> restore = null;
+
+        /** The values put back by the real script on the system's Python, as for real. */
+        @Override CodeValues.Restored restoreValues(String code, Map<String, String> values) {
+            if (restore != null) return restore.apply(code, values);
+            if (values.isEmpty()) return CodeValues.Restored.unchanged(code);
+            try {
+                if (python == null) python = SyntaxCheckTest.manager(pythonDir);
+            } catch (Exception e) {
+                throw new IllegalStateException(e);
+            }
+            return python.restoreValues(code, values);
+        }
 
         @Override public String readSkillCode(String name) { return source.apply(name); }
         @Override public String readSkill(String name) { return files.apply(name); }
@@ -198,7 +219,7 @@ final class LoopRig {
         vault.init();
         var curator = new SkillCuratorService(jdbc, registry,
                 new DynamicSkillRegistry(null, null, null, null, null, null, null));
-        skills = new Skills(curator, registry);
+        skills = new Skills(curator, registry, dir.resolve("restore-python"));
         loop = new AgentLoop(engine.make(registry, config, router),
                 new CriticAgent(registry), registry, emitter, config, router, new SqliteAgentMemory(jdbc),
                 curator, skills, debug,

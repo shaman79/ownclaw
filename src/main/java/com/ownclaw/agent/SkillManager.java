@@ -636,6 +636,33 @@ public class SkillManager {
         }
     }
 
+    /**
+     * {@code code} -- as the model wrote it, compiling -- with {@code values} put back where its
+     * placeholders stand, by Python's own tokenizer ({@link CodeValues}): run as the syntax check
+     * runs, in the sandbox on the system's Python, the values on its standard input and never on a
+     * command line or in a file. Nothing to put back, nothing is run. What it could not do is said
+     * by why, never with what Python wrote: that could quote the values.
+     */
+    CodeValues.Restored restoreValues(String code, Map<String, String> values) {
+        if (values.isEmpty()) return CodeValues.Restored.unchanged(code);
+        Path tempDir = null;
+        try {
+            tempDir = Files.createTempDirectory("ownclaw_restore_");
+            Path script = tempDir.resolve("restore_values.py");
+            Files.writeString(script, CodeValues.SCRIPT, StandardCharsets.UTF_8);
+            SandboxResult result = sandbox.execute(pythonEnv.getSystemPython(), script, tempDir,
+                    CodeValues.input(code, values), Map.of(), 60, null, List.of());
+            if (!result.isSuccess()) {
+                return CodeValues.Restored.couldNotRun(result.timedOut() ? "it timed out" : "exit " + result.exitCode());
+            }
+            return CodeValues.Restored.of(result.stdout());
+        } catch (Exception e) {
+            return CodeValues.Restored.couldNotRun(e.getClass().getSimpleName());
+        } finally {
+            if (tempDir != null) SkillJail.deleteTree(tempDir);
+        }
+    }
+
     private String buildSkillYaml(String name, String author, String description, Map<String, Object> parametersDef,
                                   boolean requiresNetwork, boolean hasSideEffects, int timeout,
                                   List<String> credentials, String systemPackages, String containerImage)

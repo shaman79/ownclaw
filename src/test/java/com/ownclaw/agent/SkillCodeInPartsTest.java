@@ -755,7 +755,7 @@ class SkillCodeInPartsTest {
             return cutOff("```python\nimport json\n\nHOME = '" + ph + "'\nDEFAULTS = {'ssid': 'OpenWrt'}\n\n"
                     + "def run(params):\n    x = (").answer(c);
         });
-        rig.cloud.codegen.add(cutOff("1 +\n        "));
+        rig.cloud.codegen.add(cutOff("\n    x = (1 +\n        "));
         rig.cloud.codegen.add(ends("\n        2)\n    return {'output': json.dumps([HOME, x]), 'success': True}\n```\n"));
 
         assertNull(rig.loop.generateSkillCode(backupSpec(), task()).error());
