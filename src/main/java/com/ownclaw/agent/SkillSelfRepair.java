@@ -117,6 +117,7 @@ public class SkillSelfRepair {
     /** Held to decide and record a repair, so two tasks ending at once cannot start two of one skill. */
     private final Object lock = new Object();
 
+    @org.springframework.beans.factory.annotation.Autowired
     public SkillSelfRepair(JdbcTemplate jdbc, OwnClawConfig config, SkillManager skills, ToolRegistry tools,
                            @Lazy TaskQueue queue, ResultDelivery delivery, ConversationService conversations,
                            EventLogService events) {
