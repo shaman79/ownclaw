@@ -464,6 +464,13 @@ public final class CloudImageCopy {
         var stopper = new Stopper(check);
         reader.addIIOReadProgressListener(stopper);
         reader.addIIOReadUpdateListener(stopper);
+        // What the reader finds the walk could not: bytes between a JPEG scan's last block and the
+        // marker after it, which libjpeg skips, saying so.
+        var found = new LinkedHashSet<String>();
+        if (header.metadata() != null) found.addAll(java.util.Arrays.asList(header.metadata().split(", ")));
+        reader.addIIOReadWarningListener((source, warning) -> {
+            if (warning != null && warning.contains("extraneous bytes")) found.add(HIDDEN);
+        });
         BufferedImage image;
         int width, height;
         Size target;
@@ -521,7 +528,7 @@ public final class CloudImageCopy {
             check.inTime();
             if (base64(png.length) <= MAX_BASE64) {
                 return Made.of(new Copy("image/png", target.width(), target.height(), shownWidth, shownHeight, png,
-                        header.metadata()));
+                        words(found)));
             }
         }
         BufferedImage flat = scaled.getType() == BufferedImage.TYPE_INT_ARGB ? flatten(scaled) : scaled;
@@ -530,7 +537,7 @@ public final class CloudImageCopy {
             check.inTime();
             if (base64(jpeg.length) <= MAX_BASE64) {
                 return Made.of(new Copy("image/jpeg", target.width(), target.height(), shownWidth, shownHeight, jpeg,
-                        header.metadata()));
+                        words(found)));
             }
         }
         return Made.stays("even as a JPEG its copy is larger than the cloud model takes for one image");
@@ -913,6 +920,8 @@ public final class CloudImageCopy {
                 }
             } else if (marker == 0xDD || marker == 0xCC) {
                 if (marker == 0xDD && length != 2) beside.add(IN_A_SETTING);
+                // Arithmetic conditioning: no part of a Huffman-coded frame, the only kind read here.
+                if (marker == 0xCC) beside.add(HIDDEN);
                 in.skip(length);
             } else {
                 return Header.refused("it is not a baseline JPEG, the kind browsers paste");
@@ -978,9 +987,12 @@ public final class CloudImageCopy {
                 if (images == 1 && tooManyPixels(width, height)) return Header.refused(TOO_MANY_PIXELS);
                 int local = in.u8();
                 if ((local & 0x80) != 0) in.skip(3L << ((local & 7) + 1));
-                in.skip(1);
-                // The picture's own data, in sub-blocks of 255 but its last; many short ones are made to be slow.
-                if (!in.skipSubBlocks(parts, true)) return Header.refused(TOO_MANY_PARTS);
+                // The picture's own data, in sub-blocks of 255 but its last; many short ones are made to be
+                // slow. Its codes are followed to their end, as the reader follows them: what comes after is
+                // no part of the picture.
+                var codes = new LzwEnd(in.u8());
+                if (!in.skipSubBlocks(parts, true, codes)) return Header.refused(TOO_MANY_PARTS);
+                if (codes.after) beside.add(HIDDEN);
             } else if (b == 0x21) {
                 int label = in.u8();
                 parts[0]++;
@@ -1004,6 +1016,65 @@ public final class CloudImageCopy {
         }
         if (images > 1) beside.add("more frames");
         return new Header(Format.GIF, 4, 1, 1, words(beside), null, null);
+    }
+
+    /**
+     * Where a GIF frame's LZW codes end, followed as the JDK's reader follows them -- the clear code
+     * resetting the table, each code after the first adding an entry, the codes a bit wider each time
+     * the table fills their width, to 12 bits -- up to the end-of-information code, where the reader
+     * stops. Whole bytes after that code's last one, in its sub-block or another, are no part of the
+     * picture ({@link #after}).
+     */
+    static final class LzwEnd {
+        private final int clear;
+        private final int first;
+        private int size;
+        private int next;
+        private boolean entry;
+        private long bits;
+        private int held;
+        private boolean ended;
+        /** Whether a whole byte came after the end-of-information code. */
+        boolean after;
+
+        LzwEnd(int minimum) {
+            int min = Math.max(1, Math.min(minimum, 11));
+            clear = 1 << min;
+            first = min + 1;
+            restart();
+        }
+
+        private void restart() {
+            size = first;
+            next = clear + 2;
+            entry = false;
+        }
+
+        void feed(byte[] data, int at, int length) {
+            if (ended) {
+                if (length > 0) after = true;
+                return;
+            }
+            for (int i = 0; i < length; i++) {
+                bits |= (long) (data[at + i] & 0xFF) << held;
+                held += 8;
+                while (held >= size) {
+                    int code = (int) (bits & ((1 << size) - 1));
+                    bits >>>= size;
+                    held -= size;
+                    if (code == clear) {
+                        restart();
+                    } else if (code == clear + 1) {
+                        ended = true;
+                        if (i + 1 < length) after = true;
+                        return;
+                    } else {
+                        if (entry && next < 4096 && ++next == 1 << size && next < 4096) size++;
+                        entry = true;
+                    }
+                }
+            }
+        }
     }
 
     /**
@@ -1162,8 +1233,17 @@ public final class CloudImageCopy {
          * once they are more than {@link #MAX_PARTS}.
          */
         boolean skipSubBlocks(int[] parts, boolean picture) throws IOException {
+            return skipSubBlocks(parts, picture, null);
+        }
+
+        /** {@link #skipSubBlocks(int[], boolean)}, the blocks' bytes fed to {@code codes} as they pass. */
+        boolean skipSubBlocks(int[] parts, boolean picture, LzwEnd codes) throws IOException {
             int n = u8();
             while (n != 0) {
+                if (codes != null) {
+                    if (n > remaining()) throw new EOFException();
+                    codes.feed(data, at, n);
+                }
                 skip(n);
                 int next = u8();
                 if (!picture || n < 255 && next != 0) parts[0]++;

@@ -231,6 +231,63 @@ class CloudImageCopyTest {
         // count -> the unused tables do; any NETSCAPE2.0 block taken -> the loop block does.
     }
 
+    @Test
+    @DisplayName("data where the reader stops reading is said: a JPEG's arithmetic conditioning, bytes after a scan's last block, sub-blocks after a GIF frame's end code")
+    void dataWhereTheReaderStops(@TempDir Path dir) throws Exception {
+        byte[] payload = "PAYLOAD-0123456789 ".repeat(100).getBytes(StandardCharsets.ISO_8859_1);
+        byte[] jpeg = TestImages.encoded(TestImages.screenshot(320, 200), "jpeg");
+        // A DAC segment of conditioning pairs: an AC table's index carries 4 bits, its value 5 more.
+        var pairs = new java.io.ByteArrayOutputStream();
+        for (byte x : payload) {
+            pairs.write(16 + ((x >> 4) & 15));
+            pairs.write(1 + (x & 15));
+        }
+        var dac = new java.io.ByteArrayOutputStream();
+        byte[] body = pairs.toByteArray();
+        dac.writeBytes(new byte[]{(byte) 0xFF, (byte) 0xCC, (byte) ((body.length + 2) >> 8), (byte) (body.length + 2)});
+        dac.writeBytes(body);
+        int sos = 2;
+        while ((jpeg[sos + 1] & 0xFF) != 0xDA) sos += 2 + ((jpeg[sos + 2] & 0xFF) << 8 | (jpeg[sos + 3] & 0xFF));
+        var hidden = new java.util.LinkedHashMap<String, byte[]>();
+        hidden.put("arithmetic conditioning in a Huffman frame", splice(jpeg, sos, dac.toByteArray()));
+        hidden.put("bytes after the scan's last block", splice(jpeg, jpeg.length - 2, payload));
+        byte[] gif = TestImages.encoded(TestImages.screenshot(64, 64), "gif");
+        var blocks = new java.io.ByteArrayOutputStream();
+        for (int i = 0; i < payload.length; i += 255) {
+            int n = Math.min(255, payload.length - i);
+            blocks.write(n);
+            blocks.write(payload, i, n);
+        }
+        assertEquals(0, gif[gif.length - 2], "the frame's terminator");
+        hidden.put("sub-blocks after the frame's end code", splice(gif, gif.length - 2, blocks.toByteArray()));
+        for (var e : hidden.entrySet()) {
+            var made = CloudImageCopy.of(file(dir, "w" + e.getKey().hashCode(), e.getValue()));
+            assertNotNull(made.copy(), e.getKey() + ": " + made.privateBecause());
+            assertNotNull(made.copy().metadata(), e.getKey() + " is said");
+        }
+        // Where encoders end their data, nothing is said: GIFs of every size the code widths step at,
+        // and JPEGs with restart markers.
+        for (int side : new int[]{1, 2, 3, 7, 16, 63, 64, 65, 200, 511, 513, 1000}) {
+            for (var image : List.of(TestImages.screenshot(side, side), TestImages.noise(side, Math.max(1, side / 2), side))) {
+                byte[] g = TestImages.encoded(image, "gif");
+                var made = CloudImageCopy.of(file(dir, "g" + side + ".gif", g));
+                assertNotNull(made.copy(), side + ": " + made.privateBecause());
+                assertNull(made.copy().metadata(), "a GIF of " + side + " px ends where its codes do");
+            }
+        }
+        assertNull(CloudImageCopy.of(file(dir, "noise.jpg", TestImages.encoded(TestImages.noise(500, 300, 7), "jpeg")))
+                .copy().metadata());
+        // Mutation: take a DAC as a table -> it passes; no warning heard -> the scan's tail does; codes
+        // not followed -> the GIF's do, or a real GIF's end is taken for more.
+    }
+
+    static byte[] splice(byte[] b, int at, byte[] in) {
+        byte[] o = Arrays.copyOf(b, b.length + in.length);
+        System.arraycopy(in, 0, o, at, in.length);
+        System.arraycopy(b, at, o, at + in.length, b.length - at);
+        return o;
+    }
+
     /** {@code gif} with a NETSCAPE2.0 extension of one sub-block of {@code block} after its screen and palette. */
     static byte[] withLoop(byte[] gif, byte[] block) {
         int end = 13 + ((gif[10] & 0x80) != 0 ? 3 * (1 << ((gif[10] & 7) + 1)) : 0);
