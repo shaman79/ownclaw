@@ -957,6 +957,22 @@ class SkillSelfRepairTest {
         assertEquals(toldBefore, fix.told().size());
     }
 
+    @Test
+    @DisplayName("R4-5: a Stop marks only a repair it covers -- compared in milliseconds, as the queue and the loop compare it")
+    void anUnrelatedStopMarksNothing(@TempDir Path tmp) throws Exception {
+        fix = new Fix(tmp);
+        long stopAt = System.currentTimeMillis();
+        fix.rig.cancellation.requestAll("u1", "you pressed Stop");
+        fix.menuRun(true);
+        // Queued a millisecond after that Stop, in the same second -- as a quick run gets it.
+        fix.rig.jdbc.update("UPDATE skill_repairs SET queued_ms = ?, started_at = ? WHERE id = ?", stopAt + 1,
+                java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss").withZone(java.time.ZoneOffset.UTC)
+                        .format(java.time.Instant.ofEpochMilli(stopAt)), fix.lastId());
+        assertNull(fix.repairRow(0).get("stopped_by"));
+        fix.rig.cancellation.requestChat("u1", "another-chat", "you pressed Stop");   // another chat's Stop
+        assertNull(fix.repairRow(0).get("stopped_by"), "marked stopped by a Stop that did not cover it");
+    }
+
     static List<String> states(Fix fix, String taskId) {
         return fix.rig.jdbc.queryForList("SELECT json_extract(details, '$.state') FROM events WHERE event_type = "
                 + "'self_repair' AND task_id = ? ORDER BY id", String.class, taskId);

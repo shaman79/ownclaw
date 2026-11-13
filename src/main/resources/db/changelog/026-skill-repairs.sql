@@ -25,6 +25,7 @@
 -- completed: the repair ran to its answer -- only such a repair is a verdict. After one that ended
 -- 'fixed' a later problem starts another; after any other verdict it is left to the owner until a
 -- clean run (cleared_at) or a change of the skill.
+-- queued_ms: when it was queued (or queued again), in milliseconds -- what a Stop is compared with.
 -- stopped_by: the owner stopped it (who and how, as the Stop said), kept as the Stop is pressed: one whose
 -- ending never came, OwnClaw stopping first, is not started again.
 -- local_only: the repair ran on the local model only (the work it repairs did); its report is never
@@ -58,6 +59,7 @@ CREATE TABLE IF NOT EXISTS skill_repairs (
     local_only       INTEGER NOT NULL DEFAULT 0,
     completed        INTEGER NOT NULL DEFAULT 0,
     stopped_by       TEXT,
+    queued_ms        INTEGER NOT NULL DEFAULT 0,
     cleared_at       TEXT,
     resumed_at       TEXT,
     code_at_resume   TEXT,

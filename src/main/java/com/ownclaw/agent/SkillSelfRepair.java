@@ -270,8 +270,8 @@ public class SkillSelfRepair {
                     + ", so it is not started again. The next time the problem shows, a repair starts again.", null);
             return;
         }
-        jdbc.update("UPDATE skill_repairs SET repair_task_id = ?, resumed_at = datetime('now'), code_at_resume = ? "
-                + "WHERE id = ?", read.taskId(), row.get("code_after"), id);
+        jdbc.update("UPDATE skill_repairs SET repair_task_id = ?, resumed_at = datetime('now'), code_at_resume = ?, "
+                + "queued_ms = ? WHERE id = ?", read.taskId(), row.get("code_after"), System.currentTimeMillis(), id);
         event(userId, cutOff, INTERRUPTED, skill, str(row, "problem"), read.taskId(), trigger);
         event(userId, trigger, "resumed", skill, str(row, "problem"), read.taskId(), trigger);
         event(userId, read.taskId(), "repairing", skill, str(row, "problem"), read.taskId(), trigger);
@@ -312,11 +312,11 @@ public class SkillSelfRepair {
 
     private void stopsRequested(com.ownclaw.core.TaskCancellationService cancellation) {
         try {
-            for (var row : jdbc.queryForList("SELECT id, user_id, repair_task_id, started_at, resumed_at FROM "
+            for (var row : jdbc.queryForList("SELECT id, user_id, repair_task_id, queued_ms FROM "
                     + "skill_repairs WHERE outcome = ? AND stopped_by IS NULL", RUNNING)) {
-                String began = str(row, row.get("resumed_at") != null ? "resumed_at" : "started_at");
-                long startedMs = java.time.LocalDateTime.parse(began.replace(' ', 'T'))
-                        .toInstant(java.time.ZoneOffset.UTC).toEpochMilli();
+                // When it was queued, in milliseconds, as the queue and the loop compare a Stop: a Stop
+                // that came before it does not cover it (started_at's second would).
+                long startedMs = ((Number) row.get("queued_ms")).longValue();
                 String why = cancellation.why(str(row, "user_id"), str(row, "repair_task_id"), null, startedMs);
                 if (why != null) {
                     jdbc.update("UPDATE skill_repairs SET stopped_by = ? WHERE id = ? AND outcome = ?", why,
@@ -628,11 +628,11 @@ public class SkillSelfRepair {
         long id = insertReturningId("""
                 INSERT INTO skill_repairs (user_id, skill_name, trigger_task_id, trigger_message, trigger_at,
                     repair_task_id, problem, goal, evidence, declared, side_effects, code_before, outcome,
-                    previous_id, local_only)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    previous_id, local_only, queued_ms)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, ctx.userId(), skill, ctx.taskId(), ctx.originalMessage(), startedAt(ctx), taskId, problem, goal,
                 json(evidence), json(declared), declared.sideEffectsText(), code, RUNNING,
-                previous == null ? null : id(previous), localOnly ? 1 : 0);
+                previous == null ? null : id(previous), localOnly ? 1 : 0, System.currentTimeMillis());
         var job = new Job(id, skill, taskId, declared, localOnly, evidence);
         log.info("Task {}: '{}' did not do its whole job -- self-repair {} started as task {}.", ctx.taskId(), skill,
                 id, taskId);
