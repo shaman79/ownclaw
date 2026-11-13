@@ -415,6 +415,17 @@ public class AgentContext {
         imagesMeasured = true;
     }
 
+    /** Whether the task did nothing worth remembering -- refused before any step -- so it is no episode. */
+    private volatile boolean episodeForgotten;
+
+    public void forgetEpisode() {
+        episodeForgotten = true;
+    }
+
+    public boolean episodeForgotten() {
+        return episodeForgotten;
+    }
+
     /**
      * The cloud model's context window, as {@code provider} knows it -- or as the Models API tells it,
      * asked at most once in this task: a lookup that failed is not made again on every step, each

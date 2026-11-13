@@ -483,7 +483,7 @@ public class AgentLoop {
                 cancellationService.forget(taskId);
             }
         }
-        return end(context, result, true);
+        return end(context, result, !context.episodeForgotten());
     }
 
     /**
@@ -754,6 +754,22 @@ public class AgentLoop {
      * @param shown  whether the configured cloud model is shown images ({@code CloudGateway#showsImages})
      * @param window the cloud model's context window, as its provider tells it, or null
      */
+    /**
+     * Before the task's first request to the cloud: a message whose own images are more than one
+     * request carries is refused, saying how to send them ({@link #imagesPastOneRequest}). In the
+     * loop, where a Stop and the stall watchdog reach the window's lookup -- before it, a Stop waited
+     * for the Models API -- and before the first step's skill, whose code the cloud writes: so
+     * "nothing was sent" is true. A refused message is no episode: nothing was done.
+     */
+    private AgentResult measureImages(AgentContext context, LlmProvider provider) {
+        if (provider == null || llmRouter.isLocal(provider) || context.imagesMeasured()) return null;
+        context.measureImages();
+        AgentResult tooMany = imagesPastOneRequest(context, com.ownclaw.llm.CloudGateway.showsImages(config),
+                () -> context.cloudWindow(provider));
+        if (tooMany != null) context.forgetEpisode();
+        return tooMany;
+    }
+
     static AgentResult imagesPastOneRequest(AgentContext ctx, boolean shown, java.util.function.Supplier<Integer> window) {
         var pasted = ctx.pasted();
         if (pasted.isEmpty() || !shown || ctx.options().localOnly()) return null;
@@ -928,6 +944,10 @@ public class AgentLoop {
         var nothing = new RunOfNothing(); // steps in a row that ran nothing
         int unansweredQuestions = 0;      // ask_user calls on a task with nobody to answer them
 
+        // Before anything is sent -- the first step's skill too, whose code the cloud writes.
+        AgentResult tooMany = measureImages(context, llmRouter.selectProvider(context));
+        if (tooMany != null) return tooMany;
+
         for (int step = 0; ; step++) {
             // Stopped from outside -- the owner's Stop or /cancel, the ops API, or the stall
             // watchdog (cancelStalledTasks) -- between steps. Inside one, a model call hears it on
@@ -1002,16 +1022,9 @@ public class AgentLoop {
             // === THINK ===
             LlmProvider provider = llmRouter.selectProvider(context);
             boolean local = llmRouter.isLocal(provider);
-            // Before the first request to the cloud: a message whose own images are more than one
-            // request carries is refused, saying how to send them. Here, in the loop, where a Stop
-            // and the stall watchdog reach the window's lookup -- before it, a Stop waited for the
-            // Models API.
-            if (!local && !context.imagesMeasured()) {
-                context.measureImages();
-                AgentResult tooMany = imagesPastOneRequest(context, com.ownclaw.llm.CloudGateway.showsImages(config),
-                        () -> context.cloudWindow(provider));
-                if (tooMany != null) return tooMany;
-            }
+            // Before this step's first request to the cloud, should the task have started on the local model.
+            AgentResult pastOne = measureImages(context, provider);
+            if (pastOne != null) return pastOne;
             readMessages(context, step + 1, local);
             imagesNotSeen(context, local, provider);
             String providerLabel = local ? "local" : provider.name();

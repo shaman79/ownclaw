@@ -457,6 +457,30 @@ class PastedImageTaskTest {
     }
 
     @Test
+    @DisplayName("a message of more images than one request carries is refused before the first step's skill is written, and is no episode: nothing was done")
+    void refusedBeforeAnythingAndForgotten(@TempDir Path tmp) throws Exception {
+        var rig = new LoopRig(tmp, List.of(LocalModeTest.NOOP));
+        rig.cloud.codegen.add(respond("never asked"));
+        rig.cloud.think.add(respond("never asked"));
+        var ctx = new AgentContext("u1", "t-many", "make a tool that reads these");
+        for (int i = 0; i < 101; i++) {
+            ctx.addPastedImage(new com.ownclaw.conversation.FileStorageService.PastedImage("f" + i, "image/png", "image/png",
+                    40, 30, 2_000, 40, 30), List.of("pasted image"));
+        }
+        // What the capability resolver hands the first step: a skill whose code the cloud writes.
+        ctx.setCapabilityHint(new CapabilityResolver.CapabilityHint("ocr", "read_images", "Read text from images",
+                List.of(), List.of(), "{}", 60));
+        AgentResult r = rig.loop.run(ctx);
+        assertEquals(AgentResult.TerminationReason.ERROR, r.terminationReason());
+        assertTrue(r.response().contains("this message carries 101 pasted images"), r.response());
+        assertTrue(rig.cloud.calls.isEmpty(), "nothing was sent -- no code was asked for: " + rig.cloud.calls.size());
+        assertEquals(0, rig.jdbc.queryForObject("SELECT COUNT(*) FROM agent_memory WHERE task_id = 't-many'", Integer.class),
+                "no episode: a later task recalls no refused message");
+        // Mutation: measure only before the think step -> the skill's code is asked for first; end it
+        // remembered -> its episode is stored.
+    }
+
+    @Test
     @DisplayName("a message pasted with eighteen images: the next turn still finds the last turn's cached chat, through the free fourth mark")
     void eighteenImagesKeepTheCache(@TempDir Path tmp) throws Exception {
         var rig = new LoopRig(tmp, List.of(LocalModeTest.NOOP));
