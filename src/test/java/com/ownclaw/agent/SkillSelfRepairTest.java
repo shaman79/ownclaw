@@ -910,6 +910,22 @@ class SkillSelfRepairTest {
         assertEquals("you pressed Stop on everything", fix.repairRow(1).get("stopped_by"));
     }
 
+    @Test
+    @DisplayName("R3-3: a repair dropped from the queue by the owner's Stop is stopped, OwnClaw stopping or not")
+    void droppedByAStopIsStopped(@TempDir Path tmp) throws Exception {
+        fix = new Fix(tmp);
+        fix.menuRun(true);                                        // waits in the queue
+        fix.rig.cancellation.requestAll("u1", "you pressed Stop on everything");
+        fix.repair.closing();                                     // and OwnClaw starts stopping
+        fix.rig.queue.start();
+        // The queue looks at what waits when something is added: another account's task, and the
+        // repair the Stop covers is dropped.
+        fix.rig.cloud.think.add(respond("Hello."));
+        fix.rig.queue.submit("u2", "Say hello.", TaskQueue.BACKGROUND_PRIORITY);
+        var row = fix.ended(fix.lastId());
+        assertEquals("stopped", row.get("outcome"), String.valueOf(row.get("report")));
+    }
+
     static List<String> states(Fix fix, String taskId) {
         return fix.rig.jdbc.queryForList("SELECT json_extract(details, '$.state') FROM events WHERE event_type = "
                 + "'self_repair' AND task_id = ? ORDER BY id", String.class, taskId);

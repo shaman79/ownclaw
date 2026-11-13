@@ -506,6 +506,18 @@ class SelfRepairReviewTest {
                 outputs.get(1).replace("455 Blocked", "403 Forbidden"), false)), "another failure is another key");
         assertNull(SkillSelfRepair.failureKey(new Artifact("menu_probe", java.util.Map.of(), "{\"ok\": true}", true)),
                 "a call that worked has none");
+        // The exception and its message are the failure; the code it was raised from, line by line, is not.
+        assertEquals(first, SkillSelfRepair.failureKey(new Artifact("menu_probe", java.util.Map.of(),
+                outputs.get(1).replace("raise ValueError('HTTP 455 Blocked')", "raise ValueError(blocked)"), false)));
+        // A failure with no traceback: the delegation's prefix, a runner's name, a file and line taken out.
+        java.util.function.Function<String, String> key = text ->
+                SkillSelfRepair.failureKey(new Artifact("menu_probe", java.util.Map.of(), text, false));
+        assertEquals(key.apply("HTTP 455 Blocked"), key.apply("ERROR: HTTP 455 Blocked"));
+        assertEquals(key.apply("exited 1: /srv/menu_probe/_runner_0123456789abcdef0123456789abcdef.py"),
+                key.apply("exited 1: /srv/menu_probe/_runner_fedcba9876543210fedcba9876543210.py"));
+        assertEquals(key.apply("SyntaxError at File \"/srv/a/skill.py\", line 3"),
+                key.apply("SyntaxError at File \"/srv/b/skill.py\", line 7"));
+        assertNotEquals(key.apply("HTTP 455 Blocked"), key.apply("HTTP 403 Forbidden"));
     }
 
     // R3-2 (B2): a constant clean output was never cleared, and a new problem weeks later was refused.
