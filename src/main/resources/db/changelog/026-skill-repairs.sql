@@ -25,6 +25,8 @@
 -- output_hash: what the skill's last call in the task that started it failed with (SkillSelfRepair#
 -- failureKey; null when it worked): the skill failing again exactly so after a completed repair's
 -- change is no progress. completed: the repair ran to its answer -- only such a repair is a verdict.
+-- stopped_by: the owner stopped it (who and how, as the Stop said), kept as the Stop is pressed: one whose
+-- ending never came, OwnClaw stopping first, is not started again.
 -- local_only: the repair ran on the local model only (the work it repairs did); its report is never
 -- handed to a repair that may use the cloud.
 -- code_before / code_after: the sha256 of the skill's skill.py when the repair was started and when
@@ -56,6 +58,7 @@ CREATE TABLE IF NOT EXISTS skill_repairs (
     local_only       INTEGER NOT NULL DEFAULT 0,
     output_hash      TEXT,
     completed        INTEGER NOT NULL DEFAULT 0,
+    stopped_by       TEXT,
     cleared_at       TEXT,
     resumed_at       TEXT,
     code_at_resume   TEXT,

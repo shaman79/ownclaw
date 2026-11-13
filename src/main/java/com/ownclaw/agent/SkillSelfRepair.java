@@ -242,6 +242,19 @@ public class SkillSelfRepair {
         long id = id(row);
         String userId = str(row, "user_id"), skill = str(row, "skill_name"), cutOff = str(row, "repair_task_id");
         String trigger = str(row, "trigger_task_id");
+        if (row.get("stopped_by") != null) {
+            // The owner stopped it before OwnClaw stopped, and its ending never came: stopped it is.
+            jdbc.update("UPDATE skill_repairs SET outcome = ?, report = ?, ended_at = datetime('now') WHERE id = ?",
+                    STOPPED, row.get("stopped_by"), id);
+            event(userId, cutOff, STOPPED, skill, str(row, "problem"), cutOff, trigger);
+            event(userId, trigger, STOPPED, skill, str(row, "problem"), cutOff, trigger);
+            log.info("Self-repair {} of '{}' was stopped ({}) before the restart: not started again.", id, skill,
+                    row.get("stopped_by"));
+            tell(userId, cutOff, "🔧 Self-repair of " + skill + " stopped", "It was stopped (" + row.get("stopped_by")
+                    + ") before OwnClaw restarted, so it is not started again. The next time the problem shows, a "
+                    + "repair starts again.", null);
+            return;
+        }
         boolean again = row.get("resumed_at") != null && Objects.equals(row.get("code_after"), row.get("code_at_resume"));
         Job read = again ? null : job(row);
         if (read == null) {
@@ -281,6 +294,35 @@ public class SkillSelfRepair {
         } catch (JsonProcessingException unreadable) {
             log.warn("Self-repair {}: its record cannot be read back: {}", row.get("id"), unreadable.getMessage());
             return null;
+        }
+    }
+
+    /**
+     * The owner's Stop, kept on the record as it is pressed: a repair stopped whose ending never comes
+     * -- OwnClaw stopped first -- is not started again at the next start ({@link #resume}). The Stop
+     * button, /cancel and the ops API all go through {@code TaskCancellationService}, which calls this
+     * after every request.
+     */
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    public void setCancellation(com.ownclaw.core.TaskCancellationService cancellation) {
+        if (cancellation != null) cancellation.onRequest(() -> stopsRequested(cancellation));
+    }
+
+    private void stopsRequested(com.ownclaw.core.TaskCancellationService cancellation) {
+        try {
+            for (var row : jdbc.queryForList("SELECT id, user_id, repair_task_id, started_at, resumed_at FROM "
+                    + "skill_repairs WHERE outcome = ? AND stopped_by IS NULL", RUNNING)) {
+                String began = str(row, row.get("resumed_at") != null ? "resumed_at" : "started_at");
+                long startedMs = java.time.LocalDateTime.parse(began.replace(' ', 'T'))
+                        .toInstant(java.time.ZoneOffset.UTC).toEpochMilli();
+                String why = cancellation.why(str(row, "user_id"), str(row, "repair_task_id"), null, startedMs);
+                if (why != null) {
+                    jdbc.update("UPDATE skill_repairs SET stopped_by = ? WHERE id = ? AND outcome = ?", why,
+                            row.get("id"), RUNNING);
+                }
+            }
+        } catch (RuntimeException e) {
+            log.warn("Self-repair could not keep a Stop on its records: {}", e.getMessage());
         }
     }
 
@@ -789,7 +831,8 @@ public class SkillSelfRepair {
         // Ended unfinished because OwnClaw is stopping -- a deploy's restart interrupts its calls -- it
         // is no outcome: the record stays 'running', and the next start starts it again (resume). The
         // owner's Stop, while OwnClaw runs, ends it as stopped.
-        if (closing && ended.terminationReason() != TerminationReason.COMPLETED) {
+        if (closing && ended.terminationReason() != TerminationReason.COMPLETED
+                && ended.terminationReason() != TerminationReason.CANCELLED) {
             log.info("Self-repair {} of '{}' was cut off by OwnClaw stopping: it starts again at the next start.",
                     job.id(), job.skill());
             return;
@@ -881,8 +924,10 @@ public class SkillSelfRepair {
      * while it waited, it failed before its loop began -- and is recorded so, and the owner told.
      */
     private void settle(Job job, String userId, AgentResult result, Throwable failure) {
-        // Not while OwnClaw stops: the record stays running for the next start (finish).
-        if (closing) return;
+        // Dropped from the queue by the owner's Stop: stopped, OwnClaw stopping or not.
+        boolean stopped = result != null && result.terminationReason() == TerminationReason.CANCELLED;
+        // Otherwise not while OwnClaw stops: the record stays running for the next start (finish).
+        if (closing && !stopped) return;
         String why;
         synchronized (lock) {
             Map<String, Object> row = row("WHERE id = ?", job.id());
@@ -890,7 +935,7 @@ public class SkillSelfRepair {
             why = failure != null ? String.valueOf(failure.getMessage())
                     : result == null ? "it gave no result" : result.response();
             jdbc.update("UPDATE skill_repairs SET outcome = ?, report = ?, ended_at = datetime('now') WHERE id = ?",
-                    NOT_STARTED, why, job.id());
+                    stopped ? STOPPED : NOT_STARTED, why, job.id());
         }
         log.warn("Self-repair {} of '{}' did not start: {}", job.id(), job.skill(), why);
         tell(userId, job.taskId(), "🔧 Self-repair of " + job.skill() + " did not start",

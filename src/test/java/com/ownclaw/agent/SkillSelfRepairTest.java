@@ -118,6 +118,7 @@ class SkillSelfRepairTest {
             repair = new SkillSelfRepair(rig.jdbc, rig.config, rig.skills, rig.registry,
                     queue != null ? queue : rig.queue, new ResultDelivery(rig.chat, rig.emitter), rig.chat,
                     rig.events, ZoneId.of("UTC"));
+            repair.setCancellation(rig.cancellation);
             rig.loop.setSelfRepair(repair);
         }
 
@@ -723,6 +724,7 @@ class SkillSelfRepairTest {
     static SkillSelfRepair restarted(Fix fix, TaskQueue queue) {
         var repair = new SkillSelfRepair(fix.rig.jdbc, fix.rig.config, fix.rig.skills, fix.rig.registry, queue,
                 new ResultDelivery(fix.rig.chat, fix.rig.emitter), fix.rig.chat, fix.rig.events, ZoneId.of("UTC"));
+        repair.setCancellation(fix.rig.cancellation);
         fix.rig.loop.setSelfRepair(repair);
         repair.start();
         return repair;
@@ -854,6 +856,58 @@ class SkillSelfRepairTest {
         } finally {
             queue.stop();
         }
+    }
+
+    @Test
+    @DisplayName("R3-3 (A): the owner's Stop that ends a repair while OwnClaw stops ends it as stopped, and it is not started again")
+    void theOwnersStopIsNotTheShutdown(@TempDir Path tmp) throws Exception {
+        fix = new Fix(tmp);
+        fix.rig.queue.start();
+        fix.scriptMenu(true);
+        // The repair's first step: the owner presses Stop on it, and in the same moment a deploy restarts OwnClaw.
+        fix.rig.cloud.think.add(c -> {
+            String repairTask = (String) fix.repairRow(0).get("repair_task_id");
+            fix.rig.cancellation.request("u1", repairTask, "you pressed Stop");
+            fix.repair.closing();
+            return call(AgentAction.SKILL_MANAGE, Map.of("action", "read", "name", MENU)).answer(c);
+        });
+        fix.rig.cloud.think.add(respond("Read it."));
+        fix.unattended(TASK);
+        var row = fix.ended(fix.lastId());
+        assertEquals("stopped", row.get("outcome"));
+        var queue = new TaskQueue(fix.rig.loop, fix.rig.events, fix.rig.emitter, fix.rig.config, fix.rig.cancellation);
+        try {
+            restarted(fix, queue).resume();
+            assertEquals(0, queue.getQueueSize(), "the repair the owner stopped is started again by the next start");
+            assertEquals("stopped", fix.repairRow(0).get("outcome"));
+        } finally {
+            queue.stop();
+        }
+    }
+
+    @Test
+    @DisplayName("R3-3: the owner's Stop is kept on the record as it is pressed: a repair whose ending never came is not started again")
+    void aStopKeptOnTheRecord(@TempDir Path tmp) throws Exception {
+        fix = new Fix(tmp);
+        fix.menuRun(true);                                         // queued; it never runs here
+        String repairTask = (String) fix.repairRow(0).get("repair_task_id");
+        fix.rig.cancellation.request("u1", repairTask, "you pressed Stop");
+        assertEquals("you pressed Stop", fix.repairRow(0).get("stopped_by"));
+        // OwnClaw stops before the repair's ending comes; the next start.
+        var queue = new TaskQueue(fix.rig.loop, fix.rig.events, fix.rig.emitter, fix.rig.config, fix.rig.cancellation);
+        try {
+            restarted(fix, queue).resume();
+            assertEquals(0, queue.getQueueSize());
+            assertEquals("stopped", fix.repairRow(0).get("outcome"));
+            assertTrue(fix.told().get(fix.told().size() - 1).contains("is not started again"), fix.told().toString());
+        } finally {
+            queue.stop();
+        }
+        // A Stop of everything the owner runs is kept too.
+        fix.rig.loop.setSelfRepair(fix.repair);
+        fix.menuRun(true);
+        fix.rig.cancellation.requestAll("u1", "you pressed Stop on everything");
+        assertEquals("you pressed Stop on everything", fix.repairRow(1).get("stopped_by"));
     }
 
     static List<String> states(Fix fix, String taskId) {
