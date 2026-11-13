@@ -75,7 +75,7 @@ public class ThinkingEngine {
             if (folded > 0) {
                 log.info("Task {}: {} of the chat's oldest images are shown by their lines alone, to keep the "
                         + "request within the API's image limits", context.taskId(), folded);
-                context.chat().imagesFolded(folded);
+                context.chat().imagesFolded(folded, context.conversationImagesFolded());
             }
         }
         List<LlmMessage> messages = buildMessages(context, provider.name(), mode);

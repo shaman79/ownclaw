@@ -273,13 +273,17 @@ public final class TaskChat {
     /**
      * The chat holds more images than one request to the cloud model takes, and its oldest are
      * shown by their lines alone from now on ({@link AgentContext#fitImages}): said, so the owner
-     * knows the model no longer sees them.
+     * knows the model no longer sees them -- {@code images} more, {@code inAll} with those the
+     * chat's earlier turns no longer showed.
      */
-    void imagesFolded(int images) {
+    void imagesFolded(int images, int inAll) {
         if (sessionId == null) return;
-        note("📦 This chat holds more images than one request to the cloud model takes, so "
-                + (images == 1 ? "its oldest is" : "its " + images + " oldest are") + " no longer shown to it: "
-                + "each message still says an image was pasted with it.");
+        String which = inAll > images
+                ? (images == 1 ? "one more of its oldest is" : images + " more of its oldest are") + " no longer shown to it ("
+                    + inAll + " in all)"
+                : (images == 1 ? "its oldest is" : "its " + images + " oldest are") + " no longer shown to it";
+        note("📦 This chat holds more images than one request to the cloud model takes, so " + which
+                + ": each message still says an image was pasted with it.");
     }
 
     /**

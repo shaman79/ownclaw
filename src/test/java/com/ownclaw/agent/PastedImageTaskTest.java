@@ -377,6 +377,29 @@ class PastedImageTaskTest {
     }
 
     @Test
+    @DisplayName("each turn that folds more of the chat's images says how many more, and how many in all -- once a task")
+    void theFoldNoteSaysHowManyMore(@TempDir Path tmp) throws Exception {
+        var rig = new LoopRig(tmp, List.of(LocalModeTest.NOOP));
+        String session = LocalModeTest.session(rig);
+        // A window not known: 100 images a request.
+        rig.cloud.think.add(respond("a hundred seen"));
+        rig.turn(session, "these", pasteMany(rig, 100));
+        rig.cloud.think.add(call("noop", Map.of()));
+        rig.cloud.think.add(respond("two more seen"));
+        rig.turn(session, "and these", pasteMany(rig, 2));
+        rig.cloud.think.add(respond("three more seen"));
+        rig.turn(session, "and these too", pasteMany(rig, 3));
+        List<String> notes = LocalModeTest.rows(rig).stream().filter(n -> n.startsWith("📦 This chat holds more images")).toList();
+        assertEquals(List.of(
+                "📦 This chat holds more images than one request to the cloud model takes, so its 2 oldest are no longer "
+                        + "shown to it: each message still says an image was pasted with it.",
+                "📦 This chat holds more images than one request to the cloud model takes, so 3 more of its oldest are no "
+                        + "longer shown to it (5 in all): each message still says an image was pasted with it."), notes,
+                "the second turn's two steps say it once; the third says 3 more, not 'its 3 oldest'");
+        // Mutation: say "its N oldest" whatever was folded before -> the third note undercounts by two.
+    }
+
+    @Test
     @DisplayName("a Stop during the window's lookup, before the first request, ends the task at once: the lookup is made in the loop, where a Stop reaches it")
     void stopDuringTheWindowsLookup(@TempDir Path tmp) throws Exception {
         var rig = new LoopRig(tmp, List.of(LocalModeTest.NOOP));
