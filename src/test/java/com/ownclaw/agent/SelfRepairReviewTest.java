@@ -434,10 +434,12 @@ class SelfRepairReviewTest {
         fix.rig.cloud.think.add(LoopRig.call("notify_send", java.util.Map.of("text", "menu")));
         fix.rig.cloud.think.add(problems("Done.", List.of(java.util.Map.of("tool", "notify_send",
                 "what", "It sent the message to the old chat id."))));
+        fix.rig.cloud.think.add(respond("Read it; nothing to change yet."));          // its repair
         AgentResult day5 = fix.unattended("Using notify_send, send the menu.");
         assertNotNull(fix.repairs().get(0).get("cleared_at"), "three clean runs cleared nothing: " + fix.repairs());
         assertTrue(day5.response().contains("Self-repair started for notify_send"),
                 "a new problem after days of clean runs was left to the owner: " + day5.response());
+        fix.ended(fix.lastId());                                    // it ends before the test does
     }
 
     // R3-2 (F): a repair cut short after a partial change ended unverified, and the same output then gave up.
@@ -469,6 +471,7 @@ class SelfRepairReviewTest {
         AgentResult next = fix.unattended("Using page_probe, probe the page.");
         assertTrue(next.response().contains("Self-repair started for page_probe"),
                 "a repair that never finished counted as no progress: " + next.response());
+        fix.ended(fix.lastId());                                    // it ends before the test does
     }
 
     // R4 design: only a VERIFIED fix earns another automatic repair (the review showed no "same failure" key
