@@ -74,3 +74,6 @@ databaseChangeLog:
   - include:
       file: db/changelog/025-pasted-images-shown-to-cloud.sql
       relativeToChangelogFile: false
+  - include:
+      file: db/changelog/026-skill-repairs.sql
+      relativeToChangelogFile: false

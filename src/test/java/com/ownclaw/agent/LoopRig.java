@@ -147,6 +147,8 @@ final class LoopRig {
         /** Where the real Python that puts values back into code is set up, on first use. */
         private final Path pythonDir;
         private volatile SkillManager python;
+        /** Which names are generated skills a task of the user may change: every tool of the rig's, unless a test says. */
+        volatile java.util.function.BiPredicate<String, String> changeable = (name, user) -> true;
 
         Skills(SkillCuratorService curator, ToolRegistry registry, Path pythonDir) {
             super(null, registry, null, null, null, curator, null);
@@ -174,7 +176,9 @@ final class LoopRig {
 
         @Override public String readAsWritten(String name, String userId) { return asWritten.apply(name); }
         @Override public String readSkillCode(String name) { return source.apply(name); }
+        @Override public String authoredFiles(String name) { return source.apply(name); }
         @Override public String readSkill(String name) { return files.apply(name); }
+        @Override public boolean isChangeableSkill(String name, String userId) { return changeable.test(name, userId); }
         @Override String checkPythonSyntax(String code) { return syntax.apply(code); }
         @Override public String createSkill(Map<String, Object> params, String requester,
                                             java.util.function.BooleanSupplier stopped,
@@ -198,6 +202,8 @@ final class LoopRig {
     final ChatStatusEmitter emitter = new ChatStatusEmitter();
     final DebugSessionService debug = new DebugSessionService();
     final AgentLoop loop;
+    /** The rig's tools, as the loop finds them. */
+    final ToolRegistry registry;
     /** The task queue over this loop, not started: a test starts it when it runs queued work. */
     final com.ownclaw.core.TaskQueue queue;
 
@@ -222,6 +228,12 @@ final class LoopRig {
     }
 
     LoopRig(Path dir, List<Tool> tools, int stallTimeoutSec, LlmProvider local, Engine engine) throws Exception {
+        this(dir, tools, stallTimeoutSec, local, engine, registry -> null);
+    }
+
+    /** @param resolver the capability resolver the loop asks at a task's start; none, unless a test gives one */
+    LoopRig(Path dir, List<Tool> tools, int stallTimeoutSec, LlmProvider local, Engine engine,
+            Function<ToolRegistry, CapabilityResolver> resolver) throws Exception {
         Files.createDirectories(dir);
         jdbc = MigratedDatabase.at(dir.resolve("t.db"));
         config = new OwnClawConfig();
@@ -237,7 +249,7 @@ final class LoopRig {
         var gateway = new CloudGateway(cloud, cloud, config, new EventEgressLedger(events, new ObjectMapper()), null,
                 redactor, files);
         var router = new LlmRouter(local, gateway, config, null);
-        var registry = new ToolRegistry(tools);
+        registry = new ToolRegistry(tools);
         vault = new CredentialVault(jdbc);
         vault.init();
         var curator = new SkillCuratorService(jdbc, registry,
@@ -246,7 +258,8 @@ final class LoopRig {
         loop = new AgentLoop(engine.make(registry, config, router),
                 new CriticAgent(registry), registry, emitter, config, router, new SqliteAgentMemory(jdbc),
                 curator, skills, debug,
-                cancellation, vault, chat, new LongRunningTaskManager(jdbc, emitter, events, config), null,
+                cancellation, vault, chat, new LongRunningTaskManager(jdbc, emitter, events, config),
+                resolver.apply(registry),
                 new TokenBudgetTracker(jdbc, config, emitter), events, null,
                 new LocalExecutor(router, registry, emitter, curator), files, redactor);
         queue = new com.ownclaw.core.TaskQueue(loop, events, emitter, config, cancellation);

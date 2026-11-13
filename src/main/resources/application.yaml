@@ -267,6 +267,13 @@ ownclaw:
   feedback:
     max-rounds: 3
 
+  self-repair:
+    # When unattended work (a scheduled run, /bg) shows that a skill did not do its whole job --
+    # its run reported a problem in its final answer, or a call of it failed and was never
+    # followed by one that worked -- a background task repairs the skill (SkillSelfRepair) and
+    # the owner is told what it did. Never for a chat, an ops run or a repair itself.
+    enabled: ${OWNCLAW_SELF_REPAIR_ENABLED:true}
+
 logging:
   file:
     name: ${OWNCLAW_LOG_FILE:./logs/ownclaw.log}

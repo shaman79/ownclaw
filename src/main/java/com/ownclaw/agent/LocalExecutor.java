@@ -1133,6 +1133,19 @@ public class LocalExecutor {
                     : "Call one of the tools you were given, by its exact name.");
         }
 
+        // A self-repair calls no tool that changes anything, here as in the loop's own steps: the
+        // one rule, in code (SkillSelfRepair#outOfScope). Refused before anything runs; a call the
+        // cloud wrote stops the calls there.
+        if (parentContext.repair() != null) {
+            String outOfScope = SkillSelfRepair.outOfScope(parentContext.repair(), target.name(), action.params,
+                    target);
+            if (outOfScope != null) {
+                log.warn("Delegation {} {}: '{}' refused -- outside the repair of '{}'.", byCode ? "call" : "turn",
+                        turn, target.name(), parentContext.repair().skill());
+                return "Not run: " + outOfScope;
+            }
+        }
+
         // A secret the filter removed from the cloud's view, copied from its goal into a call.
         if (Redactor.holdsRemovedSecret(action.params)) {
             log.warn("Delegation turn {}: a call that writes a removed secret — refused.", turn);

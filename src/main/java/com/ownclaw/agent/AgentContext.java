@@ -180,6 +180,44 @@ public class AgentContext {
     public void setChatSession(String sessionId) { this.chatSession = sessionId; }
     public void setUnattended(boolean unattended) { this.unattended = unattended; }
 
+    // ── self-repair (SkillSelfRepair) ──
+
+    /** Whether the ops API started this task: its problems are the operator's to see, not repaired. */
+    private volatile boolean ops;
+    public boolean isOps() { return ops; }
+    public void setOps(boolean ops) { this.ops = ops; }
+
+    /**
+     * The repair this task is, or null: set by code when the task starts
+     * ({@link AgentLoop#executeRepair}), never from anything a model or a message says. It is
+     * what keeps a repair to its one skill and away from every tool that changes anything
+     * ({@link SkillSelfRepair#outOfScope}), and what keeps its own problems from starting another.
+     */
+    private volatile SkillSelfRepair.Job repair;
+    public SkillSelfRepair.Job repair() { return repair; }
+    public void setRepair(SkillSelfRepair.Job repair) { this.repair = repair; }
+
+    /**
+     * How many results the task had when the skill under repair was last changed: the runs of it
+     * after that are the check of the change. -1 while it has not been changed.
+     */
+    private volatile int changedAfter = -1;
+    public int changedAfter() { return changedAfter; }
+    public synchronized void skillChanged() { this.changedAfter = artifacts.size(); }
+
+    /**
+     * What the task's delivered final answer said in {@code problems}, as the model wrote it, or
+     * null: read by {@link SkillSelfRepair#parseProblems} when the task ends.
+     */
+    private volatile Object reportedProblems;
+    public Object reportedProblems() { return reportedProblems; }
+    public void setReportedProblems(Object problems) { this.reportedProblems = problems; }
+
+    /** What a repair's delivered final answer said in {@code check}, as written, or null ({@link SkillSelfRepair#checked}). */
+    private volatile Object reportedCheck;
+    public Object reportedCheck() { return reportedCheck; }
+    public void setReportedCheck(Object check) { this.reportedCheck = check; }
+
     public TaskOptions options() { return options; }
     public void setOptions(TaskOptions options) { this.options = options; }
 

@@ -62,6 +62,12 @@ public record Artifact(int n, String tool, Map<String, Object> written,
         why = why == null ? List.of() : List.copyOf(why);
     }
 
+    /**
+     * What a self-repair's evidence is recorded under ({@code SkillSelfRepair#handOver}): no skill can
+     * have this name, and {@link #succeeded} reads its flag alone.
+     */
+    public static final String HANDED_OVER = "handed over";
+
     /** An artifact whose bytes, if PRIVATE, are indexed — every kind except the ones above. */
     public Artifact(int n, String tool, Map<String, Object> written, Map<String, Object> resolved,
                     String output, boolean success, Label label, List<String> why) {
@@ -146,6 +152,10 @@ public record Artifact(int n, String tool, Map<String, Object> written,
      */
     public boolean succeeded() {
         if (!success) return false;
+        // Evidence a self-repair is handed is data whose flag is what its call reported: an argument
+        // value that is a JSON field with "ok": false in it is no failed result, and a re-run that names
+        // it by its handle must get it.
+        if (HANDED_OVER.equals(tool)) return true;
         JsonNode node = ToolResult.jsonObject(output);
         if (node == null) return true;
         // The whole top level: when the descriptor listed only the first twelve keys, an "ok"

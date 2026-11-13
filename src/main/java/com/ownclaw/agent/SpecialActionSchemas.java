@@ -221,6 +221,66 @@ public final class SpecialActionSchemas {
                                     + "and the text around it."))));
 
     /**
+     * respond as unattended work is offered it -- a scheduled run, /bg, a self-repair: with
+     * {@code problems}, the report of each tool that ran but did not do its whole job. Nobody reads
+     * an unattended answer as it is written, so what it says went wrong is what starts the repair
+     * of the skill ({@link SkillSelfRepair}), read by code when the task ends. Not offered to a
+     * chat, whose owner reads the answer and is there to ask for a fix.
+     */
+    static final ToolSpec RESPOND_UNATTENDED = withProblemItems(spec(AgentAction.RESPOND,
+            "Deliver the final answer to the user and end the task. Put the whole answer "
+                    + "in 'message' — it is what the user reads.",
+            params("message", ToolParam.required("string", "The complete answer."),
+                    SkillSelfRepair.PROBLEMS, ToolParam.optional("array", "Every tool that ran in this "
+                            + "task but did not do its whole job: a part of what it should have produced "
+                            + "is missing, it took a fallback, its output holds a warning or an error, or "
+                            + "what it returned is stale or wrong -- even when it reported success. One "
+                            + "entry per tool: 'tool' its exact name, 'what' one sentence saying what it "
+                            + "did not do. Each skill listed is repaired after this task, in the "
+                            + "background. Leave it out when every tool did its whole job."))));
+
+    /**
+     * respond as a self-repair is offered it: with {@code check}, how the check of its change went
+     * -- the repair's own judgement, which code weighs with whether it ran the skill after its last
+     * change and that run worked ({@link SkillSelfRepair}). Not {@code problems}: nothing a repair
+     * says starts another repair.
+     */
+    static final ToolSpec RESPOND_REPAIR = withCheckValues(spec(AgentAction.RESPOND,
+            "Deliver the final answer to the user and end the task. Put the whole answer "
+                    + "in 'message' — it is what the user reads.",
+            params("message", ToolParam.required("string", "The complete answer."),
+                    SkillSelfRepair.CHECK, ToolParam.optional("string", "How the check of your change "
+                            + "went: 'passed' -- you ran the skill after your last change and it did its "
+                            + "whole job; 'failed' -- run after your change, it still did not; 'not_run' -- "
+                            + "you did not run it after your change."))));
+
+    /** The spec with its 'check' parameter's values listed, which {@link ToolParam} has no way to say. */
+    @SuppressWarnings("unchecked")
+    private static ToolSpec withCheckValues(ToolSpec spec) {
+        var properties = (Map<String, Map<String, Object>>) spec.inputSchema().get("properties");
+        properties.get(SkillSelfRepair.CHECK).put("enum", SkillSelfRepair.CHECKS);
+        return spec;
+    }
+
+    /**
+     * The spec with its 'problems' parameter's items declared what one is -- a tool and a sentence
+     * -- which {@link ToolParam} has no way to say: OpenAI rejects an array schema with no items,
+     * and an entry in any other shape is not read ({@link SkillSelfRepair#parseProblems}).
+     */
+    @SuppressWarnings("unchecked")
+    private static ToolSpec withProblemItems(ToolSpec spec) {
+        var properties = (Map<String, Map<String, Object>>) spec.inputSchema().get("properties");
+        var problem = new java.util.LinkedHashMap<String, Object>();
+        problem.put("type", "object");
+        problem.put("properties", Map.of(
+                "tool", Map.of("type", "string", "description", "The tool's exact name."),
+                "what", Map.of("type", "string", "description", "One sentence: what it did not do.")));
+        problem.put("required", List.of("tool", "what"));
+        properties.get(SkillSelfRepair.PROBLEMS).put("items", problem);
+        return spec;
+    }
+
+    /**
      * The spec with its 'texts' parameter declared an object of strings, which {@link ToolParam}
      * has no way to say: a text that is not a string is refused (LocalExecutor#texts), so the
      * schema says so first.

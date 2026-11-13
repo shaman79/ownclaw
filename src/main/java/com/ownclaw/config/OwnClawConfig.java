@@ -28,6 +28,7 @@ public class OwnClawConfig {
     private Observability observability = new Observability();
     private Budgets budgets = new Budgets();
     private Feedback feedback = new Feedback();
+    private SelfRepair selfRepair = new SelfRepair();
 
     // --- Nested classes ---
 
@@ -398,6 +399,18 @@ public class OwnClawConfig {
         public void setWarningThreshold(double v) { this.warningThreshold = v; }
     }
 
+    /**
+     * Self-repair ({@code com.ownclaw.agent.SkillSelfRepair}): when unattended work -- a scheduled
+     * run, /bg -- shows that a skill did not do its whole job, a background task repairs the skill
+     * and the owner is told what it did. Never for a chat, an ops run or a repair itself.
+     */
+    public static class SelfRepair {
+        private boolean enabled = true;
+
+        public boolean isEnabled() { return enabled; }
+        public void setEnabled(boolean enabled) { this.enabled = enabled; }
+    }
+
     public static class Feedback {
         private int maxRounds = 3;
 
@@ -437,4 +450,6 @@ public class OwnClawConfig {
     public void setBudgets(Budgets v) { this.budgets = v; }
     public Feedback getFeedback() { return feedback; }
     public void setFeedback(Feedback v) { this.feedback = v; }
+    public SelfRepair getSelfRepair() { return selfRepair; }
+    public void setSelfRepair(SelfRepair v) { this.selfRepair = v; }
 }

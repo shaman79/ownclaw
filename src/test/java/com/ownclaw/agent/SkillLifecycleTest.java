@@ -103,6 +103,43 @@ class SkillLifecycleTest {
     }
 
     @Test
+    @DisplayName("has_side_effects is kept in three states: a skill that says nothing is not one declared free of them")
+    void sideEffectsInThreeStates() throws IOException {
+        create("greet_user", "Return a greeting for a name.", WORKING_CODE);
+        assertFalse(Files.readString(generated.resolve("greet_user").resolve("SKILL.yaml")).contains("has_side_effects"),
+                "nothing given, nothing written");
+        assertNull(registry.find("greet_user").orElseThrow().declaredSideEffects());
+        assertFalse(registry.find("greet_user").orElseThrow().hasSideEffects());
+        for (Object given : new Object[] {false, "false", true, "True"}) {
+            Map<String, Object> p = new LinkedHashMap<>();
+            p.put("name", "greet_user");
+            p.put("description", "Return a greeting for a name.");
+            p.put("parameters", PARAMS);
+            p.put("code", WORKING_CODE);
+            p.put("has_side_effects", given);
+            String result = manager.createSkill(p);
+            assertFalse(result.startsWith("ERROR"), result);
+            boolean yes = Boolean.parseBoolean(String.valueOf(given));
+            assertEquals(yes, registry.find("greet_user").orElseThrow().declaredSideEffects(), String.valueOf(given));
+            assertEquals(yes, registry.find("greet_user").orElseThrow().hasSideEffects());
+        }
+    }
+
+    @Test
+    @DisplayName("a skill's authored files are all of what it is: a change of its SKILL.yaml or requirements is a change")
+    void authoredFilesAreTheSkill() {
+        create("greet_user", "Return a greeting for a name.", WORKING_CODE);
+        String first = manager.authoredFiles("greet_user");
+        assertTrue(first.contains("--- skill.py") && first.contains("--- SKILL.yaml") && first.contains("--- requirements.txt"),
+                first);
+        create("greet_user", "Return a greeting for a name.", WORKING_CODE);
+        assertEquals(first, manager.authoredFiles("greet_user"), "the same skill again");
+        create("greet_user", "Return a greeting for a name, politely.", WORKING_CODE);
+        assertNotEquals(first, manager.authoredFiles("greet_user"), "only its SKILL.yaml changed");
+        assertNull(manager.authoredFiles("no_such_skill"));
+    }
+
+    @Test
     @DisplayName("a broken update does not destroy the working version")
     void brokenUpdateRestoresPreviousCode() throws IOException {
         create("greet_user", "Return a greeting for a name.", WORKING_CODE);

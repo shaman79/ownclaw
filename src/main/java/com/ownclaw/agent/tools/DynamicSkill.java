@@ -83,6 +83,8 @@ public class DynamicSkill implements Tool {
     private final Path skillDir;
     private final boolean requiresNetwork;
     private final boolean hasSideEffects;
+    /** What SKILL.yaml says of its side effects: true, false, or null when it says nothing. */
+    private final Boolean declaredSideEffects;
     private final int timeoutSec;
     private final SandboxManager sandbox;
     private final PythonEnvironmentService pythonEnv;
@@ -117,6 +119,21 @@ public class DynamicSkill implements Tool {
                         List<String> systemPackages, String containerImage,
                         ContainerSandbox containerSandbox,
                         com.ownclaw.conversation.FileStorageService fileStorage) {
+        this(name, description, parameters, skillDir, requiresNetwork, (Boolean) hasSideEffects, timeoutSec, sandbox,
+                pythonEnv, requiredCredentials, credentialVault, systemPackages, containerImage, containerSandbox,
+                fileStorage);
+    }
+
+    /** @param declaredSideEffects what SKILL.yaml says of its side effects: true, false, or null for nothing */
+    public DynamicSkill(String name, String description, Map<String, ToolParam> parameters,
+                        Path skillDir, boolean requiresNetwork, Boolean declaredSideEffects,
+                        int timeoutSec, SandboxManager sandbox, PythonEnvironmentService pythonEnv,
+                        List<String> requiredCredentials, CredentialVault credentialVault,
+                        List<String> systemPackages, String containerImage,
+                        ContainerSandbox containerSandbox,
+                        com.ownclaw.conversation.FileStorageService fileStorage) {
+        this.declaredSideEffects = declaredSideEffects;
+        boolean hasSideEffects = Boolean.TRUE.equals(declaredSideEffects);
         this.name = name;
         this.description = description;
         this.parameters = parameters;
@@ -139,6 +156,7 @@ public class DynamicSkill implements Tool {
     @Override public Map<String, ToolParam> inputSchema() { return parameters; }
     @Override public boolean requiresNetwork() { return requiresNetwork; }
     @Override public boolean hasSideEffects() { return hasSideEffects; }
+    @Override public Boolean declaredSideEffects() { return declaredSideEffects; }
     @Override public int estimatedMaxDurationSeconds() { return timeoutSec; }
     @Override public List<String> requiredCredentials() { return requiredCredentials; }
 

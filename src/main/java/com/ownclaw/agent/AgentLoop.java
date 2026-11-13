@@ -177,6 +177,18 @@ public class AgentLoop {
         if (capture != null) capture.stop();
     }
 
+    /** What repairs a skill that unattended work shows did not do its whole job; null until wired. */
+    private volatile SkillSelfRepair selfRepair;
+
+    /**
+     * Wired by Spring after the loop is made ({@link SkillSelfRepair} starts its repairs on the
+     * task queue, which runs them here): every task's ending is handed to it ({@link #end}).
+     */
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    public void setSelfRepair(SkillSelfRepair selfRepair) {
+        this.selfRepair = selfRepair;
+    }
+
     /**
      * A chat turn the owner had has ended, and its answer was delivered: what he wrote in it --
      * {@code said}, his message and those the task read while it worked -- and what he was
@@ -302,19 +314,36 @@ public class AgentLoop {
                                    ChatOptions chosen) {
         String taskId = UUID.randomUUID().toString().substring(0, 8);
         java.util.function.Supplier<AgentResult> task = () -> execute(taskId, userId, message, unattended,
-                currentMessageId, attachmentIds, channel, inbox, chosen);
+                currentMessageId, attachmentIds, channel, inbox, chosen, null);
         // Unattended work is waited on in no chat on screen: every status it emits, its ending
         // too, is marked so (ChatStatusEmitter#BACKGROUND), and a page shows it apart.
         return unattended ? statusEmitter.inBackground(taskId, task) : task.get();
     }
 
-    /** {@link #executeFull}, once the task has its id. */
+    /**
+     * A self-repair of a skill ({@link SkillSelfRepair}), as the task queue runs one: unattended,
+     * from no chat, under the task id its record was given, and marked as the repair it is
+     * ({@link AgentContext#setRepair}) -- which keeps it to its skill and away from every tool that
+     * changes anything. A repair of a task the cloud never read is local only as well: its
+     * evidence is that task's.
+     */
+    public AgentResult executeRepair(String userId, String goal, SkillSelfRepair.Job job) {
+        ChatOptions chosen = job.localOnly() ? new ChatOptions("free", null) : ChatOptions.NONE;
+        return statusEmitter.inBackground(job.taskId(), () -> execute(job.taskId(), userId, goal, true,
+                null, List.of(), null, null, chosen, job));
+    }
+
+    /** {@link #executeFull}, once the task has its id; {@code repair} is the repair it is, or null. */
     private AgentResult execute(String taskId, String userId, String message, boolean unattended,
                                 String currentMessageId, List<String> attachmentIds,
                                 TaskChat.Channel channel, com.ownclaw.core.Inbox inbox,
-                                ChatOptions chosen) {
+                                ChatOptions chosen, SkillSelfRepair.Job repair) {
         AgentContext context = new AgentContext(userId, taskId, message);
         context.setUnattended(unattended);
+        // Where it came from, for what follows its ending (SkillSelfRepair): the ops API's runs are
+        // the operator's, and a repair is kept to its one skill.
+        context.setOps(channel == TaskChat.Channel.OPS);
+        context.setRepair(repair);
         // Once, here: a default changed while the task runs is the next task's.
         context.setOptions(TaskOptions.of(chosen, config.getMentor()));
         context.setInbox(inbox);
@@ -416,15 +445,22 @@ public class AgentLoop {
         // capability (network scanning, media processing, etc.) and no existing
         // skill covers it, inject a specific hint so the LLM doesn't need to
         // figure out that it should use skill_create + system_packages.
-        try {
-            CapabilityResolver.CapabilityHint hint = capabilityResolver.resolve(message);
-            if (hint != null) {
-                context.setCapabilityHint(hint);
-                log.info("Capability gap detected for task {}: {} → suggesting skill '{}'",
-                        taskId, hint.category(), hint.suggestedName());
+        // A repair is handed its evidence as its first results, before its first step.
+        SkillSelfRepair.handOver(context);
+
+        // Not for a repair: its goal names the skill it repairs, and a deterministic skill_create of
+        // another, at step 1, would bypass every check a repair's steps go through.
+        if (repair == null) {
+            try {
+                CapabilityResolver.CapabilityHint hint = capabilityResolver.resolve(message);
+                if (hint != null) {
+                    context.setCapabilityHint(hint);
+                    log.info("Capability gap detected for task {}: {} → suggesting skill '{}'",
+                            taskId, hint.category(), hint.suggestedName());
+                }
+            } catch (Exception e) {
+                log.debug("Capability resolution failed (non-fatal): {}", e.getMessage());
             }
-        } catch (Exception e) {
-            log.debug("Capability resolution failed (non-fatal): {}", e.getMessage());
         }
 
         return run(context);
@@ -438,8 +474,9 @@ public class AgentLoop {
     AgentResult run(AgentContext context) {
         String userId = context.userId();
         String taskId = context.taskId();
-        // Clear any stale cancel flag from a previous task
-        cancellationService.clear(userId, taskId);
+        // Clear any stale cancel flag from a previous task -- not a repair's: its id is new, given before it
+        // was queued, and a Stop of it by that id while it waited is the owner's, to be honoured.
+        if (context.repair() == null) cancellationService.clear(userId, taskId);
 
         // Point the context at the authoritative cancel source. Without this, every
         // context.isCancelled() check inside a step — LocalExecutor's per-step poll, the
@@ -496,6 +533,10 @@ public class AgentLoop {
         AgentResult ended = TaskEnding.apply(result, context, traceOf(context.userId(), context.taskId()))
                 .withTaskId(context.taskId())
                 .withLocalOnly(context.options() != null && context.options().localOnly());
+        // Unattended work that showed a skill did not do its whole job starts its repair, and its
+        // ending says so; a repair that ended is recorded and the owner told (SkillSelfRepair).
+        SkillSelfRepair repairs = selfRepair;
+        if (repairs != null) ended = repairs.taskEnded(context, ended);
         emitResult(context, ended);
         if (remember) storeEpisode(context, ended);
         return ended;
@@ -1160,6 +1201,10 @@ public class AgentLoop {
                     if (end != null) return end;
                     continue;
                 }
+                // What it says did not do its whole job, of the answer that is delivered: read when
+                // the task ends (SkillSelfRepair).
+                context.setReportedProblems(action.params().get(SkillSelfRepair.PROBLEMS));
+                context.setReportedCheck(action.params().get(SkillSelfRepair.CHECK));
                 return AgentResult.completed(
                         answer.response(),
                         context.trajectory(),
@@ -1208,6 +1253,23 @@ public class AgentLoop {
                 ).withOwnerText(question.ownerText()).withChoices(action.choices());
             }
 
+            // === A REPAIR'S SCOPE ===
+            // A self-repair changes its one skill and nothing else: no other skill, nothing
+            // scheduled or remembered, and no tool that has side effects -- the skill under repair
+            // included, when it had them as the repair began. Refused in code, whatever the goal
+            // or the model says (SkillSelfRepair#outOfScope); a refused call runs nothing.
+            if (context.repair() != null) {
+                String outOfScope = SkillSelfRepair.outOfScope(context.repair(), action.tool(), action.params(),
+                        action.isSpecialAction() ? null : toolRegistry.find(action.tool()).orElse(null));
+                if (outOfScope != null) {
+                    log.warn("Task {} step {}: refused '{}' -- outside the repair of '{}'.", context.taskId(),
+                            step + 1, action.tool(), context.repair().skill());
+                    AgentResult end = stepRanNothing(context, action, "Not run: " + outOfScope, null, step, nothing);
+                    if (end != null) return end;
+                    continue;
+                }
+            }
+
             // === CRITIQUE ===
             // skill_manage and the registry's tools: the other special actions have no rules
             // there. A call the critic blocks runs nothing (stepRanNothing).
@@ -1240,7 +1302,21 @@ public class AgentLoop {
                 // failure is told what the earlier attempts at that name failed with instead, so
                 // the next attempt changes the approach rather than repeating it.
                 String earlier = earlierAttempts(context.trajectory(), str(action.params(), "name"));
+                // A repair keeps what the skill declares and the model left out -- its credentials,
+                // its network, its timeout -- and never takes its side effects away: the refusal of
+                // a side-effecting run reads that flag (SkillSelfRepair#keepDeclarations).
+                if (context.repair() != null) {
+                    action = new AgentAction(action.tool(), SkillSelfRepair.keepDeclarations(context.repair(),
+                            action.params(), toolRegistry.find(context.repair().skill()).orElse(null)),
+                            action.reasoning());
+                }
                 AgentObservation obs = createSkill(action, context);
+                // The runs of the skill from here are the check of this change.
+                if (obs.success() && context.repair() != null) {
+                    SkillSelfRepair repairs = selfRepair;
+                    if (repairs != null) repairs.changedByRepair(context);
+                    else context.skillChanged();
+                }
                 if (!obs.success() && earlier != null) {
                     obs = AgentObservation.failure(obs.tool(), obs.output() + earlier,
                             Map.of(SKILL_CREATE_ERROR, obs.output()), obs.durationMs());

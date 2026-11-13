@@ -53,6 +53,15 @@ public interface Tool {
     default boolean hasSideEffects() { return false; }
 
     /**
+     * What the tool declares of its side effects, in three states: true, false -- declared free of
+     * them -- or null when it declares nothing. {@link #hasSideEffects} reads null as false, which is
+     * how a tool is treated everywhere it is only a hint; a self-repair runs a skill only on an
+     * explicit false ({@code SkillSelfRepair#outOfScope}), because the flag is the model's own
+     * optional claim and a skill that moves mail can say nothing.
+     */
+    default Boolean declaredSideEffects() { return hasSideEffects() ? Boolean.TRUE : null; }
+
+    /**
      * Estimated maximum duration in seconds. Helps the agent reason about timeouts.
      */
     default int estimatedMaxDurationSeconds() { return 30; }

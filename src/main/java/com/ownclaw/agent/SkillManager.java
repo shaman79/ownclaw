@@ -222,6 +222,18 @@ public class SkillManager {
     }
 
     /**
+     * Whether {@code name} is a generated skill that a task of {@code userId}'s may change: one on
+     * disk, and its author's or the owner's to change ({@link #changeRefusal}). What self-repair
+     * repairs: a name that is no such skill -- a typo, a special action, another account's skill --
+     * is not.
+     */
+    public boolean isChangeableSkill(String name, String userId) {
+        if (!isSkillName(name) || dynamicSkillRegistry == null || userId == null) return false;
+        var skill = dynamicSkillRegistry.getDynamic(name);
+        return skill.isPresent() && changeRefusal(name, skill.get().skillDir(), userId, "changed") == null;
+    }
+
+    /**
      * The account that first wrote this skill, from its SKILL.yaml; null when none is kept. Read
      * as every authored file is ({@link SkillJail#readAuthored}): a link at the name is refused,
      * not followed to a file that names another author.
@@ -279,7 +291,9 @@ public class SkillManager {
         String notPlain = requirementsRefusal(requirements);
         if (notPlain != null) return "ERROR: the requirements for '" + name + "' were not taken: " + notPlain;
         boolean requiresNetwork = Boolean.TRUE.equals(params.get("requires_network"));
-        boolean hasSideEffects = Boolean.TRUE.equals(params.get("has_side_effects"));
+        // Written as given, and not at all when not given: "false" by default made every skill that
+        // said nothing look declared free of side effects (Tool#declaredSideEffects).
+        Boolean hasSideEffects = declared(params.get("has_side_effects"));
         int timeout = toInt(params.get("timeout"), 30);
         String systemPackagesStr = str(params, "system_packages");
         String containerImage = str(params, "container_image");
@@ -495,6 +509,28 @@ public class SkillManager {
         } catch (java.security.NoSuchAlgorithmException e) {
             throw new IllegalStateException(e);
         }
+    }
+
+    /**
+     * Every file of a skill its author wrote -- skill.py, SKILL.yaml, requirements.txt -- one after
+     * the other under their names, or null when there is no such skill: what a skill IS, for telling
+     * one version from another (self-repair's hash of it). A file that cannot be read is said so.
+     */
+    public String authoredFiles(String name) {
+        if (name == null || name.isBlank() || dynamicSkillRegistry == null) return null;
+        var skillOpt = dynamicSkillRegistry.getDynamic(name);
+        if (skillOpt.isEmpty()) return null;
+        var sb = new StringBuilder();
+        for (String file : List.of("skill.py", "SKILL.yaml", "requirements.txt")) {
+            sb.append("--- ").append(file).append('\n');
+            try {
+                String text = SkillJail.readAuthored(skillOpt.get().skillDir().resolve(file));
+                sb.append(text == null ? "(none)" : text).append('\n');
+            } catch (IOException e) {
+                sb.append("(unreadable: ").append(e.getMessage()).append(")\n");
+            }
+        }
+        return sb.toString();
     }
 
     /**
@@ -786,8 +822,17 @@ public class SkillManager {
         }
     }
 
+    /** A flag as a model writes one -- true, "true", "False" -- or null when it wrote none, or no flag. */
+    static Boolean declared(Object v) {
+        if (v instanceof Boolean b) return b;
+        if (v instanceof String s && (s.strip().equalsIgnoreCase("true") || s.strip().equalsIgnoreCase("false"))) {
+            return Boolean.valueOf(s.strip());
+        }
+        return null;
+    }
+
     private String buildSkillYaml(String name, String author, String description, Map<String, Object> parametersDef,
-                                  boolean requiresNetwork, boolean hasSideEffects, int timeout,
+                                  boolean requiresNetwork, Boolean hasSideEffects, int timeout,
                                   List<String> credentials, String systemPackages, String containerImage)
             throws IOException {
         Map<String, Object> yaml = new LinkedHashMap<>();
@@ -800,7 +845,7 @@ public class SkillManager {
             yaml.put("parameters", parametersDef);
         }
         yaml.put("requires_network", requiresNetwork);
-        yaml.put("has_side_effects", hasSideEffects);
+        if (hasSideEffects != null) yaml.put("has_side_effects", hasSideEffects);
         yaml.put("timeout", timeout);
         if (!credentials.isEmpty()) yaml.put("credentials", credentials);
         if (systemPackages != null && !systemPackages.isBlank()) {
