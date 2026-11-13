@@ -24,7 +24,7 @@
 -- change of the skill then; one cut off again with no change of its own since is not started again.
 -- completed: the repair ran to its answer -- only such a repair is a verdict. After one that ended
 -- 'fixed' a later problem starts another; after any other verdict it is left to the owner until a
--- clean run (cleared_at) or a change of the skill.
+-- clean run (cleared_at).
 -- queued_ms: when it was queued (or queued again), in milliseconds -- what a Stop is compared with.
 -- stopped_by: the owner stopped it (who and how, as the Stop said), kept as the Stop is pressed: one whose
 -- ending never came, OwnClaw stopping first, is not started again.

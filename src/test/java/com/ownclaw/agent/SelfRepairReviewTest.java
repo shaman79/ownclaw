@@ -564,21 +564,19 @@ class SelfRepairReviewTest {
     }
 
     @Test
-    @DisplayName("R4: a change of the skill since the repair that could not show progress lets the next problem start one")
-    void aChangedSkillIsRepairedAgain(@TempDir Path tmp) throws Exception {
+    @DisplayName("R4: a later task's own rewrite of the skill does not start a repair again: left to the owner until a clean run")
+    void aLaterRewriteIsNoReason(@TempDir Path tmp) throws Exception {
         fix = new Fix(tmp);
         fix.rig.queue.start();
         fix.scriptMenu(true);
         fix.rig.cloud.think.add(respond("Nothing to change."));
         fix.unattended(TASK);
         assertEquals("unchanged", fix.ended(fix.lastId()).get("outcome"));
-        // The owner has the skill changed in a chat of his.
-        fix.code.put(MENU, "def run(params):\n    return {}  # changed by the owner\n");
-        fix.scriptMenu(true);
-        fix.rig.cloud.think.add(respond("Still blocked."));
-        AgentResult r = fix.unattended(TASK);
-        assertTrue(r.response().contains("Self-repair started for " + MENU), r.response());
-        fix.ended(fix.lastId());
+        // A later scheduled run rewrites the skill on its own; the problem shows again.
+        fix.code.put(MENU, "def run(params):\n    return {}  # rewritten by a later task\n");
+        AgentResult r = fix.menuRun(true);
+        assertTrue(r.response().contains("Self-repair is not tried again for " + MENU), r.response());
+        assertEquals("gave_up", fix.repairRow(1).get("outcome"));
     }
 
     // R4-4 (Rv4 E): a reference filled in inside a list went inline into the unfoldable evidence step.

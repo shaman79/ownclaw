@@ -59,8 +59,9 @@ import java.util.function.BiPredicate;
  *       passed -- a later problem starts a new one, given its report. After one that ended any
  *       other judged way -- changed nothing, could not check its change, or checked it and still saw
  *       the problem -- the problem again starts none: the owner is told once, and it is left to him
- *       until a run of the skill goes well (a completed run whose model reported nothing of it) or
- *       the skill is changed. A repair that did not finish -- stopped, cut short, interrupted, never
+ *       until a run of the skill goes well (a completed run whose model reported nothing of it) --
+ *       he can have it fixed in a chat. A change of the skill by a later task does not, by itself,
+ *       start a repair again. A repair that did not finish -- stopped, cut short, interrupted, never
  *       started -- is no verdict. No count of attempts ends anything.</li>
  *   <li>How it ended ({@link #finish}), by code: the code's hash before and after, whether the
  *       skill was run after its last change, and whether that run worked and the repair's own
@@ -536,15 +537,14 @@ public class SkillSelfRepair {
             Map<String, Object> last = row("WHERE skill_name = ? AND user_id = ? AND outcome NOT IN (?, ?, ?, ?, ?) "
                     + "ORDER BY id DESC LIMIT 1", skill, ctx.userId(), RUNNING, INTERRUPTED, NOT_STARTED, STOPPED,
                     NOT_FINISHED);
-            // Only a VERIFIED fix earns another automatic repair. While the skill is still what the last
-            // repair left and no clean run has come since, a problem after a repair that ended any other
-            // judged way -- changed nothing, could not check its change, or checked it and still saw the
-            // problem -- starts none: the owner is told once, and it is left to him until a run of the
-            // skill goes well or the skill is changed. A repair that did not finish is no verdict. A
-            // mechanism, no count: no key of "the same failure" is reliable -- dates, timestamps and
-            // what a skill prints change every run, and a private failure has none to give.
-            boolean current = last != null && last.get("cleared_at") == null
-                    && Objects.equals(code, last.get("code_after"));
+            // Only a VERIFIED fix earns another automatic repair. Until a clean run, a problem after a
+            // repair that ended any other judged way -- changed nothing, could not check its change, or
+            // checked it and still saw the problem -- starts none: the owner is told once, and it is left
+            // to him (he can have it fixed in a chat). Not even after a later task rewrote the skill: a
+            // scheduled run's own skill_create is no fix anyone checked. A repair that did not finish is
+            // no verdict. A mechanism, no count: no key of "the same failure" is reliable -- dates,
+            // timestamps and what a skill prints change every run, and a private failure has none.
+            boolean current = last != null && last.get("cleared_at") == null;
             boolean judged = last != null && (GAVE_UP.equals(last.get("outcome"))
                     || last.get("completed") instanceof Number c && c.intValue() != 0);
             boolean noProgress = current && judged && !FIXED.equals(last.get("outcome"));
@@ -574,7 +574,8 @@ public class SkillSelfRepair {
                 tellOwner = "Self-repair could not fix " + skill + ". After " + trigger(ctx.originalMessage(),
                         startedAt(ctx)) + " the problem is back: " + problem + "\n\nThe last repair (task "
                         + last.get("repair_task_id") + ") " + did + ", and only a fix self-repair has checked earns "
-                        + "another try: it is left to you, until a run of the skill goes well or the skill is changed. "
+                        + "another try: it is left to you -- you can have it fixed in a chat -- until a run of the "
+                        + "skill goes well. "
                         + "That repair's report:\n\n" + last.get("report");
                 line = "_🔧 Self-repair is not tried again for " + skill + ": its last repair (task "
                         + last.get("repair_task_id") + ") " + did + ". You were told; it is left to you._";
@@ -907,7 +908,7 @@ public class SkillSelfRepair {
 
     /** The rule, for the owner, after a repair that ended without a fix it checked. */
     static final String LEFT = " Only a fix self-repair has checked earns another try: if the problem shows again, it "
-            + "is left to you -- until a run of the skill goes well, or the skill is changed.";
+            + "is left to you -- you can have it fixed in a chat -- until a run of the skill goes well.";
 
     /** What an outcome is, for the owner. */
     private static String said(String outcome, String notRun, AgentResult ended) {
