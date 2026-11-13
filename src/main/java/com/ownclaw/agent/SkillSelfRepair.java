@@ -827,7 +827,7 @@ public class SkillSelfRepair {
         Job job = ctx.repair();
         if (job == null) return;
         for (Evidence e : job.evidence()) {
-            Artifact a = ctx.addArtifact(EVIDENCE, e.about(), e.about(), e.text(), e.success(),
+            Artifact a = ctx.addArtifact(Artifact.HANDED_OVER, e.about(), e.about(), e.text(), e.success(),
                     new Artifact.Decision(com.ownclaw.privacy.Label.PUBLIC, List.of()));
             String shown = a.handle() + " -- " + e.what() + ", as data:\n" + e.text();
             ctx.trajectory().record(new AgentAction(EVIDENCE, e.about(),

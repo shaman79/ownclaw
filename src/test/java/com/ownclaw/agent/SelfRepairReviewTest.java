@@ -614,6 +614,32 @@ class SelfRepairReviewTest {
                 "the list as written, its filled-in leaf by handle");
     }
 
+    // R4-8 (Rv4 F): an argument value with "ok": false in it was read as a FAILED result, and its re-run refused.
+    @Test
+    @DisplayName("R4-8: an argument value that is JSON with ok: false is handed over and re-run by its handle")
+    void anArgumentWithOkFalseStillReruns(@TempDir Path tmp) throws Exception {
+        var fetched = new java.util.concurrent.CopyOnWriteArrayList<java.util.Map<String, Object>>();
+        fix = new Fix(tmp, skill("router_status", false, List.of(), false, fetched,
+                p -> com.ownclaw.agent.tools.ToolResult.success("{\"ok\": true, \"wan\": {\"ok\": false, "
+                        + "\"reason\": \"no carrier\"}}")));
+        fix.rig.queue.start();
+        fix.rig.cloud.think.add(LoopRig.call("router_status", java.util.Map.of()));
+        fix.rig.cloud.think.add(LoopRig.call(MENU, java.util.Map.of("html", "{{1.wan}}")));
+        fix.rig.cloud.think.add(problems("Done.", List.of(java.util.Map.of("tool", MENU, "what", PROBLEM))));
+        fix.rig.cloud.think.add(LoopRig.call(MENU, java.util.Map.of("html", "{{2}}")));
+        fix.rig.cloud.think.add(respond("Ran it."));
+        fix.unattended(TASK);
+        var row = fix.ended(fix.lastId());
+        assertTrue(String.valueOf(row.get("goal")).contains("- {{2}}: the value of argument 'html'"),
+                String.valueOf(row.get("goal")));
+        assertEquals(2, fix.menuCalls.size(), "the re-run by the handle was refused: " + fix.menuCalls);
+        assertEquals(fix.menuCalls.get(0), fix.menuCalls.get(1));
+        // A real skill's ok: false is still a failure.
+        assertFalse(new Artifact("router_status", java.util.Map.of(), "{\"ok\": false}", true).succeeded());
+        assertTrue(new Artifact(Artifact.HANDED_OVER, java.util.Map.of(), "{\"ok\": false}", true).succeeded());
+        assertFalse(new Artifact(Artifact.HANDED_OVER, java.util.Map.of(), "{\"ok\": true}", false).succeeded());
+    }
+
     // R2-4 (P11): the evidence kept the trigger's {{n}}, which name other results inside the repair.
     @Test
     @DisplayName("R2-4: the evidence gives a call's arguments as they ran, so the repair's re-run reads the same input")
