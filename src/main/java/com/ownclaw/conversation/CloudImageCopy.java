@@ -649,13 +649,26 @@ public final class CloudImageCopy {
     /** An IDAT chunk shorter than this, but for the last, is one part beside the picture's data ({@link #MAX_PARTS}). */
     private static final int SHORT_IDAT = 1024;
 
+    /** What is beside the picture where a setting of it belongs: a setting of the wrong length, a palette too long. */
+    private static final String IN_A_SETTING = "data where a setting of the picture belongs";
+
+    /** What a file carries where no picture's data or table is: past its compressed data's end, in a table no part uses. */
+    private static final String HIDDEN = "data hidden where the picture's own belongs";
+
     private static Header png(Bytes in) throws IOException {
         in.skip(8);
         var beside = new LinkedHashSet<String>();
-        int colorType = -1, bitDepth = 8, orientation = 1, parts = 0;
-        long lastIdat = -1;
+        int colorType = -1, bitDepth = 8, orientation = 1, parts = 0, interlace = 0, paletteEntries = -1;
+        long lastIdat = -1, width = 0, height = 0;
         var drawn = new java.util.ArrayList<Integer>();
         boolean more = false;
+        // The picture's compressed data, inflated as it is walked: what comes after its end -- in its
+        // stream, in another IDAT, or past the rows its header declares -- is no part of the picture.
+        var stream = new java.util.zip.Inflater();
+        byte[] sink = new byte[1 << 16];
+        long inflated = 0, rows = 0;
+        boolean inData = false, afterData = false, ended = false, hidden = false;
+        try {
         while (true) {
             int start = in.position();
             long length = in.u32();
@@ -674,17 +687,55 @@ public final class CloudImageCopy {
                 parts++;
             }
             if (parts > MAX_PARTS) return Header.refused(TOO_MANY_PARTS);
+            if (inData && !type.equals("IDAT")) afterData = true;
             switch (type) {
                 case "IHDR" -> {
                     if (length != 13) return Header.refused("it is not a PNG the server can read: its header is broken");
-                    long width = in.u32(), height = in.u32();
+                    width = in.u32();
+                    height = in.u32();
                     if (tooManyPixels(width, height)) return Header.refused(TOO_MANY_PIXELS);
                     bitDepth = in.u8();
                     colorType = in.u8();
-                    in.skip(3 + 4);
+                    in.skip(2);
+                    interlace = in.u8();
+                    in.skip(4);
+                    rows = rawSize(width, height, bitDepth, colorType, interlace);
                     continue;
                 }
+                case "IDAT" -> {
+                    if (width == 0) return Header.refused("it is not a PNG the server can read: its header is broken");
+                    inData = true;
+                    if (afterData || ended) {
+                        // An IDAT after other chunks, or after the compressed data had ended.
+                        if (length > 0) hidden = true;
+                    } else {
+                        stream.setInput(in.array(), in.position(), (int) Math.min(length, in.remaining()));
+                        while (true) {
+                            int got;
+                            try {
+                                got = stream.inflate(sink);
+                            } catch (java.util.zip.DataFormatException broken) {
+                                return Header.refused("it is not a PNG the server can read: its compressed data is broken");
+                            }
+                            inflated += got;
+                            if (inflated > rows) {
+                                hidden = true;
+                                ended = true;
+                                break;
+                            }
+                            if (stream.finished()) {
+                                ended = true;
+                                if (stream.getRemaining() > 0) hidden = true;
+                                break;
+                            }
+                            if (got == 0 && (stream.needsInput() || stream.needsDictionary())) break;
+                            in.inTime();
+                        }
+                    }
+                }
                 case "IEND" -> {
+                    if (length != 0) beside.add("data inside the picture's end");
+                    if (hidden) beside.add(HIDDEN);
                     in.skip(length + 4);
                     if (in.remaining() > 0) beside.add("bytes after the picture's end");
                     int samples = switch (colorType) {
@@ -704,6 +755,14 @@ public final class CloudImageCopy {
                     beside.add("EXIF data");
                     continue;
                 }
+                // A palette of more colours than the pixels can name, transparency for more than it has.
+                case "PLTE" -> {
+                    paletteEntries = (int) (length / 3);
+                    if (colorType == 3 && bitDepth < 8 && paletteEntries > 1 << bitDepth) beside.add(IN_A_SETTING);
+                }
+                case "tRNS" -> {
+                    if (colorType == 3 && length > Math.max(0, paletteEntries)) beside.add(IN_A_SETTING);
+                }
                 default -> { }
             }
             if (!PICTURE_CHUNKS.contains(type)) {
@@ -715,10 +774,33 @@ public final class CloudImageCopy {
                     default -> "data of another program";
                 });
             } else if (!fits(type, length, colorType)) {
-                beside.add("data where a setting of the picture belongs");
+                beside.add(IN_A_SETTING);
             }
             in.skip(length + 4);
         }
+        } finally {
+            stream.end();
+        }
+    }
+
+    /** The bytes a PNG's compressed data inflates to: each row of each pass, with its filter byte. */
+    static long rawSize(long width, long height, int bitDepth, int colorType, int interlace) {
+        int samples = switch (colorType) {
+            case 0, 3 -> 1;
+            case 4 -> 2;
+            case 2 -> 3;
+            default -> 4;
+        };
+        long bits = (long) samples * bitDepth;
+        if (interlace == 0) return height * (1 + Math.ceilDiv(width * bits, 8));
+        long total = 0;
+        // Adam7: x start, y start, x step, y step.
+        for (int[] pass : new int[][]{{0, 0, 8, 8}, {4, 0, 8, 8}, {0, 4, 4, 8}, {2, 0, 4, 4}, {0, 2, 2, 4}, {1, 0, 2, 2}, {0, 1, 1, 2}}) {
+            long w = width > pass[0] ? Math.ceilDiv(width - pass[0], pass[2]) : 0;
+            long h = height > pass[1] ? Math.ceilDiv(height - pass[1], pass[3]) : 0;
+            if (w > 0 && h > 0) total += h * (1 + Math.ceilDiv(w * bits, 8));
+        }
+        return total;
     }
 
     /** Whether a picture chunk is of the length the format gives it. */
@@ -740,6 +822,14 @@ public final class CloudImageCopy {
         var beside = new LinkedHashSet<String>();
         int frame = -1, components = 0, scans = 0, orientation = 1, parts = 0;
         boolean interleaved = true;
+        // The quantization and Huffman tables defined, and those the frame and its scan use: a table
+        // no part uses -- or one defined twice, or after the scan -- holds no part of the picture.
+        int[] quantDefined = new int[4];
+        boolean[] quantUsed = new boolean[4];
+        int[][] huffDefined = new int[2][4];
+        boolean[][] huffUsed = new boolean[2][4];
+        boolean unused = false;
+        String broken = "it is not a JPEG the server can read: its structure is broken";
         while (true) {
             int b = in.read();
             if (b == -1) throw new EOFException();
@@ -766,10 +856,27 @@ public final class CloudImageCopy {
                 if (height == 0) return Header.refused("it is not a baseline JPEG, the kind browsers paste");
                 if (tooManyPixels(width, height)) return Header.refused(TOO_MANY_PIXELS);
                 components = in.u8();
-                in.skip(length - 6);
+                if (length < 6 + 3 * components) return Header.refused(broken);
+                for (int c = 0; c < components; c++) {
+                    in.skip(2);
+                    int table = in.u8();
+                    if (table > 3) return Header.refused(broken);
+                    quantUsed[table] = true;
+                }
+                if (length > 6 + 3 * components) beside.add(IN_A_SETTING);
+                in.skip(length - 6 - 3 * components);
             } else if (marker == 0xDA) {
                 int inScan = in.u8();
-                in.skip(length - 1);
+                if (length < 1 + 2 * inScan + 3) return Header.refused(broken);
+                for (int c = 0; c < inScan; c++) {
+                    in.skip(1);
+                    int tables = in.u8();
+                    if (tables >> 4 > 3 || (tables & 15) > 3) return Header.refused(broken);
+                    huffUsed[0][tables >> 4] = true;
+                    huffUsed[1][tables & 15] = true;
+                }
+                if (length > 1 + 2 * inScan + 3) beside.add(IN_A_SETTING);
+                in.skip(length - 1 - 2 * inScan);
                 scans++;
                 if (inScan != components) interleaved = false;
                 in.skipScan();
@@ -778,7 +885,27 @@ public final class CloudImageCopy {
                 String what = segment(marker, data);
                 if (marker == 0xE1 && startsWith(data, "Exif\0\0")) orientation = orientation(data, 6);
                 if (what != null) beside.add(what);
-            } else if (marker == 0xC4 || marker == 0xDB || marker == 0xDD || marker == 0xCC) {
+            } else if (marker == 0xDB) {
+                for (int at = 0; at < length; ) {
+                    int pq = in.u8(), size = (pq >> 4) == 0 ? 64 : 128;
+                    if (pq >> 4 > 1 || (pq & 15) > 3 || at + 1 + size > length) return Header.refused(broken);
+                    in.skip(size);
+                    at += 1 + size;
+                    if (++quantDefined[pq & 15] > 1 || scans > 0) unused = true;
+                }
+            } else if (marker == 0xC4) {
+                for (int at = 0; at < length; ) {
+                    int tc = in.u8();
+                    if (tc >> 4 > 1 || (tc & 15) > 3 || at + 17 > length) return Header.refused(broken);
+                    int symbols = 0;
+                    for (int i = 0; i < 16; i++) symbols += in.u8();
+                    if (at + 17 + symbols > length) return Header.refused(broken);
+                    in.skip(symbols);
+                    at += 17 + symbols;
+                    if (++huffDefined[tc >> 4][tc & 15] > 1 || scans > 0) unused = true;
+                }
+            } else if (marker == 0xDD || marker == 0xCC) {
+                if (marker == 0xDD && length != 2) beside.add(IN_A_SETTING);
                 in.skip(length);
             } else {
                 return Header.refused("it is not a baseline JPEG, the kind browsers paste");
@@ -795,6 +922,11 @@ public final class CloudImageCopy {
             return Header.refused("it is a JPEG in several scans, which browsers never paste and which takes memory in "
                     + "proportion to its whole size to read, so it stays private -- skills still get it");
         }
+        for (int t = 0; t < 4; t++) {
+            if (quantDefined[t] > 0 && !quantUsed[t]) unused = true;
+            for (int c = 0; c < 2; c++) if (huffDefined[c][t] > 0 && !huffUsed[c][t]) unused = true;
+        }
+        if (unused) beside.add(HIDDEN);
         return new Header(Format.JPEG, Math.max(1, components) * 16, Math.max(1, components), orientation, words(beside),
                 null, null);
     }
@@ -845,16 +977,19 @@ public final class CloudImageCopy {
             } else if (b == 0x21) {
                 int label = in.u8();
                 parts[0]++;
+                String id = null;
+                if (label == 0xFF) id = new String(in.readFully(in.u8()), StandardCharsets.ISO_8859_1);
+                var blocks = in.subBlocks(parts);
+                if (blocks == null) return Header.refused(TOO_MANY_PARTS);
                 if (label == 0xF9) {
-                    if (!in.skipSubBlocks(parts, false)) return Header.refused(TOO_MANY_PARTS);
+                    // How long to show the frame and its transparent colour: one block of four bytes.
+                    if (blocks.size() != 1 || blocks.get(0).length != 4) beside.add(IN_A_SETTING);
                 } else if (label == 0xFF) {
-                    int size = in.u8();
-                    String id = new String(in.readFully(size), StandardCharsets.ISO_8859_1);
-                    if (!id.equals("NETSCAPE2.0") && !id.equals("ANIMEXTS1.0")) beside.add("data of another program");
-                    if (!in.skipSubBlocks(parts, false)) return Header.refused(TOO_MANY_PARTS);
+                    // The loop count of an animation, as browsers write it, and nothing else.
+                    boolean loop = id.equals("NETSCAPE2.0") || id.equals("ANIMEXTS1.0");
+                    if (!loop || !loopBlocks(blocks)) beside.add("data of another program");
                 } else {
                     beside.add(label == 0xFE ? "a comment" : label == 0x01 ? "text" : "data of another program");
-                    if (!in.skipSubBlocks(parts, false)) return Header.refused(TOO_MANY_PARTS);
                 }
             } else {
                 return Header.refused("it is not a GIF the server can read: its structure is broken");
@@ -862,6 +997,20 @@ public final class CloudImageCopy {
         }
         if (images > 1) beside.add("more frames");
         return new Header(Format.GIF, 4, 1, 1, words(beside), null, null);
+    }
+
+    /**
+     * Whether a NETSCAPE2.0 extension's sub-blocks are its own: a loop count (3 bytes, the first 1),
+     * and at most a buffer size (5 bytes, the first 2), each once.
+     */
+    private static boolean loopBlocks(java.util.List<byte[]> blocks) {
+        boolean count = false, buffer = false;
+        for (byte[] b : blocks) {
+            if (b.length == 3 && b[0] == 1 && !count) count = true;
+            else if (b.length == 5 && b[0] == 2 && !buffer) buffer = true;
+            else return false;
+        }
+        return true;
     }
 
     private static String words(Set<String> beside) {
@@ -931,6 +1080,27 @@ public final class CloudImageCopy {
 
         int position() {
             return at;
+        }
+
+        byte[] array() {
+            return data;
+        }
+
+        void inTime() throws IOException {
+            deadline.inTime();
+        }
+
+        /**
+         * A GIF extension's sub-blocks, to the one of length 0, each counted in {@code parts}: null
+         * once they are more than {@link #MAX_PARTS}.
+         */
+        java.util.List<byte[]> subBlocks(int[] parts) throws IOException {
+            var out = new java.util.ArrayList<byte[]>();
+            for (int n = u8(); n != 0; n = u8()) {
+                if (++parts[0] > MAX_PARTS) return null;
+                out.add(readFully(n));
+            }
+            return out;
         }
 
         int read() throws IOException {

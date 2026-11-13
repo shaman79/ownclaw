@@ -175,6 +175,95 @@ class CloudImageCopyTest {
         // Mutation: draw grey with Java2D -> 188.
     }
 
+    /** What a crafted file hides where the walk could have called it the picture alone. */
+    static final byte[] PAYLOAD = "GPS 0.0N 0.0E owner@example.com".getBytes(StandardCharsets.ISO_8859_1);
+
+    @Test
+    @DisplayName("data hidden where no camera, phone or editor puts any is said, so what skills read is private: in IEND, past the compressed data, in an unused table, in a GIF's loop block")
+    void hiddenDataIsSaid(@TempDir Path dir) throws Exception {
+        byte[] png = TestImages.png(400, 300);
+        byte[] noEnd = Arrays.copyOf(png, png.length - 12);
+        var hidden = new java.util.LinkedHashMap<String, byte[]>();
+        var o = new java.io.ByteArrayOutputStream();
+        o.writeBytes(noEnd);
+        TestImages.chunk(o, "IEND", PAYLOAD);
+        hidden.put("data inside the picture's end", o.toByteArray());
+        o = new java.io.ByteArrayOutputStream();
+        o.writeBytes(noEnd);
+        TestImages.chunk(o, "IDAT", PAYLOAD);
+        TestImages.chunk(o, "IEND", new byte[0]);
+        hidden.put("an IDAT after the compressed data's end", o.toByteArray());
+        byte[] row = new byte[1 + 3 * 40];
+        hidden.put("rows past those its header declares", TestImages.pngOf("IHDR", TestImages.ihdr(40, 30, 8, 2),
+                "IDAT", TestImages.idat(row, 30 + 400), "IEND", new byte[0]));
+        byte[] jpeg = TestImages.encoded(TestImages.screenshot(400, 300), "jpeg");
+        byte[] q = new byte[65];
+        q[0] = 3;
+        for (int i = 0; i < 64; i++) q[1 + i] = i < PAYLOAD.length ? PAYLOAD[i] : 1;
+        hidden.put("a quantization table no component uses", TestImages.withSegment(jpeg, 0xDB, q));
+        byte[] h = new byte[1 + 16 + PAYLOAD.length];
+        h[0] = 0x13;
+        h[16] = (byte) PAYLOAD.length;
+        System.arraycopy(PAYLOAD, 0, h, 17, PAYLOAD.length);
+        hidden.put("a Huffman table no scan uses", TestImages.withSegment(jpeg, 0xC4, h));
+        for (var e : hidden.entrySet()) {
+            var made = CloudImageCopy.of(file(dir, "h" + e.getKey().hashCode(), e.getValue()));
+            assertNotNull(made.copy(), e.getKey() + ": " + made.privateBecause());
+            assertNotNull(made.copy().metadata(), e.getKey() + " is said");
+            assertFalse(latin1(made.copy().bytes()).contains("owner@example.com"), "and never leaves");
+        }
+        byte[] gif = TestImages.encoded(TestImages.screenshot(300, 200), "gif");
+        assertEquals("data of another program", CloudImageCopy.of(file(dir, "netscape.gif", withLoop(gif, PAYLOAD))).copy().metadata());
+        // A palette that names more colours than one bit can.
+        var palette = new byte[3 * 256];
+        assertEquals("data where a setting of the picture belongs", CloudImageCopy.of(file(dir, "plte.png",
+                TestImages.pngOf("IHDR", TestImages.ihdr(16, 16, 1, 3), "PLTE", palette,
+                        "IDAT", TestImages.idat(new byte[3], 16), "IEND", new byte[0]))).copy().metadata());
+
+        // What encoders write is the picture alone: a colour and a grey JPEG, a GIF with its loop
+        // count, an interlaced PNG.
+        assertNull(CloudImageCopy.of(file(dir, "c.jpg", jpeg)).copy().metadata());
+        var grey = new BufferedImage(200, 100, BufferedImage.TYPE_BYTE_GRAY);
+        assertNull(CloudImageCopy.of(file(dir, "g.jpg", TestImages.encoded(grey, "jpeg"))).copy().metadata());
+        assertNull(CloudImageCopy.of(file(dir, "loop.gif", withLoop(gif, new byte[]{1, 0, 0}))).copy().metadata());
+        assertNull(CloudImageCopy.of(file(dir, "adam7.png", interlaced(TestImages.screenshot(123, 77)))).copy().metadata());
+        // Mutation: no inflating in the walk -> the extra IDAT and rows pass as the picture; no table
+        // count -> the unused tables do; any NETSCAPE2.0 block taken -> the loop block does.
+    }
+
+    /** {@code gif} with a NETSCAPE2.0 extension of one sub-block of {@code block} after its screen and palette. */
+    static byte[] withLoop(byte[] gif, byte[] block) {
+        int end = 13 + ((gif[10] & 0x80) != 0 ? 3 * (1 << ((gif[10] & 7) + 1)) : 0);
+        var o = new java.io.ByteArrayOutputStream();
+        o.write(gif, 0, end);
+        o.write(0x21);
+        o.write(0xFF);
+        o.write(11);
+        o.writeBytes("NETSCAPE2.0".getBytes(StandardCharsets.ISO_8859_1));
+        o.write(block.length);
+        o.writeBytes(block);
+        o.write(0);
+        o.write(gif, end, gif.length - end);
+        return o.toByteArray();
+    }
+
+    /** {@code image} as an interlaced (Adam7) PNG. */
+    static byte[] interlaced(BufferedImage image) throws Exception {
+        var writer = ImageIO.getImageWritersByFormatName("png").next();
+        var param = writer.getDefaultWriteParam();
+        param.setProgressiveMode(javax.imageio.ImageWriteParam.MODE_DEFAULT);
+        var bytes = new java.io.ByteArrayOutputStream();
+        try (var out = new javax.imageio.stream.MemoryCacheImageOutputStream(bytes)) {
+            writer.setOutput(out);
+            writer.write(null, new javax.imageio.IIOImage(image, null, null), param);
+        } finally {
+            writer.dispose();
+        }
+        byte[] png = bytes.toByteArray();
+        assertEquals(1, png[28], "interlaced");
+        return png;
+    }
+
     @Test
     @DisplayName("what the file carries beside the picture is said, and never leaves: EXIF with a place and an address, text, bytes after the end")
     void metadataIsSaidAndNeverLeaves(@TempDir Path dir) throws Exception {
