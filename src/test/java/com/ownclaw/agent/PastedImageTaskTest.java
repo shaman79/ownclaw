@@ -390,12 +390,14 @@ class PastedImageTaskTest {
         rig.cloud.think.add(respond("three more seen"));
         rig.turn(session, "and these too", pasteMany(rig, 3));
         List<String> notes = LocalModeTest.rows(rig).stream().filter(n -> n.startsWith("📦 This chat holds more images")).toList();
-        assertEquals(List.of(
+        // The rows' ids do not keep their order: the two notes, whichever first.
+        assertEquals(2, notes.size(), "the second turn's two steps say it once, and the third once: " + notes);
+        assertEquals(java.util.Set.of(
                 "📦 This chat holds more images than one request to the cloud model takes, so its 2 oldest are no longer "
                         + "shown to it: each message still says an image was pasted with it.",
                 "📦 This chat holds more images than one request to the cloud model takes, so 3 more of its oldest are no "
-                        + "longer shown to it (5 in all): each message still says an image was pasted with it."), notes,
-                "the second turn's two steps say it once; the third says 3 more, not 'its 3 oldest'");
+                        + "longer shown to it (5 in all): each message still says an image was pasted with it."),
+                new java.util.HashSet<>(notes), "the third says 3 more, not 'its 3 oldest'");
         // Mutation: say "its N oldest" whatever was folded before -> the third note undercounts by two.
     }
 
