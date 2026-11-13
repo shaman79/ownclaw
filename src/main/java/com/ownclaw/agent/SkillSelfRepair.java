@@ -208,6 +208,16 @@ public class SkillSelfRepair {
      */
     @org.springframework.context.event.EventListener(org.springframework.boot.context.event.ApplicationReadyEvent.class)
     public void resume() {
+        // Nothing of it may get out: an exception out of an ApplicationReadyEvent listener fails OwnClaw's
+        // start. A database that is busy now leaves the repairs 'running', and the next start goes on.
+        try {
+            resumeAll();
+        } catch (RuntimeException e) {
+            log.error("Self-repair could not start again the repairs cut off by the restart: {}", e.getMessage(), e);
+        }
+    }
+
+    private void resumeAll() {
         if (!enabled()) {
             // Switched off since it began: what was under way is not started again.
             int cut = jdbc.update("UPDATE skill_repairs SET outcome = ?, ended_at = datetime('now') WHERE outcome = ?",

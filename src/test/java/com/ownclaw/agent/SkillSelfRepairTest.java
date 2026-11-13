@@ -796,6 +796,27 @@ class SkillSelfRepairTest {
         assertEquals(0, queue.getQueueSize());
     }
 
+    @Test
+    @DisplayName("R2-5 (P3): a database error while starting repairs again never fails OwnClaw's start; the repair stays to be started next time")
+    void aBusyDatabaseDoesNotFailTheStart(@TempDir Path tmp) throws Exception {
+        fix = new Fix(tmp);
+        fix.menuRun(true);
+        var busy = new org.springframework.jdbc.core.JdbcTemplate(fix.rig.jdbc.getDataSource()) {
+            @Override
+            public List<Map<String, Object>> queryForList(String sql, Object... args) {
+                if (sql.contains("skill_repairs")) {
+                    throw new org.springframework.dao.CannotAcquireLockException("[SQLITE_BUSY] database is locked");
+                }
+                return super.queryForList(sql, args);
+            }
+        };
+        var queue = new TaskQueue(fix.rig.loop, fix.rig.events, fix.rig.emitter, fix.rig.config, fix.rig.cancellation);
+        var repair = new SkillSelfRepair(busy, fix.rig.config, fix.rig.skills, fix.rig.registry, queue,
+                new ResultDelivery(fix.rig.chat, fix.rig.emitter), fix.rig.chat, fix.rig.events, ZoneId.of("UTC"));
+        assertDoesNotThrow(repair::resume);
+        assertEquals("running", fix.repairRow(0).get("outcome"), "left for the next start");
+    }
+
     static List<String> states(Fix fix, String taskId) {
         return fix.rig.jdbc.queryForList("SELECT json_extract(details, '$.state') FROM events WHERE event_type = "
                 + "'self_repair' AND task_id = ? ORDER BY id", String.class, taskId);
