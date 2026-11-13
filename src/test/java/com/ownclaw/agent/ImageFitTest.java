@@ -66,16 +66,17 @@ class ImageFitTest {
     }
 
     @Test
-    @DisplayName("past the API's image count, the chat's oldest images are their lines alone -- folded to half the limit at once, never this message's, and so they stay")
+    @DisplayName("past the API's image count, the chat's oldest images are their lines alone -- only as many as the limit forces, never this message's, and so they stay")
     void theOldestImagesFoldFirst() {
         // Images with messages 0, 2, 4 and 6, and one with this message; three a request at most.
         var ctx = chat(8, List.of(0, 2, 4, 6));
         ctx.addPastedImage(image("now", 640, 480, 10_000), List.of("pasted image"));
-        // Replayed: message 6's request held four, one past three -- folded down to half of three.
-        assertEquals(0, ctx.fitImages(3, Long.MAX_VALUE), "this message moved nothing: the fold was message 6's");
+        // Message 6's request held four, one past three: it folded one. This one holds five: two.
+        assertEquals(1, ctx.fitImages(3, Long.MAX_VALUE), "one more than the last turn's request folded");
+        assertEquals(2, ctx.conversationImagesFolded());
         assertTrue(ctx.conversationImagesShown(0).isEmpty());
         assertTrue(ctx.conversationImagesShown(2).isEmpty());
-        assertTrue(ctx.conversationImagesShown(4).isEmpty());
+        assertEquals(1, ctx.conversationImagesShown(4).size(), "no more than the limit forces");
         assertEquals(1, ctx.conversationImagesShown(6).size(), "the newest of the chat kept");
         assertEquals(1, ctx.pasted().size(), "this message's own is never folded");
         assertEquals(0, ctx.fitImages(600, Long.MAX_VALUE), "a larger limit later brings none back: the same bytes");
@@ -87,36 +88,42 @@ class ImageFitTest {
         bytes.fitImages(600, LlmMessage.Image.base64Bytes(10_000) + LlmMessage.Image.base64Bytes(1_000_000));
         assertEquals(1, bytes.conversationImagesShown(6).size(), "the newest kept");
         assertTrue(bytes.conversationImagesShown(4).isEmpty());
-        // Mutation: fold the newest first -> the image the owner is talking about now goes.
+
+        // The reviewers' numbers: 600 in the chat and one now on a 600 a request, one folds -- not 301;
+        // 71 of 1.33 MB as sent and one now past 96 MB, one folds -- not 37.
+        var count = turnWithImages(1200, "now", 10_000);
+        assertEquals(1, count.fitImages(600, LlmMessage.IMAGE_BYTES_PER_REQUEST));
+        assertEquals(1, count.conversationImagesFolded());
+        var large = turnWithImages(142, "now", 1_000_000);
+        assertEquals(1, large.fitImages(600, LlmMessage.IMAGE_BYTES_PER_REQUEST));
+        assertEquals(1, large.conversationImagesFolded());
+        // Mutation: fold to half the limit at once -> 301 and 37; fold the newest first -> the image the
+        // owner is talking about now goes.
     }
 
     @Test
-    @DisplayName("turn after turn past the limit, where the chat is folded to stays put -- it moves once in fifty turns, not on every turn that pastes one")
-    void theFoldStaysPutTurnByTurn() {
-        var engine = ChatCacheTest.engine();
-        int moves = 0;
-        Integer was = null;
-        List<List<LlmMessage.Piece>> firstChat = null;
+    @DisplayName("turn after turn past the limit, the fold moves on by what each turn's images force and no more -- never back, never this message's")
+    void theFoldMovesOnlyAsTheLimitForces() {
         for (int t = 0; t < 60; t++) {
             // 100 images in the chat when this starts, one more each turn, and one with each message.
-            var ctx = turnWithImages(200 + 2 * t, "now-" + t);
-            ctx.fitImages(100, Long.MAX_VALUE);
+            var ctx = turnWithImages(200 + 2 * t, "now-" + t, 700_000);
+            assertEquals(1, ctx.fitImages(100, Long.MAX_VALUE), "turn " + t + ": its one image folds the oldest one");
             int folded = 0;
             for (int m = 0; m < 200 + 2 * t; m += 2) if (ctx.conversationImagesShown(m).isEmpty()) folded++;
-            if (was != null && was != folded) moves++;
-            was = folded;
-            var chat = LlmMessage.layout(engine.buildMessages(ctx, "anthropic", ChatCacheTest.FASTEST).get(1).content()).chat();
-            // The chat the first of these turns cached -- its first 200 messages, images and all -- is
-            // the same blocks on every turn until the next fold.
-            if (t == 1) firstChat = List.copyOf(chat.subList(0, 200));
-            if (t > 1 && t < 51) assertEquals(firstChat, chat.subList(0, 200), "turn " + t + ": the cached chat changed");
+            assertEquals(t + 1, folded, "turn " + t + ": the oldest " + (t + 1) + ", and no more");
+            assertEquals(t + 1, ctx.conversationImagesFolded());
+            assertEquals(1, ctx.pasted().size());
         }
-        assertEquals(1, moves, "one fold in sixty turns, at the limit: each a single rewrite of the cache");
-        // Mutation: fold just enough -> the fold moves on every turn, and every turn writes the chat again.
+        // Mutation: fold in batches -> turns that fold none, and turns that fold half the chat.
     }
 
     /** A turn of a chat of {@code messages} messages, every user message with an image, and one pasted now. */
     static AgentContext turnWithImages(int messages, String pastedNow) {
+        return turnWithImages(messages, pastedNow, 700_000);
+    }
+
+    /** {@link #turnWithImages(int, String)}, each image's copy {@code bytes} long. */
+    static AgentContext turnWithImages(int messages, String pastedNow, long bytes) {
         var ctx = new AgentContext("u1", "t" + messages, "and this one?");
         var texts = new ArrayList<String>();
         var images = new java.util.HashMap<Integer, List<PastedImage>>();
@@ -124,11 +131,11 @@ class ImageFitTest {
         for (int i = 0; i < messages; i++) {
             boolean user = i % 2 == 0;
             texts.add((user ? "USER: screenshot " : "ASSISTANT: seen ") + i + "\n");
-            if (user) images.put(i, List.of(image("img-" + k++, 1456, 816, 700_000)));
+            if (user) images.put(i, List.of(image("img-" + k++, 1456, 816, bytes)));
         }
         ctx.setConversationSummary(AgentContext.CONVERSATION_HEADER + String.join("", texts).strip());
         ctx.setConversation(texts, images);
-        ctx.addPastedImage(image(pastedNow, 1456, 816, 700_000), List.of("pasted image"));
+        ctx.addPastedImage(image(pastedNow, 1456, 816, bytes), List.of("pasted image"));
         return ctx;
     }
 

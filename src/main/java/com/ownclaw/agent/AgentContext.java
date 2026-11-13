@@ -435,59 +435,47 @@ public class AgentContext {
      * Fold the chat's oldest images to their lines -- each message still says an image was pasted
      * with it -- so that a request's images are within what the Messages API takes: {@code maxImages}
      * images and {@code maxBytes} of them base64-encoded, this message's own counted with them. Those
-     * are never folded. Returns how many this message's own images made fold now; none when the chat
-     * was folded as far already.
+     * are never folded. Returns how many fold now that this request had not folded already: on a
+     * turn's first request, beyond those the last turn's had.
      * <p>
-     * Where the chat is folded to is a function of its images alone, so every turn finds it where the
-     * last one left it: the chat's turns are replayed one by one, each message's images counted as a
-     * request's own when it was sent, and whenever a turn's request would have been past a limit, the
-     * oldest images are folded until it is at half of that limit -- in a batch, not one at a time.
-     * Folding just enough moved the fold one image on every turn that pasted one, and each move changed
-     * the chat's first blocks, so every such turn wrote the whole chat to the cache again. Half the
-     * limit is room for many turns before the next fold: a hysteresis on the API's own limits. Folded,
-     * an image stays so for the rest of the task.
+     * Only what the limits force, and no more: a folded image is gone for the model, and the owner
+     * asked that nothing be dropped that need not be (folding to half the limit at once took 301 of
+     * 601 where one would do). So past the limits, each turn that pastes an image folds one more of
+     * the oldest, and writes the chat to the cache again -- the price of showing every image the
+     * request can carry. Where the chat is folded to is a function of its images and this message's
+     * alone: the fewest of the oldest that bring the request within both limits. It only moves on,
+     * as the chat grows; folded, an image stays so for the rest of the task.
      */
     public synchronized int fitImages(int maxImages, long maxBytes) {
-        int folded = 0;
-        int k = 0;
-        for (int message = 0; message < conversation.size(); message++) {
-            int first = k;
-            long bytes = 0;
-            while (k < chatImages.size() && chatImages.get(k).message() == message) {
-                bytes += com.ownclaw.llm.LlmMessage.Image.base64Bytes(chatImages.get(k).image().bytes());
-                k++;
-            }
-            folded = settle(folded, first, k - first, bytes, maxImages, maxBytes);
-        }
         int count = 0;
         long bytes = 0;
         for (Attachment p : pasted()) {
             count++;
             bytes += com.ownclaw.llm.LlmMessage.Image.base64Bytes(p.image().bytes());
         }
-        int before = folded;
-        folded = settle(folded, chatImages.size(), count, bytes, maxImages, maxBytes);
-        chatImagesFolded = Math.max(chatImagesFolded, folded);
-        return folded - before;
+        // The chat as the last turn's request left it: its own images were that request's.
+        int was = Math.max(chatImagesFolded, foldFor(0, 0, maxImages, maxBytes));
+        int now = Math.max(was, foldFor(count, bytes, maxImages, maxBytes));
+        chatImagesFolded = now;
+        return now - was;
+    }
+
+    /** How many of the chat's images are shown by their lines alone now ({@link #fitImages}). */
+    public synchronized int conversationImagesFolded() {
+        return chatImagesFolded;
     }
 
     /**
-     * Where the chat is folded to once a request is sent with {@code count} images of its own --
-     * {@code bytes} of them -- after the chat's first {@code history} images, folded up to {@code from}:
-     * there still, when the request is within both limits; else as far as takes the limit it was past
-     * to half of it, and the request within both.
+     * The fewest of the chat's oldest images that, folded, bring a request carrying the rest and
+     * {@code count} images of its own -- {@code bytes} of them -- within both limits; all of them
+     * when even that does not.
      */
-    private int settle(int from, int history, int count, long bytes, int maxImages, long maxBytes) {
-        int shown = history - from;
+    private int foldFor(int count, long bytes, int maxImages, long maxBytes) {
+        int shown = chatImages.size();
         long shownBytes = 0;
-        for (int k = from; k < history; k++) {
-            shownBytes += com.ownclaw.llm.LlmMessage.Image.base64Bytes(chatImages.get(k).image().bytes());
-        }
-        boolean tooMany = shown + count > maxImages, tooLarge = shownBytes + bytes > maxBytes;
-        if (!tooMany && !tooLarge) return from;
-        int folded = from;
-        while (folded < history && (tooMany && shown + count > maxImages / 2 || tooLarge && shownBytes + bytes > maxBytes / 2
-                || shown + count > maxImages || shownBytes + bytes > maxBytes)) {
+        for (ChatImage c : chatImages) shownBytes += com.ownclaw.llm.LlmMessage.Image.base64Bytes(c.image().bytes());
+        int folded = 0;
+        while (folded < chatImages.size() && (shown + count > maxImages || shownBytes + bytes > maxBytes)) {
             shownBytes -= com.ownclaw.llm.LlmMessage.Image.base64Bytes(chatImages.get(folded).image().bytes());
             shown--;
             folded++;
