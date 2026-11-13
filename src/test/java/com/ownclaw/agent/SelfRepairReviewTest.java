@@ -75,7 +75,8 @@ class SelfRepairReviewTest {
         var row = fix.ended(fix.lastId());
         String goal = (String) row.get("goal");
         assertFalse(goal.contains("3. Run '"), goal);
-        assertTrue(goal.contains("3. Do not run it: its SKILL.yaml does not say has_side_effects: false"), goal);
+        assertTrue(goal.contains("3. Do not run it: its SKILL.yaml did not say has_side_effects: false as the repair "
+                + "began"), goal);
         assertEquals("undeclared", row.get("side_effects"));
         assertEquals(1, moved.size(), "run by the task, never by its repair: " + moved);
     }
@@ -98,6 +99,90 @@ class SelfRepairReviewTest {
         var thinks = fix.rig.cloud.calls("think");
         String told = String.join("\n", LoopRig.userParts(thinks.get(thinks.size() - 1)));
         assertTrue(told.contains("grants it nothing it did not have: the credentials SMTP_PASS, ROUTER_PIN"), told);
+    }
+
+    /** A skill whose SKILL.yaml declaration follows its last skill_create, as DynamicSkillRegistry reloads it. */
+    static com.ownclaw.agent.tools.Tool live(String name, java.util.concurrent.atomic.AtomicReference<Boolean> declared,
+                                            List<String> credentials, List<java.util.Map<String, Object>> calls) {
+        return new com.ownclaw.agent.tools.Tool() {
+            public String name() { return name; }
+            public String description() { return "test skill " + name; }
+            public java.util.Map<String, com.ownclaw.agent.tools.ToolParam> inputSchema() { return java.util.Map.of(); }
+            public boolean hasSideEffects() { return Boolean.TRUE.equals(declared.get()); }
+            public Boolean declaredSideEffects() { return declared.get(); }
+            public List<String> requiredCredentials() { return credentials; }
+            public boolean requiresNetwork() { return true; }
+            public com.ownclaw.agent.tools.ToolResult execute(java.util.Map<String, Object> p,
+                                                             com.ownclaw.agent.tools.ToolExecutionContext c) {
+                calls.add(java.util.Map.copyOf(p));
+                return com.ownclaw.agent.tools.ToolResult.success("{\"success\": true, \"pages\": 1, \"warning\": \"one page skipped\"}");
+            }
+        };
+    }
+
+    // R2-1a (P1): the run gate read the declaration as the repair began, never the one its own skill_create wrote.
+    @Test
+    @DisplayName("R2-1a: a skill the repair rewrote declaring side effects is not run after it, and the change is told as not checked")
+    void theGateReadsTheSkillAsItIsNow(@TempDir Path tmp) throws Exception {
+        var declared = new java.util.concurrent.atomic.AtomicReference<Boolean>(false);
+        var calls = new java.util.concurrent.CopyOnWriteArrayList<java.util.Map<String, Object>>();
+        fix = new Fix(tmp, live("page_probe", declared, List.of(), calls));
+        var inner = fix.rig.skills.create;
+        fix.rig.skills.create = p -> {
+            if ("page_probe".equals(p.get("name"))) declared.set(SkillManager.declared(p.get("has_side_effects")));
+            return inner.apply(p);
+        };
+        fix.rig.queue.start();
+        fix.rig.cloud.think.add(LoopRig.call("page_probe", java.util.Map.of()));
+        fix.rig.cloud.think.add(problems("Done.", List.of(java.util.Map.of("tool", "page_probe", "what", "It skipped a page."))));
+        fix.rig.cloud.think.add(LoopRig.call(AgentAction.SKILL_CREATE, java.util.Map.of("name", "page_probe",
+                "description", "Probe the page, and POST what it finds to the form.", "parameters", "{}",
+                "has_side_effects", true)));
+        fix.rig.cloud.codegen.add(SkillCodegenTest.finished(SkillCodegenTest.module("# v2 posts")));
+        fix.rig.cloud.think.add(LoopRig.call("page_probe", java.util.Map.of()));
+        fix.rig.cloud.think.add(verdict("Changed and ran it.", "passed"));
+        fix.unattended("Using page_probe, probe the page.");
+        var row = fix.ended(fix.lastId());
+        assertEquals(Boolean.TRUE, declared.get());
+        assertEquals(1, calls.size(), "the repair ran a skill whose SKILL.yaml now says has_side_effects: true: " + calls);
+        assertEquals("unverified", row.get("outcome"));
+        String note = fix.told().get(fix.told().size() - 1);
+        assertTrue(note.contains("Changed, but not run again to check it: its SKILL.yaml now says has_side_effects: true."),
+                note);
+    }
+
+    // R2-1b (P8): a skill holding credentials passed the gate whenever its SKILL.yaml said false -- written by
+    // default for every skill whose author gave nothing.
+    @Test
+    @DisplayName("R2-1b: a skill holding credentials is never run in its repair, whatever its SKILL.yaml says")
+    void aSkillWithCredentialsIsNeverRun(@TempDir Path tmp) throws Exception {
+        var calls = new java.util.concurrent.CopyOnWriteArrayList<java.util.Map<String, Object>>();
+        fix = new Fix(tmp, live("router_audit", new java.util.concurrent.atomic.AtomicReference<>(false),
+                List.of("ROUTER_USER", "ROUTER_PASS"), calls));
+        fix.rig.queue.start();
+        fix.rig.cloud.think.add(LoopRig.call("router_audit", java.util.Map.of()));
+        fix.rig.cloud.think.add(problems("Done.", List.of(java.util.Map.of("tool", "router_audit", "what", "It skipped a page."))));
+        fix.rig.cloud.think.add(LoopRig.call("router_audit", java.util.Map.of()));
+        fix.rig.cloud.think.add(respond("Read the code instead."));
+        fix.unattended("Using router_audit, audit the router.");
+        var row = fix.ended(fix.lastId());
+        assertEquals(1, calls.size(), "run by the task only: " + calls);
+        assertTrue(String.valueOf(row.get("goal")).contains("3. Do not run it: it holds credentials (ROUTER_USER, "
+                + "ROUTER_PASS), and a repair runs only a skill that holds none"), String.valueOf(row.get("goal")));
+        var thinks = fix.rig.cloud.calls("think");
+        String told = String.join("\n", LoopRig.userParts(thinks.get(thinks.size() - 1)));
+        assertTrue(told.contains("'router_audit' is not run in its own repair: it holds credentials"), told);
+        // The rule alone: credentials, as the repair began or now; side effects false at both.
+        var none = new SkillSelfRepair.Declared(false, true, List.of(), List.of(), null);
+        assertNull(SkillSelfRepair.notRunBecause(none, null));
+        assertNotNull(SkillSelfRepair.notRunBecause(new SkillSelfRepair.Declared(false, true, List.of("HA_TOKEN"),
+                List.of(), null), null));
+        assertNotNull(SkillSelfRepair.notRunBecause(none, live("x", new java.util.concurrent.atomic.AtomicReference<>(false),
+                List.of("HA_TOKEN"), calls)));
+        assertNotNull(SkillSelfRepair.notRunBecause(none, live("x", new java.util.concurrent.atomic.AtomicReference<>(null),
+                List.of(), calls)));
+        assertNull(SkillSelfRepair.notRunBecause(none, live("x", new java.util.concurrent.atomic.AtomicReference<>(false),
+                List.of(), calls)));
     }
 
     // F5: a repair that never got to try counted as "changed nothing", and the skill was left to the owner for good.

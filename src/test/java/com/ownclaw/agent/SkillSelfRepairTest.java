@@ -678,10 +678,12 @@ class SkillSelfRepairTest {
         assertEquals("SMTP_PASS", fix.created.get(0).get("credentials"), "kept: " + fix.created.get(0));
         assertEquals("unverified", row.get("outcome"));
         assertEquals("true", row.get("side_effects"));
-        assertTrue(String.valueOf(row.get("goal")).contains("Do not run it: its SKILL.yaml says has_side_effects: true"),
+        assertTrue(String.valueOf(row.get("goal")).contains("3. Do not run it: it holds credentials (SMTP_PASS), and a "
+                + "repair runs only a skill that holds none -- a repair runs only a skill that holds no credential and "
+                + "whose SKILL.yaml says has_side_effects: false."),
                 String.valueOf(row.get("goal")));
         String note = fix.told().get(fix.told().size() - 1);
-        assertTrue(note.contains("Changed, but not run again to check it"), note);
+        assertTrue(note.contains("Changed, but not run again to check it: it holds credentials (SMTP_PASS)"), note);
     }
 
     @Test

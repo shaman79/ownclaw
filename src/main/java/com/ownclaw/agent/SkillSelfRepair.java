@@ -115,9 +115,9 @@ public class SkillSelfRepair {
                     dynamic == null ? null : dynamic.containerImage());
         }
 
-        /** Declared free of side effects, explicitly: the one skill a repair may run. */
+        /** As the repair began, the skill could be run in it: see {@link #notRunBecause}. */
         boolean runnable() {
-            return Boolean.FALSE.equals(sideEffects);
+            return notRunBecause(this, null) == null;
         }
 
         /** As the record keeps it: true, false or undeclared. */
@@ -674,9 +674,9 @@ public class SkillSelfRepair {
           .append("change: describe what it does and what to change, and keep its parameters, credentials, ")
           .append("requirements and system packages unless one of them is the cause.\n");
         if (!runnable) {
-            sb.append("3. Do not run it: its SKILL.yaml ").append(declared.sideEffects() == null
-                    ? "does not say has_side_effects: false" : "says has_side_effects: true")
-              .append(", so a run could change something. Check the new code by reading it instead.\n");
+            sb.append("3. Do not run it: ").append(notRunBecause(declared, null)).append(" -- a repair runs only a ")
+              .append("skill that holds no credential and whose SKILL.yaml says has_side_effects: false. Check the ")
+              .append("new code by reading it instead.\n");
         } else {
             sb.append("3. Run '").append(skill).append("' again, with the arguments of the call in the evidence")
               .append(debug ? " and debug set to true" : "").append(", and check that the problem is gone. If ")
@@ -726,7 +726,7 @@ public class SkillSelfRepair {
         Job job = ctx.repair();
         Map<String, Object> row;
         String outcome;
-        boolean runnable;
+        String notRun;
         synchronized (lock) {
             row = row("WHERE id = ?", job.id());
             if (row == null) return;
@@ -734,8 +734,9 @@ public class SkillSelfRepair {
             // this repair's.
             String after = row.get("code_after") != null ? str(row, "code_after") : str(row, "code_before");
             boolean changed = !Objects.equals(row.get("code_before"), after);
-            runnable = job.declared().runnable();
-            Boolean check = changed && runnable ? checked(ctx, ended, job.skill()) : null;
+            // Judged as the gate judged each run: as the repair began, and now.
+            notRun = notRunBecause(job.declared(), tools.find(job.skill()).orElse(null));
+            Boolean check = changed && notRun == null ? checked(ctx, ended, job.skill()) : null;
             // "Changed nothing" is a verdict only of a repair that finished: one stopped, cut short by
             // an outage, the watchdog or the window, or left waiting for an answer never really tried.
             TerminationReason how = ended.terminationReason();
@@ -748,7 +749,7 @@ public class SkillSelfRepair {
                     str(row, "trigger_task_id"));
         }
         log.info("Self-repair {} of '{}' (task {}) ended: {}.", job.id(), job.skill(), ctx.taskId(), outcome);
-        String said = said(outcome, !runnable, ended);
+        String said = said(outcome, notRun, ended);
         String head = "After " + trigger(str(row, "trigger_message"), str(row, "trigger_at")) + " it did not do its "
                 + "whole job: " + row.get("problem") + "\n\n" + said + "\n\n";
         String rerun = FIXED.equals(outcome) || UNVERIFIED.equals(outcome)
@@ -760,13 +761,13 @@ public class SkillSelfRepair {
     }
 
     /** What an outcome is, for the owner. */
-    private static String said(String outcome, boolean sideEffects, AgentResult ended) {
+    private static String said(String outcome, String notRun, AgentResult ended) {
         boolean completed = ended.terminationReason() == TerminationReason.COMPLETED;
         String which = completed ? "What the repair said:" : "How the repair ended:";
         return switch (outcome) {
             case FIXED -> "Fixed and checked: it was run again, and the problem is gone. " + which;
-            case UNVERIFIED -> (sideEffects
-                    ? "Changed, but not run again to check it: its SKILL.yaml does not say it has no side effects."
+            case UNVERIFIED -> (notRun != null
+                    ? "Changed, but not run again to check it: " + notRun + "."
                     : completed ? "Changed, but not checked: the repair did not run it again after its change and say the check passed."
                     : "Changed, but the repair did not finish, so the change was not checked.") + " " + which;
             case NOT_FIXED -> "Changed, but run again it still shows the problem. When the problem shows again, "
@@ -870,11 +871,38 @@ public class SkillSelfRepair {
             return repairs + "runs no other tool: the cause is found in its code, the evidence and "
                     + (job.declared().runnable() ? "its own runs." : "nothing else.");
         }
-        if (job.declared().runnable()) return null;
-        return "'" + name + "' is not run in its own repair: its SKILL.yaml "
-                + (job.declared().sideEffects() == null ? "did not say has_side_effects: false"
-                        : "said has_side_effects: true")
-                + " as the repair began, so a run could change something. Read its code and the evidence instead.";
+        String notRun = notRunBecause(job.declared(), registered);
+        return notRun == null ? null : "'" + name + "' is not run in its own repair: " + notRun
+                + ". Read its code and the evidence instead.";
+    }
+
+    /**
+     * Why a repair may not run the skill it repairs, in words, or null when it may. Only a skill that
+     * holds NO credential, and whose SKILL.yaml said has_side_effects: false in so many words both as
+     * the repair began and now, at the call ({@code now}: the registry's skill, which the repair's
+     * own skill_create may have rewritten; null to judge the start alone). The flag is the model's
+     * own optional claim about the OLD code, and the repair runs code it has just written: a skill
+     * with nothing to authenticate with runs in the jail with nothing to reach; a skill holding a
+     * router's root password, a file server's key or a mailbox can never be run by a repair. A
+     * skill written before the flag had three states says false wherever its author gave none, and
+     * is held to the same rule.
+     */
+    static String notRunBecause(Declared began, Tool now) {
+        var credentials = new java.util.LinkedHashSet<>(began.credentials());
+        if (now != null) credentials.addAll(now.requiredCredentials());
+        if (!credentials.isEmpty()) {
+            return "it holds credentials (" + String.join(", ", credentials) + "), and a repair runs only a skill "
+                    + "that holds none";
+        }
+        if (!Boolean.FALSE.equals(began.sideEffects())) {
+            return "its SKILL.yaml " + (began.sideEffects() == null ? "did not say has_side_effects: false"
+                    : "said has_side_effects: true") + " as the repair began";
+        }
+        if (now != null && !Boolean.FALSE.equals(now.declaredSideEffects())) {
+            return "its SKILL.yaml " + (now.declaredSideEffects() == null ? "no longer says has_side_effects: false"
+                    : "now says has_side_effects: true");
+        }
+        return null;
     }
 
     /**
@@ -911,7 +939,8 @@ public class SkillSelfRepair {
             String given = image == null || String.valueOf(image).isBlank() ? null : String.valueOf(image).strip();
             if (!Objects.equals(given, had.containerImage())) out.add("another container image");
         }
-        if (Boolean.FALSE.equals(SkillManager.declared(params.get("has_side_effects"))) && !had.runnable()) {
+        if (Boolean.FALSE.equals(SkillManager.declared(params.get("has_side_effects")))
+                && !Boolean.FALSE.equals(had.sideEffects())) {
             out.add("a has_side_effects: false it did not declare");
         }
         return out.isEmpty() ? null : String.join("; ", out) + ". Leave them out, and they stay as they are.";
