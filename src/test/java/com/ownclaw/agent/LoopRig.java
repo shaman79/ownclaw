@@ -135,6 +135,7 @@ final class LoopRig {
         Skills(SkillCuratorService curator, ToolRegistry registry) { super(null, registry, null, null, null, curator, null); }
 
         @Override public String readSkillCode(String name) { return source.apply(name); }
+        @Override public String authoredFiles(String name) { return source.apply(name); }
         @Override public String readSkill(String name) { return files.apply(name); }
         @Override public boolean isChangeableSkill(String name, String userId) { return changeable.test(name, userId); }
         @Override String checkPythonSyntax(String code) { return syntax.apply(code); }

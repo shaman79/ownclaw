@@ -149,6 +149,57 @@ class SelfRepairReviewTest {
         assertEquals("unchanged", fix.ended(fix.lastId()).get("outcome"));
     }
 
+    // F6: progress was any change of the code's hash, so A -> B -> A repaired for ever.
+    @Test
+    @DisplayName("F6: a repair that brings back a version the skill had since its last clean run is no progress: the next problem is left to the owner")
+    void aCycleIsNoProgress(@TempDir Path tmp) throws Exception {
+        fix = new Fix(tmp);
+        fix.fixedOutput = DEGRADED;
+        fix.rig.queue.start();
+        for (String v : new String[] {"# A", "# B", "# A"}) {
+            fix.scriptMenu(true);
+            fix.rig.cloud.think.add(LoopRig.call(AgentAction.SKILL_CREATE, java.util.Map.of("name", MENU,
+                    "description", "retry " + v, "parameters", "{}")));
+            fix.rig.cloud.codegen.add(SkillCodegenTest.finished(SkillCodegenTest.module(v)));
+            fix.rig.cloud.think.add(LoopRig.call(MENU, java.util.Map.of()));
+            fix.rig.cloud.think.add(verdict("Still blocked.", "failed"));
+            fix.unattended(TASK);
+            assertEquals("not_fixed", fix.ended(fix.lastId()).get("outcome"));
+        }
+        var rows = fix.repairs();
+        assertEquals(rows.get(0).get("code_after"), rows.get(2).get("code_after"), "A again");
+
+        // The fourth day: no fourth repair.
+        fix.scriptMenu(true);
+        AgentResult r = fix.unattended(TASK);
+        rows = fix.repairs();
+        assertEquals(4, rows.size(), rows.toString());
+        assertEquals("gave_up", rows.get(3).get("outcome"));
+        assertEquals(0, fix.rig.queue.getQueueSize());
+        assertTrue(r.response().contains("brought back a version of the skill it had had before"), r.response());
+        String note = fix.told().get(fix.told().size() - 1);
+        assertTrue(note.contains("Self-repair could not fix " + MENU), note);
+        assertTrue(note.contains("brought back a version of the skill it had had before"), note);
+    }
+
+    // 10: the hash was skill.py's alone, and a change by another task during the repair counted as the repair's.
+    @Test
+    @DisplayName("10: a change another task makes while the repair runs is not the repair's")
+    void anotherTasksChangeIsNotTheRepairs(@TempDir Path tmp) throws Exception {
+        fix = new Fix(tmp);
+        fix.rig.queue.start();
+        fix.scriptMenu(true);
+        fix.rig.cloud.think.add(c -> {
+            fix.code.put(MENU, "def run(params):\n    return {}  # changed by another task\n");
+            return LoopRig.call(AgentAction.SKILL_MANAGE, java.util.Map.of("action", "read", "name", MENU)).answer(c);
+        });
+        fix.rig.cloud.think.add(respond("Nothing to change."));
+        fix.unattended(TASK);
+        var row = fix.ended(fix.lastId());
+        assertEquals("unchanged", row.get("outcome"));
+        assertEquals(row.get("code_before"), row.get("code_after"));
+    }
+
     // F4: repair records were looked up by skill name alone: one account was told another's report.
     @Test
     @DisplayName("F4: another account's repair that changed nothing neither stops this account's repair nor is told to it")

@@ -1166,7 +1166,11 @@ public class AgentLoop {
                 }
                 AgentObservation obs = createSkill(action, context);
                 // The runs of the skill from here are the check of this change.
-                if (obs.success() && context.repair() != null) context.skillChanged();
+                if (obs.success() && context.repair() != null) {
+                    SkillSelfRepair repairs = selfRepair;
+                    if (repairs != null) repairs.changedByRepair(context);
+                    else context.skillChanged();
+                }
                 if (!obs.success() && earlier != null) {
                     obs = AgentObservation.failure(obs.tool(), obs.output() + earlier,
                             Map.of(SKILL_CREATE_ERROR, obs.output()), obs.durationMs());

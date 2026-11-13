@@ -327,6 +327,8 @@ public class SkillSelfRepair {
      * no longer stand in the way of the next repair -- the problem they were about went away.
      */
     private void cleared(AgentContext ctx, Map<String, Found> found) {
+        // Every finished repair of it: what they changed is history from here, and the versions they
+        // saw are no longer "had before" (hadBefore).
         var last = new LinkedHashMap<String, Artifact>();
         for (Artifact a : ctx.artifacts()) last.put(a.tool(), a);
         for (var e : last.entrySet()) {
@@ -335,7 +337,7 @@ public class SkillSelfRepair {
             }
             // This account's repairs only: another's record is never touched by this one's runs.
             jdbc.update("UPDATE skill_repairs SET cleared_at = datetime('now') WHERE skill_name = ? AND user_id = ? "
-                    + "AND cleared_at IS NULL AND outcome IN (?, ?)", e.getKey(), ctx.userId(), UNCHANGED, GAVE_UP);
+                    + "AND cleared_at IS NULL AND outcome != ?", e.getKey(), ctx.userId(), RUNNING);
         }
     }
 
@@ -378,9 +380,15 @@ public class SkillSelfRepair {
             Map<String, Object> last = row("WHERE skill_name = ? AND user_id = ? AND outcome NOT IN (?, ?, ?, ?, ?) "
                     + "ORDER BY id DESC LIMIT 1", skill, ctx.userId(), RUNNING, INTERRUPTED, NOT_STARTED, STOPPED,
                     NOT_FINISHED);
-            boolean noProgress = last != null && last.get("cleared_at") == null
-                    && Objects.equals(code, last.get("code_after"))
-                    && (UNCHANGED.equals(last.get("outcome")) || GAVE_UP.equals(last.get("outcome")));
+            // No progress, while the skill is still what the last repair left and no run since went
+            // well: that repair changed nothing, or it brought back a version the skill had already had
+            // since its last clean run -- A, B, A is going round, as the code-writing loop's own rule
+            // has it. No count: the next repair that changes it to a version not seen is progress.
+            boolean stuck = last != null && last.get("cleared_at") == null && Objects.equals(code, last.get("code_after"));
+            boolean changedNothing = stuck && (UNCHANGED.equals(last.get("outcome")) || GAVE_UP.equals(last.get("outcome")));
+            boolean cameBack = stuck && !changedNothing && changed(last)
+                    && hadBefore(skill, ctx.userId(), id(last)).contains(str(last, "code_after"));
+            boolean noProgress = changedNothing || cameBack;
             if (noProgress && GAVE_UP.equals(last.get("outcome"))) {
                 addProblem(id(last), ctx, problem);
                 log.info("Task {}: '{}' showed its problem again; self-repair left it to the owner before, so nothing "
@@ -396,17 +404,18 @@ public class SkillSelfRepair {
                         """, ctx.userId(), skill, ctx.taskId(), ctx.originalMessage(), startedAt(ctx), problem,
                         Declared.of(tools.find(skill).orElse(null)).sideEffectsText(), code, code, GAVE_UP,
                         last.get("report"), id(last));
-                log.warn("Task {}: '{}' showed its problem again after a repair that changed nothing (task {}): no "
-                        + "repair starts, the owner is told.", ctx.taskId(), skill, last.get("repair_task_id"));
+                String did = cameBack ? "brought back a version of the skill it had had before" : "changed nothing";
+                log.warn("Task {}: '{}' showed its problem again after a repair that {} (task {}): no repair starts, "
+                        + "the owner is told.", ctx.taskId(), skill, did, last.get("repair_task_id"));
                 event(ctx.userId(), ctx.taskId(), "left", skill, problem, str(last, "repair_task_id"), ctx.taskId());
                 tellOwner = "Self-repair could not fix " + skill + ". After " + trigger(ctx.originalMessage(),
                         startedAt(ctx)) + " the problem is back: " + problem + "\n\nThe last repair (task "
-                        + last.get("repair_task_id") + ") changed nothing, so self-repair does not try again: it is "
+                        + last.get("repair_task_id") + ") " + did + ", so self-repair does not try again: it is "
                         + "left to you. That repair's report:\n\n" + last.get("report");
                 line = "_🔧 Self-repair is not tried again for " + skill + ": its last repair (task "
-                        + last.get("repair_task_id") + ") changed nothing. You were told; it is left to you._";
+                        + last.get("repair_task_id") + ") " + did + ". You were told; it is left to you._";
             } else {
-                Map<String, Object> previous = last != null && !Objects.equals(last.get("code_before"), last.get("code_after"))
+                Map<String, Object> previous = last != null && changed(last)
                         && List.of(FIXED, UNVERIFIED, NOT_FIXED).contains(String.valueOf(last.get("outcome")))
                         ? last : null;
                 line = start(ctx, f, problem, code, previous);
@@ -416,6 +425,41 @@ public class SkillSelfRepair {
             tell(ctx.userId(), ctx.taskId(), "🔧 Self-repair of " + skill + " left to you", tellOwner, null);
         }
         return line;
+    }
+
+    /** Whether a finished repair changed the skill: its own change, recorded as it made it ({@link #changedByRepair}). */
+    private static boolean changed(Map<String, Object> row) {
+        return row.get("code_after") != null && !Objects.equals(row.get("code_before"), row.get("code_after"));
+    }
+
+    /**
+     * The versions of the skill this account's repairs saw since its last clean run, up to repair
+     * {@code upTo}: what each found as it began, and what each before that one left.
+     */
+    private java.util.Set<String> hadBefore(String skill, String userId, long upTo) {
+        var had = new java.util.HashSet<String>();
+        for (var r : jdbc.queryForList("SELECT id, code_before, code_after FROM skill_repairs WHERE skill_name = ? "
+                + "AND user_id = ? AND cleared_at IS NULL AND id <= ?", skill, userId, upTo)) {
+            if (r.get("code_before") != null) had.add(String.valueOf(r.get("code_before")));
+            if (id(r) < upTo && r.get("code_after") != null) had.add(String.valueOf(r.get("code_after")));
+        }
+        return had;
+    }
+
+    /**
+     * A repair's skill_create of its skill has just worked: the version it made is recorded as its
+     * own, at once -- so what another task changes later is never counted as the repair's, and a
+     * repair cut off by a restart keeps the change it made. The runs of the skill from here are the
+     * check of this change.
+     */
+    public void changedByRepair(AgentContext ctx) {
+        Job job = ctx.repair();
+        if (job == null) return;
+        ctx.skillChanged();
+        String now = codeHash(job.skill());
+        synchronized (lock) {
+            jdbc.update("UPDATE skill_repairs SET code_after = ? WHERE id = ?", now, job.id());
+        }
     }
 
     /** Record a repair, mark both tasks, and queue it. Held under the lock. */
@@ -539,7 +583,9 @@ public class SkillSelfRepair {
         synchronized (lock) {
             row = row("WHERE id = ?", job.id());
             if (row == null) return;
-            String after = codeHash(job.skill());
+            // Its own change only (changedByRepair): another task's change of the skill meanwhile is not
+            // this repair's.
+            String after = row.get("code_after") != null ? str(row, "code_after") : str(row, "code_before");
             boolean changed = !Objects.equals(row.get("code_before"), after);
             runnable = job.declared().runnable();
             Boolean check = changed && runnable ? checked(ctx, ended, job.skill()) : null;
@@ -792,9 +838,9 @@ public class SkillSelfRepair {
                 + "WHERE id = ?", "task " + ctx.taskId() + ": " + problem, id);
     }
 
-    /** The sha256 of the skill's code, or null when it has none. */
+    /** The sha256 of the skill's authored files -- skill.py, SKILL.yaml, requirements.txt -- or null when it has none. */
     private String codeHash(String skill) {
-        return sha256(skills.readSkillCode(skill));
+        return sha256(skills.authoredFiles(skill));
     }
 
     static String sha256(String text) {

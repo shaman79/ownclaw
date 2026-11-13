@@ -126,6 +126,20 @@ class SkillLifecycleTest {
     }
 
     @Test
+    @DisplayName("a skill's authored files are all of what it is: a change of its SKILL.yaml or requirements is a change")
+    void authoredFilesAreTheSkill() {
+        create("greet_user", "Return a greeting for a name.", WORKING_CODE);
+        String first = manager.authoredFiles("greet_user");
+        assertTrue(first.contains("--- skill.py") && first.contains("--- SKILL.yaml") && first.contains("--- requirements.txt"),
+                first);
+        create("greet_user", "Return a greeting for a name.", WORKING_CODE);
+        assertEquals(first, manager.authoredFiles("greet_user"), "the same skill again");
+        create("greet_user", "Return a greeting for a name, politely.", WORKING_CODE);
+        assertNotEquals(first, manager.authoredFiles("greet_user"), "only its SKILL.yaml changed");
+        assertNull(manager.authoredFiles("no_such_skill"));
+    }
+
+    @Test
     @DisplayName("a broken update does not destroy the working version")
     void brokenUpdateRestoresPreviousCode() throws IOException {
         create("greet_user", "Return a greeting for a name.", WORKING_CODE);

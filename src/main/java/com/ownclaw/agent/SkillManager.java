@@ -390,6 +390,28 @@ public class SkillManager {
     }
 
     /**
+     * Every file of a skill its author wrote -- skill.py, SKILL.yaml, requirements.txt -- one after
+     * the other under their names, or null when there is no such skill: what a skill IS, for telling
+     * one version from another (self-repair's hash of it). A file that cannot be read is said so.
+     */
+    public String authoredFiles(String name) {
+        if (name == null || name.isBlank() || dynamicSkillRegistry == null) return null;
+        var skillOpt = dynamicSkillRegistry.getDynamic(name);
+        if (skillOpt.isEmpty()) return null;
+        var sb = new StringBuilder();
+        for (String file : List.of("skill.py", "SKILL.yaml", "requirements.txt")) {
+            sb.append("--- ").append(file).append('\n');
+            try {
+                String text = SkillJail.readAuthored(skillOpt.get().skillDir().resolve(file));
+                sb.append(text == null ? "(none)" : text).append('\n');
+            } catch (IOException e) {
+                sb.append("(unreadable: ").append(e.getMessage()).append(")\n");
+            }
+        }
+        return sb.toString();
+    }
+
+    /**
      * Read a skill's source code and metadata.
      */
     public String readSkill(String name) {
