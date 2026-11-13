@@ -344,7 +344,9 @@ public class SkillManager {
                 // the next deploy silently registered a skill that had already been rejected, and
                 // the agent would pick it from the manifest and fail on first use, with the
                 // context that produced it long gone. Quarantine keeps the code recoverable.
-                log.warn("New skill '{}' failed to load: {}", name, loadError.replace('\n', ' '));
+                // Not its words: Python's traceback quotes the code, the user's values in it.
+                log.warn("New skill '{}' failed to load ({} lines of Python's error, returned to the task)", name,
+                        loadError.lines().count());
                 dynamicSkillRegistry.quarantineUnregistered(skillDir,
                         "Rejected at creation: it does not import.\n" + loadError);
                 return "ERROR: '" + name + "' was written but does not load, so it was not "

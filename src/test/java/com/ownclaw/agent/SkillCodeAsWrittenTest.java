@@ -171,7 +171,7 @@ class SkillCodeAsWrittenTest {
                 Map.of(), tally);
         String code = "A = '/tmp/ExampleHome5G_backup'\nB = 'AP7'\nC = 'MAP7X'\nD = 'Example Guest\\'s WiFi'\n"
                 + "E = map(str, [])\nF = 'ap'\nG = '<ssid_1>'\nH = '<ssid_77>'\npassword = 'hunter2hunter2'\n"
-                + "I = 'example.com'\n";
+                + "I = 'example.com'\nJ = 'admin@example.com'\n";
         String out = r.filterCode("u1", code, Map.of(), new Redactor.Tally(), false);
         assertTrue(out.contains("A = '/tmp/<ssid_1>_backup'"), out);
         assertTrue(out.contains("B = '<ssid_2>'"), out);
@@ -185,8 +185,9 @@ class SkillCodeAsWrittenTest {
         assertEquals(r.restore("u1", out.replace("D = '<ssid_3>'", "D = 'Example Guest\\'s WiFi'")),
                 code.replace("hunter2hunter2", "«secret removed»").replace("password = 'hunter2hunter2'",
                         "password = '«secret removed»'"), "put back, the code as it was");
-        assertFalse(r.count("u1", "I = 'example.com' then sometext", Map.of()).identifiersReplaced() > 1,
-                "nothing learned from the code");
+        assertTrue(out.contains("J = 'admin@example.com'"), "an address the table does not know is the code's own: " + out);
+        assertEquals("write to <email_1>", r.filter("u1", "write to admin@example.com", Map.of(), new Redactor.Tally()),
+                "and was not learned from it: the first address the table learns");
         String asWritten = r.filterCode("u1", "G = '<ssid_1>'\nH = '<ssid_77>'\n", Map.of(), new Redactor.Tally(), true);
         assertTrue(asWritten.startsWith("G = '<ssid_1>'\nH = '<text_"), "the code as written keeps the placeholders the table knows: " + asWritten);
         // Mutation: replace known values only as words -> "/tmp/ExampleHome5G_backup" in clear.
