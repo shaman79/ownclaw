@@ -91,6 +91,27 @@ class ImageHeaderTest {
         // Mutation: no pixel bound -> the JPEG is decoded for seconds; no part count -> each is read part by part.
     }
 
+    @Test
+    @DisplayName("a PNG's header is its first chunk and its only one: a second, or one after another chunk, is refused -- the reader decodes by the first")
+    void aSecondIhdrIsRefused(@TempDir Path dir) throws Exception {
+        // The review's file: a first header of 22,000,000 x 1 16-bit RGBA -- 176 MB a row -- and a
+        // second of one 1-bit grey pixel, which the walk took the rows' size from.
+        byte[] row = new byte[1 + 8 * 22_000_000];
+        byte[] two = TestImages.pngOf("IHDR", TestImages.ihdr(22_000_000, 1, 16, 6), "IHDR", TestImages.ihdr(1, 1, 1, 0),
+                "IDAT", TestImages.idat(row, 1), "IEND", new byte[0]);
+        row = null;
+        var made = CloudImageCopy.of(Files.write(dir.resolve("two.png"), two));
+        assertNull(made.copy());
+        assertTrue(made.privateBecause().contains("its header is not its first part, or not its only one"), made.privateBecause());
+        // A header after another chunk is no header the reader reads first either.
+        byte[] late = TestImages.pngOf("tEXt", "a\0b".getBytes(java.nio.charset.StandardCharsets.ISO_8859_1),
+                "IHDR", TestImages.ihdr(10, 10, 8, 0), "IDAT", TestImages.idat(new byte[11], 10), "IEND", new byte[0]);
+        assertNotNull(CloudImageCopy.header(Files.write(dir.resolve("late.png"), late)).refused());
+        // One header, first: read.
+        assertNull(CloudImageCopy.header(Files.write(dir.resolve("one.png"), TestImages.png(40, 30))).refused());
+        // Mutation: let any chunk be the header, the last one deciding -> 504 MB for a 171 KB file.
+    }
+
     static final int MAX_PARTS = CloudImageCopy.MAX_PARTS;
 
     /** A 1 x 1 grey PNG with {@code n} empty chunks of a program's own before its data. */

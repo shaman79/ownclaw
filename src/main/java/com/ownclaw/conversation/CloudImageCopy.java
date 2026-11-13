@@ -673,6 +673,13 @@ public final class CloudImageCopy {
             int start = in.position();
             long length = in.u32();
             String type = in.ascii(4);
+            // Its header first, and once: the JDK's reader decodes by the first, and a second -- one
+            // pixel of one bit -- once had this walk size the rows of a first of 22 million 16-bit
+            // RGBA pixels as one byte each, past the row check, and the reader took 504 MB.
+            if (type.equals("IHDR") != (start == 8)) {
+                return Header.refused("it is not a PNG the server can read: its header is not its first part, "
+                        + "or not its only one");
+            }
             if (DRAWN_FROM.contains(type) && length <= in.remaining() - 4) {
                 drawn.add(start);
                 drawn.add((int) (start + 12 + length));
