@@ -282,6 +282,18 @@ public class SkillSelfRepair {
         }
     }
 
+    /** OwnClaw is stopping: see {@link #finish}. */
+    private volatile boolean closing;
+
+    /**
+     * OwnClaw is stopping: published before any bean is destroyed, so before the task queue stops its
+     * workers and the repairs under way end unfinished.
+     */
+    @org.springframework.context.event.EventListener(org.springframework.context.event.ContextClosedEvent.class)
+    public void closing() {
+        closing = true;
+    }
+
     private boolean enabled() {
         return config.getSelfRepair().isEnabled();
     }
@@ -752,6 +764,14 @@ public class SkillSelfRepair {
      */
     private void finish(AgentContext ctx, AgentResult ended) {
         Job job = ctx.repair();
+        // Ended unfinished because OwnClaw is stopping -- a deploy's restart interrupts its calls -- it
+        // is no outcome: the record stays 'running', and the next start starts it again (resume). The
+        // owner's Stop, while OwnClaw runs, ends it as stopped.
+        if (closing && ended.terminationReason() != TerminationReason.COMPLETED) {
+            log.info("Self-repair {} of '{}' was cut off by OwnClaw stopping: it starts again at the next start.",
+                    job.id(), job.skill());
+            return;
+        }
         Map<String, Object> row;
         String outcome;
         String notRun;
@@ -835,6 +855,8 @@ public class SkillSelfRepair {
      * while it waited, it failed before its loop began -- and is recorded so, and the owner told.
      */
     private void settle(Job job, String userId, AgentResult result, Throwable failure) {
+        // Not while OwnClaw stops: the record stays running for the next start (finish).
+        if (closing) return;
         String why;
         synchronized (lock) {
             Map<String, Object> row = row("WHERE id = ?", job.id());

@@ -817,6 +817,45 @@ class SkillSelfRepairTest {
         assertEquals("running", fix.repairRow(0).get("outcome"), "left for the next start");
     }
 
+    @Test
+    @DisplayName("P7: a repair cut off by OwnClaw stopping keeps its record running, untold, and is started again at the next start")
+    void stoppingOwnClawLeavesTheRepairToResume(@TempDir Path tmp) throws Exception {
+        fix = new Fix(tmp);
+        fix.rig.queue.start();
+        fix.scriptMenu(true);
+        // OwnClaw starts stopping while the repair's first call is under way; the call fails with it.
+        fix.rig.cloud.think.add(c -> {
+            fix.repair.closing();
+            throw new com.ownclaw.llm.LlmException("anthropic", "Connection failed: api.example.com", 0,
+                    new java.net.UnknownHostException("api.example.com"));
+        });
+        fix.rig.cloud.think.add(c -> {
+            throw new com.ownclaw.llm.LlmException("anthropic", "Connection failed: api.example.com", 0,
+                    new java.net.UnknownHostException("api.example.com"));
+        });
+        int toldBefore = fix.told().size();
+        fix.unattended(TASK);
+        String repairTask = (String) fix.repairRow(0).get("repair_task_id");
+        long until = System.currentTimeMillis() + 20_000;
+        while (System.currentTimeMillis() < until && states(fix, repairTask).size() < 1) Thread.sleep(50);
+        // Its task has ended: its record is still running.
+        while (System.currentTimeMillis() < until && fix.rig.jdbc.queryForList(
+                "SELECT 1 FROM events WHERE event_type = 'task_completed' AND task_id = ?", repairTask).isEmpty()) {
+            Thread.sleep(50);
+        }
+        assertEquals("running", fix.repairRow(0).get("outcome"));
+        assertEquals(toldBefore, fix.told().size(), "told of an ending that is no outcome: " + fix.told());
+        // The next start goes on with it.
+        var queue = new TaskQueue(fix.rig.loop, fix.rig.events, fix.rig.emitter, fix.rig.config, fix.rig.cancellation);
+        try {
+            restarted(fix, queue).resume();
+            assertNotEquals(repairTask, fix.repairRow(0).get("repair_task_id"));
+            assertEquals(1, queue.getQueueSize());
+        } finally {
+            queue.stop();
+        }
+    }
+
     static List<String> states(Fix fix, String taskId) {
         return fix.rig.jdbc.queryForList("SELECT json_extract(details, '$.state') FROM events WHERE event_type = "
                 + "'self_repair' AND task_id = ? ORDER BY id", String.class, taskId);
