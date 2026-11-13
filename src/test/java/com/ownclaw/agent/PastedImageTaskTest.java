@@ -413,7 +413,8 @@ class PastedImageTaskTest {
         assertTrue(LocalModeTest.all(rig.cloud.calls("think").getFirst()).contains("Images are not sent to this model"));
         List<String> notes = LocalModeTest.rows(rig).stream().filter(n -> n.startsWith("🖼️")).toList();
         assertEquals(1, notes.size(), String.valueOf(LocalModeTest.rows(rig)));
-        assertTrue(notes.getFirst().contains("it goes to the cloud model of openai, which OwnClaw sends no images"), notes.getFirst());
+        assertTrue(notes.getFirst().contains("this chat's cloud model is one OwnClaw sends no images"), notes.getFirst());
+        assertFalse(notes.getFirst().contains("openai"), "the provider is the owner's setting: " + notes.getFirst());
         // Mutation: tell only the local model's steps -> the owner trusts that OpenAI saw his screenshot.
     }
 

@@ -736,7 +736,8 @@ public class AgentLoop {
                     : context.onLocal() ? "the cloud model can't be used: " + context.onLocalBecause()
                     : "no cloud model is configured");
         } else if (!"anthropic".equals(provider.name())) {
-            why = "it goes to the cloud model of " + provider.name() + ", which OwnClaw sends no images";
+            // Not which: the provider is the owner's setting, and every account reads its notes.
+            why = "this chat's cloud model is one OwnClaw sends no images";
         } else {
             return;
         }

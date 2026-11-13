@@ -4724,7 +4724,7 @@
         // The page reloads them after a save: "Default" next to Send names the new ones, and the chips
         // say whether the cloud model now chosen is shown pasted images.
         nameDefaults({ costMode: ['fast', 'cheaper', 'free'][costStop(data)], effort: data.thinking_effort });
-        noteCloud({ provider: provider, seesImages: provider === 'anthropic' });
+        noteCloud({ seesImages: provider === 'anthropic' });
     }
 
     /** The time-vs-cost slider's stops, as the settings page says them. */
@@ -7169,10 +7169,13 @@
         var items = data.items || [];
         for (var i = 0; i < items.length; i++) {
             if (items[i].kind !== 'file') continue;
-            var entry = items[i].webkitGetAsEntry ? items[i].webkitGetAsEntry() : null;
+            // A browser that cannot say whether a file system holds a file: it may be a file manager's.
+            var canTell = typeof items[i].webkitGetAsEntry === 'function';
+            var entry = canTell ? items[i].webkitGetAsEntry() : null;
             if (entry ? entry.isDirectory : !items[i].type) continue;
             var f = items[i].getAsFile();
-            if (f) { found.push(f); onDisk.push(!!entry); }
+            // Of no known origin: a file, as one from a file manager is -- never a pasted picture.
+            if (f) { found.push(f); onDisk.push(!canTell || !!entry); }
         }
         // A browser that lists the clipboard's files but not its items.
         if (!found.length && data.files) {
@@ -7375,16 +7378,14 @@
     }
 
     /**
-     * Whether the chat's cloud model is shown the images pasted here, and which it is, as the server
-     * says (cloud, with a chat's messages; the settings page's provider): OwnClaw sends images to
-     * Anthropic's models only.
+     * Whether the chat's cloud model is shown the images pasted here, as the server says (cloud, with
+     * a chat's messages; the settings page's provider): OwnClaw sends images to Anthropic's models only.
      */
-    var cloudSeesImages = true, cloudProvider = '';
+    var cloudSeesImages = true;
 
     function noteCloud(cloud) {
         if (!cloud) return;
         cloudSeesImages = cloud.seesImages !== false;
-        cloudProvider = String(cloud.provider || '');
         refreshSeen();
     }
 
@@ -7414,9 +7415,8 @@
                     + 'chat\'s history, as its text does. Skills are given it as a file.';
         } else if (!cloudSeesImages) {
             line = '☁️ not seen: the cloud model is sent no images';
-            full = 'OwnClaw sends images to Anthropic\'s models only, and this chat\'s cloud model'
-                    + (cloudProvider ? ' (' + cloudProvider + ')' : '') + ' is sent none; the local model cannot see '
-                    + 'images either. Skills are given it as a file.';
+            full = 'OwnClaw sends images to Anthropic\'s models only, and this chat\'s cloud model is sent none; the '
+                    + 'local model cannot see images either. Skills are given it as a file.';
         } else if (chip.dataset.carries) {
             line = '☁️ the cloud model will see it · skill results private';
             full = 'The cloud model is shown this picture as it is: the privacy filter reads text, not pictures. Its '

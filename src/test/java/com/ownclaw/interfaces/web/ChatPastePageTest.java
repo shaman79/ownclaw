@@ -53,7 +53,9 @@ class ChatPastePageTest {
     @DisplayName("only image data the page named itself goes up as a pasted image: a file copied in a file manager is a file")
     void onlyClipboardImageDataIsPasted() {
         String f = between("function pastedFiles(data) {", "function uploadFiles(");
-        assertTrue(f.contains("if (f) { found.push(f); onDisk.push(!!entry); }"), "a file system entry is remembered: " + f);
+        assertTrue(f.contains("var canTell = typeof items[i].webkitGetAsEntry === 'function';"), f);
+        assertTrue(f.contains("if (f) { found.push(f); onDisk.push(!canTell || !!entry); }"),
+                "a file system entry is remembered, and a browser that cannot tell makes it a file: " + f);
         assertTrue(f.contains("var image = /^image\\//.test(f.type) && !onDisk[k];"), f);
         assertTrue(f.contains("if (image) clipboardImages.add(named); return named;"), f);
         // A file that keeps its own name -- a file manager's -- is returned before it can be marked.
@@ -65,7 +67,8 @@ class ChatPastePageTest {
         // A clipboard that lists its files but not its items says nothing of where they came from: a file.
         assertTrue(f.contains("if (data.files[j].type) { found.push(data.files[j]); onDisk.push(true); }"), f);
         // Mutation: mark every pasted file -> a statement copied in a file manager goes up as an image;
-        // onDisk false in the fallback -> a file manager's image.png goes up as a pasted picture.
+        // onDisk false in the fallback, or where the browser has no webkitGetAsEntry -> a file
+        // manager's image.png goes up as a pasted picture.
     }
 
     @Test
@@ -90,6 +93,7 @@ class ChatPastePageTest {
                 "each case, in this order -- Free and a cloud sent none before any 'will see it': " + line);
         assertTrue(line.contains("If the chat later runs on the cloud model, the image goes with the '"
                 + " + 'chat\\'s history, as its text does."), "Free says what a later cloud turn does: " + line);
+        assertFalse(line.contains("cloudProvider"), "the provider is the owner's setting, not every account's: " + line);
         assertTrue(line.contains("so what skills ' + 'read from it stays private."), line);
         assertTrue(line.contains("seen.textContent = line; seen.title = full; detail.textContent = full;"), line);
         assertFalse(line.contains("innerHTML") || mark.contains("innerHTML"), "text, never markup");
@@ -109,8 +113,7 @@ class ChatPastePageTest {
         assertTrue(page.contains("showChatOptions(data.options, data.defaults, data.cloud);"));
         String note = between("function noteCloud(cloud) {", "function seenLine(chip)");
         assertTrue(note.contains("cloudSeesImages = cloud.seesImages !== false;"), note);
-        assertTrue(page.contains("noteCloud({ provider: provider, seesImages: provider === 'anthropic' });"),
-                "the settings page's provider too");
+        assertTrue(page.contains("noteCloud({ seesImages: provider === 'anthropic' });"), "the settings page's provider too");
         // Mutation: refresh in nameDefaults only -> the chip keeps the last chat's wording (the review's Free-to-Cheaper send).
     }
 
@@ -130,7 +133,7 @@ class ChatPastePageTest {
     @DisplayName("every typed file is taken, a folder's empty type is not; only the browser's own 'image.png' is renamed, distinct within a second")
     void pastedFilesAreNamed() {
         String f = between("function pastedFiles(data) {", "function uploadFiles(");
-        assertTrue(f.contains("var entry = items[i].webkitGetAsEntry ? items[i].webkitGetAsEntry() : null; "
+        assertTrue(f.contains("var entry = canTell ? items[i].webkitGetAsEntry() : null; "
                 + "if (entry ? entry.isDirectory : !items[i].type) continue;"), "a folder out, a README in: " + f);
         assertTrue(f.contains("if (f.name && !/^image\\.\\w+$/i.test(f.name)) return f;"),
                 "a file copied in a file manager keeps its name: " + f);

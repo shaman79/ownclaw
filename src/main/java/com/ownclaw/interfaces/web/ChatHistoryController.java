@@ -97,12 +97,12 @@ public class ChatHistoryController {
         }
         var page = conversationService.getSessionMessages(userId, sessionId, before, limit);
         // And whether the cloud model is shown the images the owner pastes -- the page says on each
-        // pasted image's chip who sees it.
+        // pasted image's chip who sees it. That alone: which provider it is, is the owner's setting,
+        // and every account reads this.
         return ResponseEntity.ok(Map.of("messages", page.messages(), "hasMore", page.hasMore(),
                 "sessionId", sessionId, "options", conversationService.chatOptions(userId, sessionId),
                 "defaults", ChatOptions.defaultsOf(config.getMentor()),
-                "cloud", Map.of("provider", String.valueOf(config.getMentor().getProvider()),
-                        "seesImages", com.ownclaw.llm.CloudGateway.showsImages(config))));
+                "cloud", Map.of("seesImages", com.ownclaw.llm.CloudGateway.showsImages(config))));
     }
 
     /**
