@@ -40,6 +40,8 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 /**
  * The copy of a pasted image that the cloud model is sent: made once, when the image is uploaded,
@@ -212,28 +214,69 @@ public final class CloudImageCopy {
     /** A pixel size. */
     record Size(int width, int height) {}
 
+    /** Why a pasted image whose turn to be checked did not come by its upload's deadline stays private. */
+    static final String NOT_IN_TIME = "other images were being checked and its turn did not come in time, so it "
+            + "stays private -- skills still get it";
+
+    /**
+     * Each owner's turn at the checker: one check of an owner's is queued or running at a time, so
+     * the queue holds no more checks than there are owners uploading -- an account's two hundred
+     * pastes at once wait for their own turns, not ahead of everybody else's.
+     */
+    private static final java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.Semaphore> TURNS =
+            new java.util.concurrent.ConcurrentHashMap<>();
+
+    /**
+     * The deadline of an upload's checks, from now: {@link #CHECK_TIME}, for its wait for its turns
+     * and its checks together. Every file of one upload is checked by the same deadline.
+     */
+    public static long deadline() {
+        return System.nanoTime() + CHECK_TIME.toNanos();
+    }
+
     /** The copy of the image in {@code file}, or why it stays private; one check at a time, within {@link #CHECK_TIME}. */
     public static Made of(Path file) {
-        return of(file, CHECK_TIME);
+        return of(file, "", deadline());
     }
 
     /** {@link #of(Path)}, given {@code limit} to check it in. */
     static Made of(Path file, Duration limit) {
-        var check = new Check(file, limit);
+        return of(file, "", System.nanoTime() + limit.toNanos());
+    }
+
+    /**
+     * The copy of the image in {@code file}, uploaded by {@code owner}, or why it stays private --
+     * by {@code deadline} ({@link System#nanoTime}), whatever happens: waiting for the owner's turn
+     * and for the checks ahead of it included. A request thread is held no longer than that; a file
+     * whose turn did not come stays private, and its queued check is cancelled.
+     */
+    public static Made of(Path file, String owner, long deadline) {
+        var turn = TURNS.computeIfAbsent(owner == null ? "" : owner, k -> new java.util.concurrent.Semaphore(1));
+        try {
+            long left = deadline - System.nanoTime();
+            if (left <= 0 || !turn.tryAcquire(left, TimeUnit.NANOSECONDS)) return Made.stays(NOT_IN_TIME);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return Made.stays("its check was interrupted, so it stays private");
+        }
+        var check = new Check(file, deadline, turn);
         Future<Made> done;
         try {
             done = CHECKER.submit(check);
         } catch (RejectedExecutionException e) {
+            check.endTurn();
             return Made.stays("it could not be checked, so it stays private");
         }
         try {
-            return done.get();
-        } catch (InterruptedException e) {
-            // The check hears it on its own thread, where a reader can be stopped.
+            return done.get(Math.max(0, deadline - System.nanoTime()), TimeUnit.NANOSECONDS);
+        } catch (TimeoutException | InterruptedException e) {
+            if (e instanceof InterruptedException) Thread.currentThread().interrupt();
+            // The check hears it on its own thread, where a reader can be stopped; one not begun never begins.
             check.cancelled = true;
             done.cancel(false);
-            Thread.currentThread().interrupt();
-            return Made.stays("its check was interrupted, so it stays private");
+            if (!check.started) check.endTurn();
+            return Made.stays(e instanceof InterruptedException ? "its check was interrupted, so it stays private"
+                    : check.started ? TOO_LONG : NOT_IN_TIME);
         } catch (ExecutionException e) {
             return Made.stays(check.late() ? TOO_LONG : "it could not be read as an image");
         }
@@ -263,18 +306,25 @@ public final class CloudImageCopy {
      */
     private static final class Check implements Callable<Made>, Deadline {
         final Path file;
-        final Duration limit;
+        final long deadline;
+        private final java.util.concurrent.Semaphore turn;
+        private final java.util.concurrent.atomic.AtomicBoolean turnEnded = new java.util.concurrent.atomic.AtomicBoolean();
         volatile boolean cancelled;
-        private volatile long deadline;
-        private volatile boolean started;
+        volatile boolean started;
 
-        Check(Path file, Duration limit) {
+        Check(Path file, long deadline, java.util.concurrent.Semaphore turn) {
             this.file = file;
-            this.limit = limit;
+            this.deadline = deadline;
+            this.turn = turn;
         }
 
         boolean late() {
-            return cancelled || started && System.nanoTime() - deadline >= 0;
+            return cancelled || System.nanoTime() - deadline >= 0;
+        }
+
+        /** The owner's next check may queue: once, whoever gets here first -- the check, or its waiter. */
+        void endTurn() {
+            if (turnEnded.compareAndSet(false, true)) turn.release();
         }
 
         @Override
@@ -284,9 +334,9 @@ public final class CloudImageCopy {
 
         @Override
         public Made call() {
-            deadline = System.nanoTime() + limit.toNanos();
             started = true;
             try {
+                if (late()) return Made.stays(TOO_LONG);
                 Made made = make(file, this);
                 return late() ? Made.stays(TOO_LONG) : made;
             } catch (IOException | RuntimeException e) {
@@ -295,6 +345,8 @@ public final class CloudImageCopy {
                 // One allocation the heap could not give: the check ends, the server goes on.
                 return Made.stays("reading it took more memory than this server has for one picture, so it "
                         + "stays private -- skills still get it");
+            } finally {
+                endTurn();
             }
         }
     }

@@ -60,6 +60,9 @@ public class FileUploadController {
                                     @RequestParam(value = "pasted", required = false) String pasted) {
         String userId = (String) request.getAttribute("userId");
         boolean pastedImages = "true".equals(pasted);
+        // One deadline for the checks of every image of this upload, its wait for its turn included:
+        // the request is answered by then, whatever is queued ahead of it.
+        long checkedBy = com.ownclaw.conversation.CloudImageCopy.deadline();
 
         var results = new java.util.ArrayList<Map<String, Object>>();
         for (MultipartFile file : files) {
@@ -72,7 +75,7 @@ public class FileUploadController {
             try {
                 String name = file.getOriginalFilename() != null ? file.getOriginalFilename() : "upload";
                 String type = file.getContentType() != null ? file.getContentType() : "application/octet-stream";
-                var stored = fileStorage.store(userId, name, type, file.getInputStream(), pastedImages);
+                var stored = fileStorage.store(userId, name, type, file.getInputStream(), pastedImages, checkedBy);
                 var result = new java.util.LinkedHashMap<String, Object>();
                 result.put("id", stored.id());
                 result.put("original_name", name);

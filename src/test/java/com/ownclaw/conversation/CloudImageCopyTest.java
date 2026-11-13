@@ -352,18 +352,73 @@ class CloudImageCopyTest {
             assertTrue(ms < 800, f.getFileName() + ": the read was aborted at its time, not let run: " + ms + " ms");
         }
 
-        // Two at once queue: one thread, so the second starts when the first has ended.
+        // Two at once queue: one thread, so the second -- another owner's -- starts when the first has ended.
+        Path small = file(dir, "small.png", TestImages.png(400, 300));
         var pool = java.util.concurrent.Executors.newFixedThreadPool(2);
         try {
+            var a = pool.submit(() -> CloudImageCopy.of(big, "owner-a", System.nanoTime() + 700_000_000L));
+            Thread.sleep(50);
             long t0 = System.nanoTime();
-            var a = pool.submit(() -> CloudImageCopy.of(big, Duration.ofMillis(700)));
-            var b = pool.submit(() -> CloudImageCopy.of(big, Duration.ofMillis(700)));
+            var b = pool.submit(() -> CloudImageCopy.of(small, "owner-b", System.nanoTime() + 5_000_000_000L));
             assertEquals(CloudImageCopy.TOO_LONG, a.get().privateBecause());
-            assertEquals(CloudImageCopy.TOO_LONG, b.get().privateBecause());
-            assertTrue((System.nanoTime() - t0) / 1_000_000 >= 1_300, "one after the other, not side by side");
+            assertNotNull(b.get().copy());
+            assertTrue((System.nanoTime() - t0) / 1_000_000 >= 550, "one after the other, not side by side");
         } finally {
             pool.shutdownNow();
         }
         // Mutation: the Stopper aborts nothing -> each read runs its seconds; a pool of two -> side by side.
+    }
+
+    @Test
+    @DisplayName("an upload waits no longer than its deadline, the wait for its turn included: a paste behind a long check stays private, saying why, at its time")
+    void anUploadWaitsNoLongerThanItsDeadline(@TempDir Path dir) throws Exception {
+        Path big = file(dir, "big.png", TestImages.uniformGreyPng(16000, 16000));
+        Path small = file(dir, "small.png", TestImages.png(400, 300));
+        var pool = java.util.concurrent.Executors.newFixedThreadPool(2);
+        try {
+            var a = pool.submit(() -> CloudImageCopy.of(big, "owner-a", System.nanoTime() + 20_000_000_000L));
+            Thread.sleep(100);
+            long t0 = System.nanoTime();
+            var b = CloudImageCopy.of(small, "owner-b", System.nanoTime() + 300_000_000L);
+            long ms = (System.nanoTime() - t0) / 1_000_000;
+            assertEquals(CloudImageCopy.NOT_IN_TIME, b.privateBecause());
+            assertTrue(ms < 800, "answered at its deadline, not when the check ahead ended: " + ms + " ms");
+            assertNotNull(a.get().copy(), "the long check goes on, and makes its copy");
+        } finally {
+            pool.shutdownNow();
+        }
+        // Mutation: wait for the check with no deadline -> the paste waits the seconds of the one ahead.
+    }
+
+    @Test
+    @DisplayName("an owner has one check queued at a time: another owner's paste is checked after his first, not after all of his")
+    void oneQueuedCheckAnOwner(@TempDir Path dir) throws Exception {
+        Path big = file(dir, "big.png", TestImages.uniformGreyPng(8000, 8000));
+        Path small = file(dir, "small.png", TestImages.png(400, 300));
+        var pool = java.util.concurrent.Executors.newFixedThreadPool(4);
+        try {
+            long by = System.nanoTime() + 60_000_000_000L;
+            var ends = new java.util.concurrent.ConcurrentHashMap<String, Long>();
+            var checks = new java.util.ArrayList<java.util.concurrent.Future<?>>();
+            for (String name : List.of("x", "y", "z")) {
+                checks.add(pool.submit(() -> {
+                    CloudImageCopy.of(big, "owner-a", by);
+                    ends.put(name, System.nanoTime());
+                    return null;
+                }));
+                Thread.sleep(50);
+            }
+            checks.add(pool.submit(() -> {
+                assertNotNull(CloudImageCopy.of(small, "owner-b", by).copy());
+                ends.put("b", System.nanoTime());
+                return null;
+            }));
+            for (var c : checks) c.get();
+            assertTrue(ends.get("b") < ends.get("y") && ends.get("b") < ends.get("z"),
+                    "the other owner's paste waited for all three of the first's: " + ends);
+        } finally {
+            pool.shutdownNow();
+        }
+        // Mutation: no turn an owner -> his three are queued ahead of the other's paste.
     }
 }

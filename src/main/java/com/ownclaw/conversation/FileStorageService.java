@@ -89,6 +89,16 @@ public class FileStorageService implements CloudImages {
      */
     public Stored store(String userId, String originalName, String contentType, InputStream data,
                         boolean pasted) throws IOException {
+        return store(userId, originalName, contentType, data, pasted, CloudImageCopy.deadline());
+    }
+
+    /**
+     * {@link #store(String, String, String, InputStream, boolean)}, a pasted image checked by
+     * {@code checkedBy} ({@link CloudImageCopy#deadline}): one deadline for every file of an upload,
+     * so the request is held no longer than that, however many it carries and whatever is queued.
+     */
+    public Stored store(String userId, String originalName, String contentType, InputStream data,
+                        boolean pasted, long checkedBy) throws IOException {
         String id = UUID.randomUUID().toString();
 
         // Sanitize the original name: keep only the last segment, strip path separators
@@ -111,7 +121,7 @@ public class FileStorageService implements CloudImages {
         // Not the name: a statement's file name can carry its account number, and the log is
         // read back through the ops API.
         log.info("Stored file: id={}, user={}, type={}, bytes={}", id, userId, contentType, bytes);
-        return pasted ? shown(userId, id, dest) : new Stored(id, false, null, null);
+        return pasted ? shown(userId, id, dest, checkedBy) : new Stored(id, false, null, null);
     }
 
     /**
@@ -119,8 +129,8 @@ public class FileStorageService implements CloudImages {
      * copy written beside it, always -- never the pasted bytes themselves -- and recorded with what the
      * pasted file carries beside the picture, which makes what skills read from it private.
      */
-    private Stored shown(String userId, String id, Path file) throws IOException {
-        CloudImageCopy.Made made = CloudImageCopy.of(file);
+    private Stored shown(String userId, String id, Path file, long checkedBy) throws IOException {
+        CloudImageCopy.Made made = CloudImageCopy.of(file, userId, checkedBy);
         CloudImageCopy.Copy copy = made.copy();
         if (copy == null) {
             log.info("Pasted file {} stays private: {}", id, made.privateBecause());
