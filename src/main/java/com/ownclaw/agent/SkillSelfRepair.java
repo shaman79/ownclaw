@@ -1002,11 +1002,14 @@ public class SkillSelfRepair {
      * holds NO credential, and whose SKILL.yaml said has_side_effects: false in so many words both as
      * the repair began and now, at the call ({@code now}: the registry's skill, which the repair's
      * own skill_create may have rewritten; null to judge the start alone). The flag is the model's
-     * own optional claim about the OLD code, and the repair runs code it has just written: a skill
-     * with nothing to authenticate with runs in the jail with nothing to reach; a skill holding a
-     * router's root password, a file server's key or a mailbox can never be run by a repair. A
-     * skill written before the flag had three states says false wherever its author gave none, and
-     * is held to the same rule.
+     * own optional claim about the OLD code, and the repair runs code it has just written. What the
+     * rule rests on is the credentials: a skill run by a repair is handed no vault value, so whatever
+     * its new code does it cannot sign in as the owner anywhere -- no router, file server, mailbox or
+     * account. It is not isolated: it shares the host's network (the LAN, loopback, OwnClaw's own
+     * port) and the account's /tmp, and can reach whatever there asks for no login. A skill holding a
+     * router's root password, a file server's key or a mailbox is never run by a repair. A skill
+     * written before the flag had three states says false wherever its author gave none, and is held
+     * to the same rule.
      */
     static String notRunBecause(Declared began, Tool now) {
         var credentials = new java.util.LinkedHashSet<>(began.credentials());
