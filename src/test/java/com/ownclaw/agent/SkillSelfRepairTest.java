@@ -185,7 +185,7 @@ class SkillSelfRepairTest {
     /** A repair of {@code skill}, which declared {@code sideEffects}, as its task is handed one. */
     static SkillSelfRepair.Job job(String skill, Boolean sideEffects) {
         return new SkillSelfRepair.Job(999, skill, "abcd1234",
-                new SkillSelfRepair.Declared(sideEffects, true, List.of(), List.of(), null), false);
+                new SkillSelfRepair.Declared(sideEffects, true, List.of(), List.of(), null), false, List.of());
     }
 
     /** A repair's answer, with how its check went. */
@@ -234,8 +234,14 @@ class SkillSelfRepairTest {
         assertEquals(1, fix.rig.queue.getQueueSize(), "the repair waits in the queue, once");
         String goal = (String) row.get("goal");
         assertTrue(goal.contains("Repair the skill '" + MENU + "'"), goal);
-        assertTrue(goal.contains(PROBLEM), goal);
-        assertTrue(goal.contains(DEGRADED), "the public output, whole: " + goal);
+        // What ran is in the goal; what it produced is handed over as data, by handle, never pasted in.
+        assertFalse(goal.contains(DEGRADED), goal);
+        assertFalse(goal.contains(PROBLEM), goal);
+        assertTrue(goal.contains("- {{1}}: what went wrong with '" + MENU + "'"), goal);
+        assertTrue(goal.contains("- {{2}}: call 1 of 1 of '" + MENU + "' in that task, which reported success: its output."), goal);
+        String evidence = (String) row.get("evidence");
+        assertTrue(evidence.contains(PROBLEM), evidence);
+        assertTrue(evidence.contains(DEGRADED.replace("\"", "\\\"")), "the public output, whole: " + evidence);
         assertTrue(goal.contains("> Daily lunch menu"), "what ran: " + goal);
         assertTrue(goal.contains(r.taskId()), goal);
         assertTrue(goal.contains("debug set to true"), "the skill has a debug option: " + goal);
@@ -272,7 +278,9 @@ class SkillSelfRepairTest {
         assertFalse(goal.contains("48,213.07"), goal);
         assertTrue(goal.contains("its result is private and stays on this machine"), goal);
         assertTrue(goal.contains("PRIVATE (personal source)"), "its descriptor: " + goal);
-        assertTrue(goal.contains(SkillSelfRepair.WITHHELD), goal);
+        String evidence = (String) row.get("evidence");
+        assertTrue(evidence.contains(SkillSelfRepair.WITHHELD), evidence);
+        assertFalse(evidence.contains("statement for account"), evidence);
         assertEquals(SkillSelfRepair.WITHHELD, row.get("problem"));
     }
 
@@ -290,8 +298,10 @@ class SkillSelfRepairTest {
         assertEquals("web_snapshot", row.get("skill_name"));
         assertEquals(SkillSelfRepair.LAST_CALL_FAILED, row.get("problem"));
         String goal = (String) row.get("goal");
-        assertTrue(goal.contains("HTTP 455 Blocked by the host's bot protection"), goal);
-        assertTrue(goal.contains("it FAILED, called with {\"url\":\"https://example.com/menu\"}"), goal);
+        assertTrue(goal.contains("- {{2}}: call 1 of 1 of 'web_snapshot' in that task, which FAILED: its error."), goal);
+        String evidence = (String) row.get("evidence");
+        assertTrue(evidence.contains("HTTP 455 Blocked by the host's bot protection"), evidence);
+        assertTrue(evidence.contains("-- it FAILED; its error"), evidence);
     }
 
     @Test
@@ -589,8 +599,10 @@ class SkillSelfRepairTest {
         assertEquals(first.get("id"), second.get("previous_id"));
         assertNotEquals(first.get("repair_task_id"), second.get("repair_task_id"));
         String goal = (String) second.get("goal");
-        assertTrue(goal.contains("The previous self-repair of this skill (task " + first.get("repair_task_id") + ")"), goal);
-        assertTrue(goal.contains("I added browser headers; I did not run it again."), goal);
+        assertTrue(goal.contains(": the report of the previous self-repair of this skill (task "
+                + first.get("repair_task_id") + ")"), goal);
+        assertTrue(String.valueOf(second.get("evidence")).contains("I added browser headers; I did not run it again."),
+                String.valueOf(second.get("evidence")));
     }
 
     // ───────────────────────── what a repair may do ─────────────────────────
@@ -869,7 +881,7 @@ class SkillSelfRepairTest {
     @DisplayName("a repair's skill_create grants its skill nothing it did not have: no credential, network, system package, container image, or claim of no side effects")
     void grantsNothing() {
         var had = new SkillSelfRepair.Declared(null, false, List.of("MENU_API_KEY"), List.of("tesseract-ocr"), null);
-        var job = new SkillSelfRepair.Job(1, MENU, "t1", had, false);
+        var job = new SkillSelfRepair.Job(1, MENU, "t1", had, false, List.of());
         java.util.function.Function<Map<String, Object>, String> create = extra -> {
             var p = new java.util.HashMap<String, Object>(Map.of("name", MENU, "description", "x", "parameters", "{}"));
             p.putAll(extra);
@@ -893,7 +905,7 @@ class SkillSelfRepairTest {
         assertNotNull(create.apply(Map.of("has_side_effects", "false")));
         // Declared false: saying so again is no grant.
         var free = new SkillSelfRepair.Job(1, MENU, "t1",
-                new SkillSelfRepair.Declared(false, true, List.of(), List.of(), "python:3.12"), false);
+                new SkillSelfRepair.Declared(false, true, List.of(), List.of(), "python:3.12"), false, List.of());
         var same = new java.util.HashMap<String, Object>(Map.of("name", MENU, "has_side_effects", false,
                 "requires_network", true, "container_image", "python:3.12"));
         assertNull(SkillSelfRepair.outOfScope(free, AgentAction.SKILL_CREATE, same, null));

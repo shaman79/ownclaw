@@ -16,6 +16,8 @@
 -- changed anything) | not_finished (ended before it finished -- an outage, the stall watchdog, the
 -- window, a question -- without changing anything). The last four are no verdict on the skill.
 -- side_effects: what the skill's SKILL.yaml said as the repair began; a repair runs it only on 'false'.
+-- goal / evidence: what the repair was given -- its request, written by code, and (JSON) the
+-- results it was handed as its first steps: the problem, the skill's public outputs, a report.
 -- local_only: the repair ran on the local model only (the work it repairs did); its report is never
 -- handed to a repair that may use the cloud.
 -- code_before / code_after: the sha256 of the skill's skill.py when the repair was started and when
@@ -34,6 +36,7 @@ CREATE TABLE IF NOT EXISTS skill_repairs (
     problem          TEXT    NOT NULL,
     added_problems   TEXT,
     goal             TEXT,
+    evidence         TEXT,
     side_effects     TEXT    NOT NULL CHECK (side_effects IN ('true', 'false', 'undeclared')),
     code_before      TEXT,
     code_after       TEXT,

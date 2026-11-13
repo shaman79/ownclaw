@@ -420,6 +420,9 @@ public class AgentLoop {
         // capability (network scanning, media processing, etc.) and no existing
         // skill covers it, inject a specific hint so the LLM doesn't need to
         // figure out that it should use skill_create + system_packages.
+        // A repair is handed its evidence as its first results, before its first step.
+        SkillSelfRepair.handOver(context);
+
         // Not for a repair: its goal names the skill it repairs, and a deterministic skill_create of
         // another, at step 1, would bypass every check a repair's steps go through.
         if (repair == null) {
