@@ -875,6 +875,9 @@ class SkillSelfRepairTest {
         fix.unattended(TASK);
         var row = fix.ended(fix.lastId());
         assertEquals("stopped", row.get("outcome"));
+        // Ended by its own ending, as a Stop: told so -- not as a repair that never started.
+        String note = fix.told().get(fix.told().size() - 1);
+        assertTrue(note.contains("Stopped before it changed the skill"), note);
         var queue = new TaskQueue(fix.rig.loop, fix.rig.events, fix.rig.emitter, fix.rig.config, fix.rig.cancellation);
         try {
             restarted(fix, queue).resume();
