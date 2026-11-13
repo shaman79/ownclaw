@@ -574,11 +574,13 @@ class CloudImageCopyTest {
         try {
             long by = System.nanoTime() + 60_000_000_000L;
             var ends = new java.util.concurrent.ConcurrentHashMap<String, Long>();
+            var why = new java.util.concurrent.ConcurrentHashMap<String, String>();
             var checks = new java.util.ArrayList<java.util.concurrent.Future<?>>();
             for (String name : List.of("x", "y", "z")) {
                 checks.add(pool.submit(() -> {
-                    CloudImageCopy.of(big, "owner-a", by);
+                    var made = CloudImageCopy.of(big, "owner-a", by);
                     ends.put(name, System.nanoTime());
+                    why.put(name, String.valueOf(made.privateBecause()));
                     return null;
                 }));
                 Thread.sleep(50);
@@ -589,11 +591,38 @@ class CloudImageCopyTest {
                 return null;
             }));
             for (var c : checks) c.get();
-            assertTrue(ends.get("b") < ends.get("y") && ends.get("b") < ends.get("z"),
-                    "the other owner's paste waited for all three of the first's: " + ends);
+            assertTrue(ends.get("b") < ends.get("y"), "the other owner's paste waited for the first's waiting one: " + ends);
+            assertEquals(CloudImageCopy.OTHERS_FIRST, why.get("z"), "his third, with one checked and one waiting");
         } finally {
             pool.shutdownNow();
         }
         // Mutation: no turn an owner -> his three are queued ahead of the other's paste.
+    }
+
+    @Test
+    @DisplayName("an owner with one image being checked and one waiting has the next answered at once, private: his uploads hold two request threads, not two hundred")
+    void anOwnersThirdIsAnsweredAtOnce(@TempDir Path dir) throws Exception {
+        Path big = file(dir, "big.png", TestImages.uniformGreyPng(16000, 16000));
+        Path small = file(dir, "small.png", TestImages.png(400, 300));
+        var pool = java.util.concurrent.Executors.newFixedThreadPool(2);
+        try {
+            long by = System.nanoTime() + 60_000_000_000L;
+            var first = pool.submit(() -> CloudImageCopy.of(big, "owner-c", by));
+            Thread.sleep(100);
+            var second = pool.submit(() -> CloudImageCopy.of(small, "owner-c", by));
+            Thread.sleep(100);
+            long t0 = System.nanoTime();
+            var third = CloudImageCopy.of(small, "owner-c", by);
+            long ms = (System.nanoTime() - t0) / 1_000_000;
+            assertEquals(CloudImageCopy.OTHERS_FIRST, third.privateBecause());
+            assertTrue(ms < 500, "at once, not after the two ahead of it: " + ms + " ms");
+            assertNotNull(first.get().copy());
+            assertNotNull(second.get().copy(), "the one waiting is checked in its turn");
+            // Once they are done, the owner's next is checked as any.
+            assertNotNull(CloudImageCopy.of(small, "owner-c", System.nanoTime() + 10_000_000_000L).copy());
+        } finally {
+            pool.shutdownNow();
+        }
+        // Mutation: no cap on those waiting -> the third holds its thread for the seconds of the two ahead.
     }
 }

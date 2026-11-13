@@ -218,12 +218,22 @@ public final class CloudImageCopy {
     static final String NOT_IN_TIME = "other images were being checked and its turn did not come in time, so it "
             + "stays private -- skills still get it";
 
+    /** Why a pasted image of an owner who has one checked and another waiting stays private, at once. */
+    static final String OTHERS_FIRST = "others of your images were being checked and waiting, so it was not checked "
+            + "and stays private -- skills still get it";
+
     /**
-     * Each owner's turn at the checker: one check of an owner's is queued or running at a time, so
-     * the queue holds no more checks than there are owners uploading -- an account's two hundred
-     * pastes at once wait for their own turns, not ahead of everybody else's.
+     * An owner's turn at the checker: one check of his queued or running at a time, and one upload
+     * waiting for the next. The queue holds no more checks than there are owners uploading, and an
+     * account's two hundred pastes at once hold no more than two request threads: the rest are
+     * answered at once, private -- each waiting would have held a thread its thirty seconds.
      */
-    private static final java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.Semaphore> TURNS =
+    private static final class Turn {
+        final java.util.concurrent.Semaphore check = new java.util.concurrent.Semaphore(1);
+        final java.util.concurrent.atomic.AtomicInteger waiting = new java.util.concurrent.atomic.AtomicInteger();
+    }
+
+    private static final java.util.concurrent.ConcurrentHashMap<String, Turn> TURNS =
             new java.util.concurrent.ConcurrentHashMap<>();
 
     /**
@@ -251,13 +261,22 @@ public final class CloudImageCopy {
      * whose turn did not come stays private, and its queued check is cancelled.
      */
     public static Made of(Path file, String owner, long deadline) {
-        var turn = TURNS.computeIfAbsent(owner == null ? "" : owner, k -> new java.util.concurrent.Semaphore(1));
-        try {
-            long left = deadline - System.nanoTime();
-            if (left <= 0 || !turn.tryAcquire(left, TimeUnit.NANOSECONDS)) return Made.stays(NOT_IN_TIME);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            return Made.stays("its check was interrupted, so it stays private");
+        Turn owners = TURNS.computeIfAbsent(owner == null ? "" : owner, k -> new Turn());
+        var turn = owners.check;
+        if (!turn.tryAcquire()) {
+            if (owners.waiting.incrementAndGet() > 1) {
+                owners.waiting.decrementAndGet();
+                return Made.stays(OTHERS_FIRST);
+            }
+            try {
+                long left = deadline - System.nanoTime();
+                if (left <= 0 || !turn.tryAcquire(left, TimeUnit.NANOSECONDS)) return Made.stays(NOT_IN_TIME);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return Made.stays("its check was interrupted, so it stays private");
+            } finally {
+                owners.waiting.decrementAndGet();
+            }
         }
         var check = new Check(file, deadline, turn);
         Future<Made> done;
