@@ -31,7 +31,14 @@ final class StreamedCall {
      */
     static <T> T send(OkHttpClient http, Request request, String provider, LlmProgress progress,
                       Reader<T> reader) {
+        return send(http, request, provider, progress, null, reader);
+    }
+
+    /** {@link #send}, the whole call -- connecting, writing, waiting and reading -- within {@code limit} when given. */
+    static <T> T send(OkHttpClient http, Request request, String provider, LlmProgress progress,
+                      java.time.Duration limit, Reader<T> reader) {
         Call call = http.newCall(request);
+        if (limit != null) call.timeout().timeout(limit.toMillis(), java.util.concurrent.TimeUnit.MILLISECONDS);
         progress.calling(call::cancel);
         try (Response response = call.execute()) {
             return reader.read(response);

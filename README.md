@@ -195,7 +195,7 @@ All settings are in `src/main/resources/application.yaml` and can be overridden 
 | `ANTHROPIC_API_KEY` | — | Anthropic API key for cloud LLM |
 | `OPENAI_API_KEY` | — | OpenAI API key (alternative provider) |
 | `OWNCLAW_MENTOR_PROVIDER` | `openai` | Cloud provider: `openai` or `anthropic` |
-| `OWNCLAW_ANTHROPIC_MODEL` | `claude-sonnet-4-20250514` | Anthropic model name |
+| `OWNCLAW_ANTHROPIC_MODEL` | `claude-opus-5-5` | Anthropic model name |
 | `OWNCLAW_EXECUTOR_URL` | `http://localhost:11434` | Ollama API endpoint |
 | `OWNCLAW_EXECUTOR_MODEL` | `qwen2.5:14b` | Local LLM model name |
 | `OWNCLAW_PREFER_COST` | `true` | Cheaper: the cloud plans, the local model runs the skills (`false` = Fastest) |

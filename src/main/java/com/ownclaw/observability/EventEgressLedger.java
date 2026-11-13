@@ -59,13 +59,33 @@ public class EventEgressLedger implements EgressLedger {
                 m.put("chars", p.chars()); m.put("sha256_16", p.sha256_16());
                 return m;
             }).toList());
+            // The images that left with it, each by its file, its copy's type, size and hash --
+            // never the bytes -- and the ones it placed that the gateway kept back, with why.
+            if (!r.images().isEmpty()) {
+                d.put("images", r.images().stream().map(i -> {
+                    var m = new LinkedHashMap<String, Object>();
+                    m.put("fileId", i.fileId()); m.put("mediaType", i.mediaType());
+                    m.put("width", i.width()); m.put("height", i.height());
+                    m.put("bytes", i.bytes()); m.put("sha256_16", i.sha256_16());
+                    return m;
+                }).toList());
+            }
+            if (!r.withheld().isEmpty()) {
+                d.put("withheld", r.withheld().stream().map(w -> {
+                    var m = new LinkedHashMap<String, Object>();
+                    m.put("fileId", w.fileId()); m.put("why", w.why());
+                    return m;
+                }).toList());
+            }
             String severity = switch (r.decision()) {
                 case SENT -> "info";
                 case OBSERVED_LEAK, ERROR -> "warn";
                 case REFUSED -> "error";
             };
             String summary = r.decision() + " " + r.purpose() + " " + r.bytesOut() + " B "
-                    + r.provider() + "/" + r.model();
+                    + r.provider() + "/" + r.model()
+                    + (r.images().isEmpty() ? "" : " with " + r.images().size()
+                            + (r.images().size() == 1 ? " image" : " images"));
             // events.user_id is NOT NULL; a call with no task still has a user.
             eventLog.log(r.userId() == null ? "system" : r.userId(), r.taskId(), "egress",
                     severity, summary, mapper.writeValueAsString(d), 0);

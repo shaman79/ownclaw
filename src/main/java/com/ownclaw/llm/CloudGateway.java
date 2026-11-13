@@ -37,6 +37,12 @@ import java.util.Map;
  * which is trusted input -- a builder that rendered a result into one would not be refused. A
  * new call site next month either carries a context or does not get through.
  * <p>
+ * Images are the gateway's to decide too: the engine names an image by its file
+ * ({@link LlmMessage.Image}), and only a file of the task's user that was marked shown to the cloud
+ * when it was pasted, read here as the copy recorded then ({@link CloudImages}), goes -- where the
+ * filtered message still places it. The filter reads text, not pictures: an image goes as it was
+ * pasted, which the owner accepted, and the ledger names each one that left.
+ * <p>
  * Deliberately not a policy engine. There is one mode switch, {@code ENFORCE} or {@code OBSERVE},
  * and OBSERVE changes exactly one thing: a canary hit is sent and recorded as such instead of
  * refused. Everything else here is not configurable, because it is not a preference.
@@ -55,6 +61,7 @@ public final class CloudGateway implements LlmProvider {
     private final EgressLedger ledger;
     private final ObjectMapper mapper;
     private final Redactor redactor;
+    private final CloudImages images;
 
     /**
      * Spring constructs the providers here, and nowhere else. Annotated because the class has a
@@ -63,20 +70,28 @@ public final class CloudGateway implements LlmProvider {
      */
     @org.springframework.beans.factory.annotation.Autowired
     public CloudGateway(OwnClawConfig config, ObjectMapper mapper, EgressLedger ledger,
-                        Redactor redactor) {
+                        Redactor redactor, CloudImages images) {
         this(new AnthropicProvider(config, mapper), new OpenAiProvider(config, mapper),
-                config, ledger, mapper, redactor);
+                config, ledger, mapper, redactor, images);
     }
 
     /** Public so a test in another package can put a fake provider behind the door. */
     public CloudGateway(LlmProvider anthropic, LlmProvider openai, OwnClawConfig config,
-                        EgressLedger ledger, ObjectMapper mapper, Redactor redactor) {
+                        EgressLedger ledger, ObjectMapper mapper, Redactor redactor, CloudImages images) {
         this.anthropic = anthropic;
         this.openai = openai;
         this.config = config;
         this.ledger = ledger == null ? row -> { } : ledger;
         this.mapper = mapper == null ? new ObjectMapper() : mapper;
         this.redactor = redactor;
+        this.images = images == null ? CloudImages.NONE : images;
+    }
+
+    /** {@link #CloudGateway(LlmProvider, LlmProvider, OwnClawConfig, EgressLedger, ObjectMapper,
+     *  Redactor, CloudImages)} that sends no image. */
+    public CloudGateway(LlmProvider anthropic, LlmProvider openai, OwnClawConfig config,
+                        EgressLedger ledger, ObjectMapper mapper, Redactor redactor) {
+        this(anthropic, openai, config, ledger, mapper, redactor, CloudImages.NONE);
     }
 
     /** {@link #CloudGateway(LlmProvider, LlmProvider, OwnClawConfig, EgressLedger, ObjectMapper,
@@ -103,6 +118,17 @@ public final class CloudGateway implements LlmProvider {
     @Override public String model() { return active().model(); }
     @Override public boolean supportsTools() { return active().supportsTools(); }
     @Override public boolean isAvailable() { return active().isAvailable(); }
+    @Override public Integer knownContextWindow() { return active().knownContextWindow(); }
+    @Override public Integer contextWindow(LlmProgress progress) { return active().contextWindow(progress); }
+
+    /**
+     * Whether the configured cloud model is shown the images the owner pastes: Anthropic's, which the
+     * gateway sends them to. Another provider is sent none (OpenAiProvider), and the page and the
+     * task say so.
+     */
+    public static boolean showsImages(OwnClawConfig config) {
+        return "anthropic".equalsIgnoreCase(config.getMentor().getProvider());
+    }
 
     @Override
     public LlmResponse chat(List<LlmMessage> messages, LlmRequestConfig cfg) {
@@ -114,7 +140,7 @@ public final class CloudGateway implements LlmProvider {
         // (a) Unclassified means denied.
         if (egress == null) {
             ledger.record(row(null, providerName, model, EgressLedger.Decision.REFUSED,
-                    List.of(), new Redactor.Tally(), null, List.of(), 0, "unclassified"));
+                    List.of(), new Redactor.Tally(), null, List.of(), 0, "unclassified", List.of(), List.of()));
             throw new EgressRefused(providerName);
         }
 
@@ -141,7 +167,18 @@ public final class CloudGateway implements LlmProvider {
             // removes is let off because a marker stands in it -- and goes on marked.
             String content = m.authored() ? Redactor.filterAuthored(m.content(), vault, tally)
                     : redactor.filter(user, m.content(), vault, tally);
-            filteredMessages.add(new LlmMessage(m.role(), content, m.authored(), m.marked()));
+            filteredMessages.add(new LlmMessage(m.role(), content, m.authored(), m.marked(), m.images()));
+        }
+
+        // (b2) The images, decided here and by the file: whatever a message carries for one is put
+        // aside, and an image goes only where the filtered message still places it, as the bytes
+        // read now from the copy of a file of this user's that was marked shown to the cloud when
+        // it was pasted (CloudImages). The filter does not read them.
+        var imagesOut = new ArrayList<EgressLedger.Image>();
+        var withheld = new ArrayList<EgressLedger.Withheld>();
+        for (int i = 0; i < filteredMessages.size(); i++) {
+            LlmMessage m = filteredMessages.get(i);
+            if (!m.images().isEmpty()) filteredMessages.set(i, m.withImages(images(egress, m, imagesOut, withheld)));
         }
         List<ToolSpec> tools = cfg.tools();
         List<ToolSpec> filteredTools = null;
@@ -196,7 +233,8 @@ public final class CloudGateway implements LlmProvider {
                 int at = sv.at(part.text(), 0);
                 if (at < 0) continue;
                 ledger.record(row(egress, providerName, model, EgressLedger.Decision.REFUSED,
-                        parts, tally, null, List.of(), 0, "vault:" + sv.key() + " survived scrubbing"));
+                        parts, tally, null, List.of(), 0, "vault:" + sv.key() + " survived scrubbing",
+                        imagesOut, withheld));
                 log.error("Cloud call REFUSED for task {}: vault value {} survived scrubbing",
                         egress.taskId(), sv.key());
                 throw new EgressRefused(providerName, 0, "vault:" + sv.key(), part.index(),
@@ -239,7 +277,7 @@ public final class CloudGateway implements LlmProvider {
                         + ") at " + hit.offset();
                 if (mode() == Mode.ENFORCE) {
                     ledger.record(row(egress, providerName, model, EgressLedger.Decision.REFUSED,
-                            parts, tally, null, List.of(), 0, ref));
+                            parts, tally, null, List.of(), 0, ref, imagesOut, withheld));
                     log.error("Cloud call REFUSED for task {}: {}", egress.taskId(), ref);
                     throw new EgressRefused(providerName, hit.handle(),
                             egress.toolOf().apply(hit.handle()), part.index(), part.kind(), hit.offset());
@@ -279,14 +317,16 @@ public final class CloudGateway implements LlmProvider {
             ledger.record(row(egress, providerName, model, EgressLedger.Decision.ERROR, parts,
                     tally, null, billedWithoutReply, tools == null ? 0 : tools.size(),
                     observed == null ? e.getClass().getSimpleName()
-                            : observed + " (call then failed: " + e.getClass().getSimpleName() + ")"));
+                            : observed + " (call then failed: " + e.getClass().getSimpleName() + ")",
+                    imagesOut, withheld));
             throw e;
         }
         // Recorded under the model that wrote the reply and priced at its rates: a declined
         // request can be answered by Anthropic's fallback model.
         ledger.record(row(egress, providerName, response.model() != null ? response.model() : model,
                 observed == null ? EgressLedger.Decision.SENT : EgressLedger.Decision.OBSERVED_LEAK,
-                parts, tally, response, billedWithoutReply, tools == null ? 0 : tools.size(), observed));
+                parts, tally, response, billedWithoutReply, tools == null ? 0 : tools.size(), observed,
+                imagesOut, withheld));
         // (e) The values back where the reply names their placeholders, in its text and in every
         // tool call's arguments: from here on nothing sees a placeholder. Then the check, so a
         // refused or cut-off reply is on the ledger with its tokens and why it ended before its
@@ -308,6 +348,84 @@ public final class CloudGateway implements LlmProvider {
         }
         return !changed ? r : new LlmResponse(content, calls, invalid, r.stopReason(), r.stopDetail(),
                 r.model(), r.maxOutputTokens(), r.contextWindow(), r.usage());
+    }
+
+    // ── images ──
+
+    /**
+     * {@code m}'s images as the provider is handed them: each that the message places
+     * ({@link LlmMessage#layout}, the provider's own reading) and that {@link #images} finds, with
+     * the bytes it read -- hashed again here, so what goes is the copy recorded at upload whatever
+     * the store did -- and every other one bare, which the provider sends nothing for. Whatever the
+     * message carried for an image is not looked at: only bytes read here go. What went is added to
+     * {@code out}, what did not to {@code withheld}, with why; a withheld image is logged.
+     */
+    private List<LlmMessage.Image> images(EgressContext egress, LlmMessage m, List<EgressLedger.Image> out,
+                                          List<EgressLedger.Withheld> withheld) {
+        LlmMessage.Layout layout = m.marked() ? LlmMessage.layout(m.content()) : null;
+        java.util.Set<Integer> placed = layout == null ? java.util.Set.of() : layout.pictures();
+        var handed = new ArrayList<LlmMessage.Image>(m.images().size());
+        for (int k = 0; k < m.images().size(); k++) {
+            LlmMessage.Image image = m.images().get(k);
+            var bare = new LlmMessage.Image(image.fileId(), image.width(), image.height(), image.bytes());
+            String why = null;
+            CloudImages.Copy copy = null;
+            if (!m.marked()) {
+                why = "it was not placed in the request's text, where the pictures go";
+            } else if (!placed.contains(k)) {
+                why = layout == null ? "the privacy filter removed a secret from the message it came with, and the message went as plain text, without pictures"
+                        : "the privacy filter removed a secret from the text around it, and its place with it";
+            } else {
+                try {
+                    CloudImages.Found found = images.copyOf(egress.userId(), image.fileId());
+                    if (found == null || found.copy() == null) {
+                        why = found == null || found.withheld() == null ? "no copy for the cloud model was found" : found.withheld();
+                    } else {
+                        copy = found.copy();
+                    }
+                } catch (RuntimeException e) {
+                    why = "its copy could not be read";
+                }
+                if (copy != null) {
+                    if (!SENDABLE.contains(copy.mediaType())) {
+                        why = "its copy is a kind of picture the cloud model does not take";
+                        copy = null;
+                    } else if (LlmMessage.Image.base64Bytes(copy.bytes().length) > LlmMessage.IMAGE_BASE64_LIMIT) {
+                        why = "its copy is larger than the cloud model takes for one picture";
+                        copy = null;
+                    } else if (!sha256(copy.bytes()).equals(copy.sha256())) {
+                        why = "its copy changed after it was pasted";
+                        copy = null;
+                    }
+                }
+            }
+            if (copy == null) {
+                withheld.add(new EgressLedger.Withheld(image.fileId(), why));
+                log.warn("Cloud call for task {}: the image of file {} is not sent: {}", egress.taskId(),
+                        image.fileId(), why);
+                handed.add(bare);
+                continue;
+            }
+            String sha16 = copy.sha256().substring(0, 16);
+            handed.add(new LlmMessage.Image(image.fileId(), copy.width(), copy.height(), copy.bytes().length,
+                    new LlmMessage.Sent(copy.mediaType(), copy.bytes(), sha16)));
+            out.add(new EgressLedger.Image(image.fileId(), copy.mediaType(), copy.width(), copy.height(),
+                    copy.bytes().length, sha16));
+        }
+        return handed;
+    }
+
+    /** The image types the Messages API takes. */
+    private static final java.util.Set<String> SENDABLE = java.util.Set.of("image/png", "image/jpeg", "image/gif",
+            "image/webp");
+
+    /** The hex SHA-256 of {@code bytes}. */
+    static String sha256(byte[] bytes) {
+        try {
+            return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes));
+        } catch (java.security.NoSuchAlgorithmException e) {
+            throw new IllegalStateException("SHA-256 is missing from this JVM", e);
+        }
     }
 
     // ── parts ──
@@ -352,7 +470,8 @@ public final class CloudGateway implements LlmProvider {
                                         EgressLedger.Decision decision, List<Part> parts,
                                         Redactor.Tally tally, LlmResponse response,
                                         List<LlmResponse.Usage> billedWithoutReply, int toolCount,
-                                        String refusalRef) {
+                                        String refusalRef, List<EgressLedger.Image> images,
+                                        List<EgressLedger.Withheld> withheld) {
         long bytes = 0;
         var ledgerParts = new ArrayList<EgressLedger.Part>(parts.size());
         for (Part p : parts) {
@@ -360,6 +479,9 @@ public final class CloudGateway implements LlmProvider {
             ledgerParts.add(lp);
             bytes += p.text() == null ? 0 : p.text().getBytes(StandardCharsets.UTF_8).length;
         }
+        // An image leaves base64-encoded.
+        for (EgressLedger.Image i : images) bytes += LlmMessage.Image.base64Bytes(i.bytes());
+        boolean refused = decision == EgressLedger.Decision.REFUSED;
         var usage = new ArrayList<>(billedWithoutReply);
         if (response != null) usage.addAll(response.usage());
         LlmResponse billed = LlmResponse.billedFor(usage);
@@ -375,10 +497,12 @@ public final class CloudGateway implements LlmProvider {
                 provider, model, decision, List.copyOf(ledgerParts),
                 // Bytes that LEFT. A refused call sent none, and counting its payload as egress
                 // is the one arithmetic error that would make the ledger overstate exposure.
-                decision == EgressLedger.Decision.REFUSED ? 0 : bytes,
+                refused ? 0 : bytes,
                 toolCount, pt, ct, cw, cr, cost, tally.secretsRemoved(), tally.identifiersReplaced(),
                 refusalRef,
-                response == null ? null : response.stopDescription());
+                response == null ? null : response.stopDescription(),
+                // A refused call sent no image either.
+                refused ? List.of() : images, withheld);
     }
 
     private static double safeCost(String model, LlmResponse response) {

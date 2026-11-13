@@ -939,12 +939,18 @@ public class LocalExecutor {
                     + "with the rest of this work in your context window is folded: you see its "
                     + "beginning and a note. Nothing of it was dropped: read the part you need, or find "
                     + "where something is first.",
-            ToolSchemas.toJsonSchema(Map.of(
-                    "result", ToolParam.required("integer", "The result's number: 3 for {{3}}."),
-                    "from", ToolParam.optional("integer", "The character offset to read from; 0 when left out."),
-                    "length", ToolParam.optional("integer", "How many characters to read; what fits when left out."),
-                    "find", ToolParam.optional("string", "A text to look for instead of reading, case aside: "
-                            + "every place it occurs, with its offset and the text around it."))));
+            // In this order, every run: Map.of iterates in an order seeded anew in every JVM.
+            ToolSchemas.toJsonSchema(readResultParams()));
+
+    private static Map<String, ToolParam> readResultParams() {
+        var params = new java.util.LinkedHashMap<String, ToolParam>();
+        params.put("result", ToolParam.required("integer", "The result's number: 3 for {{3}}."));
+        params.put("from", ToolParam.optional("integer", "The character offset to read from; 0 when left out."));
+        params.put("length", ToolParam.optional("integer", "How many characters to read; what fits when left out."));
+        params.put("find", ToolParam.optional("string", "A text to look for instead of reading, case aside: "
+                + "every place it occurs, with its offset and the text around it."));
+        return params;
+    }
 
     /**
      * A delegation's conversation fitted to the local model's window ({@link ContextFit}), as the
@@ -1644,6 +1650,14 @@ public class LocalExecutor {
               .append(", in the argument --\n");
             sb.append("  as the whole value or inside it -- and the exact text is put there when the\n");
             sb.append("  call runs. Never type a text out yourself.\n");
+        }
+        if (!context.pasted().isEmpty()) {
+            // The cloud model is shown the images the owner pasted; this model is not, and would
+            // otherwise take the goal's "the screenshot" for something it can look at.
+            sb.append("- The image").append(context.pasted().size() == 1 ? " the user pasted is" : "s the user pasted are")
+              .append(" given to every tool you call (as _attached_files);\n");
+            sb.append("  you cannot see images yourself: only a tool reads ").append(context.pasted().size() == 1 ? "it" : "them")
+              .append(".\n");
         }
         if (fileTask) {
             // The rule below is false here: a file task's results are withheld from the cloud,

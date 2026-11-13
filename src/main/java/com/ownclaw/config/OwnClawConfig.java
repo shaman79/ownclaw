@@ -131,7 +131,7 @@ public class OwnClawConfig {
         private String model = "gpt-4o";
         private String apiKey;
         private String anthropicApiKey;
-        private String anthropicModel = "claude-sonnet-4-20250514";
+        private String anthropicModel = "claude-opus-5-5";
         private double temperature = 0.4;
 
         private boolean nativeTools = true;

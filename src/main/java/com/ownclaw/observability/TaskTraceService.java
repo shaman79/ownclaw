@@ -276,6 +276,37 @@ public class TaskTraceService {
         totals.put("cacheWriteTokens", cacheWrite);
         totals.put("scrubs", scrubs);
         totals.put("identifiers", identifiers);
+        // The images that left: each pasted image once, however many requests carried it -- the
+        // requests the model read (a refused one carries none: CloudGateway), a failed one among
+        // them when the provider had billed it, which it does once it has read the request; and
+        // apart, those only on requests that failed with nothing billed, which may not have
+        // reached the provider.
+        var went = new java.util.LinkedHashSet<String>();
+        var failed = new java.util.LinkedHashSet<String>();
+        int imageRequests = 0, imageRequestsFailed = 0;
+        for (var c : calls) {
+            var ids = imageIds(c);
+            if (read(c) && !ids.isEmpty()) {
+                imageRequests++;
+                if (isError(c)) imageRequestsFailed++;
+                went.addAll(ids);
+            } else if (isError(c)) {
+                failed.addAll(ids);
+            }
+        }
+        failed.removeAll(went);
+        totals.put("images", went.size());
+        totals.put("imageRequests", imageRequests);
+        totals.put("imageRequestsFailed", imageRequestsFailed);
+        totals.put("imagesFailed", failed.size());
+        // And each pasted image: how many requests the model read carried it, and how many of those
+        // then failed -- none on a Free task, or one whose cloud could not be called.
+        for (var a : artifacts) {
+            if (!"pasted image".equals(a.get("kind")) || a.get("fileId") == null) continue;
+            a.put("shownWith", (int) calls.stream().filter(c -> read(c) && imageIds(c).contains(a.get("fileId"))).count());
+            a.put("shownFailed", (int) calls.stream().filter(c -> read(c) && isError(c)
+                    && imageIds(c).contains(a.get("fileId"))).count());
+        }
         totals.put("costUsd", cost);
         totals.put("costIsFloor", costIsFloor);
         totals.put("decisions", decisions);
@@ -296,9 +327,56 @@ public class TaskTraceService {
         return out;
     }
 
+    /** The files of the images a request carried. */
+    @SuppressWarnings("unchecked")
+    private static List<String> imageIds(Map<String, Object> c) {
+        var out = new ArrayList<String>();
+        if (c.get("images") instanceof List<?> images) {
+            for (Object i : images) {
+                Object id = ((Map<String, Object>) i).get("fileId");
+                if (id != null) out.add(String.valueOf(id));
+            }
+        }
+        return out;
+    }
+
+    /**
+     * How many requests of a task the model read carried the image of file {@code fileId}, as its
+     * page counts them ({@link #trace}): 0 when none did -- a Free task, or one with no cloud to
+     * call. One that failed after the provider had billed it was read.
+     */
+    public static int requestsCarrying(Map<String, Object> trace, String fileId) {
+        return carrying(trace, fileId, false);
+    }
+
+    /** Of {@link #requestsCarrying}, how many failed after the model had read them. */
+    public static int failedRequestsCarrying(Map<String, Object> trace, String fileId) {
+        return carrying(trace, fileId, true);
+    }
+
+    @SuppressWarnings("unchecked")
+    private static int carrying(Map<String, Object> trace, String fileId, boolean failedOnly) {
+        if (!(trace.get("calls") instanceof List<?> calls)) return 0;
+        int n = 0;
+        for (Object c : calls) {
+            var call = (Map<String, Object>) c;
+            if (read(call) && (!failedOnly || isError(call)) && imageIds(call).contains(fileId)) n++;
+        }
+        return n;
+    }
+
     /** Whether a request came back with a reply: a refused one never left, a failed one got none. */
     private static boolean answered(Map<String, Object> c) {
         return "SENT".equals(c.get("decision")) || "OBSERVED_LEAK".equals(c.get("decision"));
+    }
+
+    /**
+     * Whether the model read a request: answered, or failed after the provider had billed it --
+     * a stream cut after message_start, a dropped connection -- which it does only once it has read
+     * the whole request, its images with it.
+     */
+    private static boolean read(Map<String, Object> c) {
+        return answered(c) || isError(c) && c.get("promptTokens") != null;
     }
 
     private static boolean isError(Map<String, Object> c) {
@@ -342,6 +420,28 @@ public class TaskTraceService {
         c.put("stopReason", d.hasNonNull("stopReason") ? d.path("stopReason").asText() : null);
         c.put("messages", Map.of("count", msgCount, "chars", msgChars));
         c.put("tools", Map.of("count", toolCount, "chars", toolChars));
+        // The images it carried -- an image the owner pasted, which the filter does not read -- each
+        // by its file, type, pixel size, bytes and hash; and those it placed that were kept back.
+        var images = new ArrayList<Map<String, Object>>();
+        for (JsonNode i : d.path("images")) {
+            var image = new LinkedHashMap<String, Object>();
+            image.put("fileId", i.path("fileId").asText(null));
+            image.put("mediaType", i.path("mediaType").asText(null));
+            image.put("width", i.path("width").asInt());
+            image.put("height", i.path("height").asInt());
+            image.put("bytes", i.path("bytes").asLong());
+            image.put("sha256_16", i.path("sha256_16").asText(null));
+            images.add(image);
+        }
+        c.put("images", images);
+        var withheld = new ArrayList<Map<String, Object>>();
+        for (JsonNode w : d.path("withheld")) {
+            var one = new LinkedHashMap<String, Object>();
+            one.put("fileId", w.path("fileId").asText(null));
+            one.put("why", w.path("why").asText(null));
+            withheld.add(one);
+        }
+        c.put("withheld", withheld);
         return c;
     }
 
@@ -385,6 +485,24 @@ public class TaskTraceService {
         // Only an attachment's row has one: which file it is. Absent on rows from before it was
         // recorded.
         a.put("fileId", d.hasNonNull("fileId") ? d.path("fileId").asText() : null);
+        // An attachment's kind: a private file, or an image the owner pasted that the cloud model
+        // is shown, with the size it was pasted at and the size it is shown at. Absent on rows from
+        // before images were shown: every one of those is a private file.
+        if (d.hasNonNull("kind")) a.put("kind", d.path("kind").asText());
+        if (d.path("shownToCloud").asBoolean(false)) {
+            a.put("shownToCloud", true);
+            a.put("contentType", d.path("contentType").asText(null));
+            a.put("mediaType", d.path("mediaType").asText(null));
+            a.put("width", d.path("width").asInt());
+            a.put("height", d.path("height").asInt());
+            a.put("imageWidth", d.path("imageWidth").asInt());
+            a.put("imageHeight", d.path("imageHeight").asInt());
+            // Its file carries more than the picture: what skills read from it is private.
+            if (d.path("resultsPrivate").asBoolean(false)) {
+                a.put("resultsPrivate", true);
+                a.put("metadata", d.path("metadata").asText(null));
+            }
+        }
         return a;
     }
 

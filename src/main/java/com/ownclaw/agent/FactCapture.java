@@ -84,9 +84,18 @@ final class FactCapture {
      * @param answer what he was answered, as the cloud may read it: a private answer is the note
      *               that it exists (AgentLoop#turnEnded)
      * @param worked whether the task did what was asked
+     * @param images how many images the owner pasted with his message: the local model reading the
+     *               turn cannot see them, and is told they were there
      */
     record Turn(String userId, String sessionId, String taskId, List<String> said, String answer,
-                boolean worked, TaskChat.Channel channel) {}
+                boolean worked, TaskChat.Channel channel, int images) {
+
+        /** A turn whose message came with no pasted image. */
+        Turn(String userId, String sessionId, String taskId, List<String> said, String answer, boolean worked,
+             TaskChat.Channel channel) {
+            this(userId, sessionId, taskId, said, answer, worked, channel, 0);
+        }
+    }
 
     /**
      * One fact the local model would keep, under {@code key}.
@@ -321,8 +330,20 @@ final class FactCapture {
                         in the language he wrote in."""),
                 LlmMessage.user((kept.isEmpty() ? "Notes already kept: none.\n" : "Notes already kept:\n" + notes)
                         + "\nWhat the owner wrote:\n" + String.join("\n\n", turn.said())
+                        + pastedWith(turn.images())
                         + "\n\nThe answer he was given (the task " + (turn.worked() ? "did" : "did not do")
                         + " what was asked):\n" + (turn.answer() == null ? "" : turn.answer())));
+    }
+
+    /**
+     * What the local model reading a turn is told of the images the owner pasted with his message:
+     * that they were there, and that it is not shown them -- it cannot see images. What the answer
+     * says of one is the answer's, as anything it quotes is. Nothing when there were none.
+     */
+    static String pastedWith(int images) {
+        if (images <= 0) return "";
+        return "\n[He pasted " + (images == 1 ? "an image" : images + " images") + " with it, which you are not "
+                + "shown: " + com.ownclaw.llm.OllamaProvider.CANNOT_SEE_IMAGES + ".]";
     }
 
     /** Where a kept fact came from, as a prompt says it after the fact; nothing for memory_manage's. */

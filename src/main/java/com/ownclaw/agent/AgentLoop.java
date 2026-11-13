@@ -192,12 +192,37 @@ public class AgentLoop {
      */
     public void turnEnded(String userId, String sessionId, List<String> said, AgentResult result,
                           TaskChat.Channel channel) {
+        turnEnded(userId, sessionId, said, List.of(), result, channel);
+    }
+
+    /**
+     * {@link #turnEnded(String, String, List, AgentResult, TaskChat.Channel)}, of a turn whose
+     * message was sent with these files: the local model reading it is told how many of them were
+     * images the owner pasted, which it cannot see.
+     */
+    public void turnEnded(String userId, String sessionId, List<String> said, List<String> attachmentIds,
+                          AgentResult result, TaskChat.Channel channel) {
         FactCapture capture = factCapture;
         if (capture == null || result == null || said == null || said.isEmpty()) return;
         if (result.terminationReason() == AgentResult.TerminationReason.CANCELLED) return;
         if (result.localOnly()) return;
         capture.after(new FactCapture.Turn(userId, sessionId, result.taskId(), List.copyOf(said),
-                result.response(), result.success(), channel));
+                result.response(), result.success(), channel, pastedImages(userId, attachmentIds)));
+    }
+
+    /** How many of {@code attachmentIds} are images of this user's that were pasted to show the cloud model. */
+    private int pastedImages(String userId, List<String> attachmentIds) {
+        if (attachmentIds == null || attachmentIds.isEmpty() || fileStorage == null) return 0;
+        int n = 0;
+        for (String id : attachmentIds) {
+            try {
+                Map<String, Object> info = fileStorage.getFileInfo(id);
+                if (info != null && userId.equals(info.get("user_id")) && FileStorageService.pastedImage(info) != null) n++;
+            } catch (RuntimeException e) {
+                log.debug("Could not read attachment {}: {}", id, e.getClass().getSimpleName());
+            }
+        }
+        return n;
     }
 
     /** Where each fact came from, by key; none said when that cannot be read -- the facts are still told. */
@@ -458,7 +483,7 @@ public class AgentLoop {
                 cancellationService.forget(taskId);
             }
         }
-        return end(context, result, true);
+        return end(context, result, !context.episodeForgotten());
     }
 
     /**
@@ -534,15 +559,18 @@ public class AgentLoop {
     }
 
     /**
-     * The files sent with this turn, each checked to be this user's, become the task's files:
-     * PRIVATE artifacts, and the list every skill is handed as {@code _attached_files}.
+     * The files sent with this turn, each checked to be this user's, become the task's files: the
+     * list every skill is handed as {@code _attached_files}. A private file is a PRIVATE artifact;
+     * an image the owner pasted, its file marked shown to the cloud model when it was uploaded
+     * (FileStorageService), is a PUBLIC one -- the cloud model is shown it.
      * <p>
      * That list is also what {@link AgentContext#decide} reads to make every result of the task
-     * PRIVATE, so what a skill is given and what is labelled are one list. An id that is missing
-     * or another user's file is skipped, and so never handed to a skill: the ids come from the
-     * browser, and before this check any id sent was registered and handed on, whoever owned
-     * the file. A text upload's bytes go into the canary's index; a file that is not text has
-     * none, and the label is its guard. Static, so a test can run it against a database.
+     * PRIVATE when it holds a private file, so what a skill is given and what is labelled are one
+     * list. An id that is missing or another user's file is skipped, and so never handed to a
+     * skill: the ids come from the browser, and before this check any id sent was registered and
+     * handed on, whoever owned the file. A text upload's bytes go into the canary's index; a file
+     * that is not text has none, and the label is its guard. Static, so a test can run it against
+     * a database.
      */
     static void registerAttachments(AgentContext context, List<String> attachmentIds,
                                     FileStorageService fileStorage, EventLogService eventLog) {
@@ -557,17 +585,31 @@ public class AgentLoop {
                 }
                 String ct = String.valueOf(info.get("content_type"));
                 Object size = info.get("size_bytes");
-                String text = fileStorage.isTextContent(ct) ? fileStorage.readAsText(id) : null;
-                // The type and the size, never the name: a statement's file name carries its
-                // account number, and the why is part of every descriptor the cloud reads.
-                var why = List.of("uploaded file",
-                        ct + ", " + size + " bytes" + (text == null ? ", no text read (not text, or not UTF-8)" : ""));
-                Artifact a = context.addFile(id, text, why);
+                FileStorageService.PastedImage image = FileStorageService.pastedImage(info);
+                Artifact a;
+                if (image != null) {
+                    // What it is, the size it was pasted at and the size the cloud model is shown --
+                    // never the name, as for any file.
+                    boolean scaled = image.width() != image.originalWidth() || image.height() != image.originalHeight();
+                    a = context.addPastedImage(image, List.of("pasted image", ct + ", " + size + " bytes, "
+                            + image.originalWidth() + "x" + image.originalHeight() + " px; the cloud model is shown it"
+                            + (scaled ? " at " + image.width() + "x" + image.height() + " px" : "")
+                            + (image.metadata() == null ? ""
+                                    : "; its file also carries " + image.metadata() + ", so what skills read from it is private")));
+                } else {
+                    String text = fileStorage.isTextContent(ct) ? fileStorage.readAsText(id) : null;
+                    // The type and the size, never the name: a statement's file name carries its
+                    // account number, and the why is part of every descriptor the cloud reads.
+                    var why = List.of("uploaded file",
+                            ct + ", " + size + " bytes" + (text == null ? ", no text read (not text, or not UTF-8)" : ""));
+                    a = context.addFile(id, text, why);
+                }
                 // A row per file, metadata only. No step ever names an attachment, so without
                 // this nothing recorded that a task had one -- the task page could not show the
-                // file, its label, or whether it was withheld.
+                // file, its label, or whether it was withheld -- nor which kind it was.
                 eventLog.log(context.userId(), context.taskId(), "attachment", "info",
-                        "attachment " + a.label(), JSON.writeValueAsString(attachmentDetails(a)), 0);
+                        "attachment " + a.label() + (image != null ? " pasted image" : ""),
+                        JSON.writeValueAsString(attachmentDetails(a, image)), 0);
             } catch (Exception e) {
                 log.debug("Could not register attachment {}: {}", id, e.getMessage());
             }
@@ -617,6 +659,9 @@ public class AgentLoop {
             // Each message as it is written into the prompt, with its record and its files: what
             // folds, one message at a time, when the request does not fit (ContextFit).
             var entries = new ArrayList<String>();
+            // The images pasted with each, by its index: the cloud model is shown each before the
+            // message's text (ThinkingEngine#anthropicTask).
+            var images = new LinkedHashMap<Integer, List<FileStorageService.PastedImage>>();
             for (Map<String, Object> row : conversationService.contextOf(userId, currentMessageId)) {
                 int from = sb.length();
                 String role = (String) row.get("role");
@@ -627,8 +672,22 @@ public class AgentLoop {
                 if (record != null) sb.append(record).append("\n");
 
                 // Include file attachment info for messages that have them
+                var pasted = new ArrayList<FileStorageService.PastedImage>();
                 for (var att : fileStorage.getMessageAttachmentDetails((String) row.get("id"))) {
+                    // Another user's file is not this chat's, whatever id its row was saved with.
+                    if (!userId.equals(att.get("user_id"))) continue;
                     String ct = (String) att.get("content_type");
+                    FileStorageService.PastedImage image = FileStorageService.pastedImage(att);
+                    if (image != null) {
+                        // An image the owner pasted: the cloud model is shown it before this text, on
+                        // a request with room for it; this line says it was here either way. Not
+                        // named, as no file is.
+                        pasted.add(image);
+                        sb.append("[An image was pasted with this message: ").append(ct).append(", ")
+                          .append(image.originalWidth()).append('x').append(image.originalHeight())
+                          .append(" px.]\n");
+                        continue;
+                    }
                     // Never inlined, and not named. A file is PRIVATE: inlined, its bytes
                     // went to the cloud on every later task of the session; and its name can
                     // carry what it holds -- a statement's account number. Skills are handed
@@ -637,13 +696,14 @@ public class AgentLoop {
                       .append(att.get("size_bytes")).append(" bytes). It is private and not ")
                       .append("available to this task; the user can attach it again.]\n");
                 }
+                if (!pasted.isEmpty()) images.put(entries.size(), List.copyOf(pasted));
                 entries.add(sb.substring(from));
             }
 
             String conversationContext = sb.toString().strip();
             if (!conversationContext.isEmpty()) {
                 context.setConversationSummary(AgentContext.CONVERSATION_HEADER + conversationContext);
-                context.setConversation(entries);
+                context.setConversation(entries, images);
                 log.debug("Loaded conversation context for user {}: {} chars",
                         userId, conversationContext.length());
             }
@@ -651,6 +711,79 @@ public class AgentLoop {
             log.warn("Failed to load conversation context for user {}: {}", userId, e.getMessage());
             // Non-fatal — the agent can still process the message without history
         }
+    }
+
+    /**
+     * The first step of a task holding images the owner pasted that goes to a model not shown them
+     * tells its chat so, once, and why: the local model -- on Free, in local mode, after the cloud
+     * could not be reached, or with no cloud configured -- cannot see images and is sent none; a cloud
+     * model other than Anthropic's is sent none either (OpenAiProvider). Said before the step is
+     * asked, so said of the step, not of a reply: true whatever the call does. Skills are still handed
+     * the images.
+     *
+     * @param local whether the step goes to the local model
+     */
+    static void imagesNotSeen(AgentContext context, boolean local, LlmProvider provider) {
+        int images = context.pasted().size();
+        if (images == 0) return;
+        String why;
+        if (local) {
+            why = "it goes to the local model, which cannot see images -- "
+                    + (context.options().localOnly() ? "this chat runs on the local model only (Free)"
+                    : context.onLocal() ? "the cloud model can't be used: " + context.onLocalBecause()
+                    : "no cloud model is configured");
+        } else if (!"anthropic".equals(provider.name())) {
+            // Not which: the provider is the owner's setting, and every account reads its notes.
+            why = "this chat's cloud model is one OwnClaw sends no images";
+        } else {
+            return;
+        }
+        if (!context.imagesNotSeenTold()) return;
+        context.chat().imagesNotSeen(images, why);
+    }
+
+    /**
+     * The result that ends a task, before any model is called, whose message carries more pasted
+     * images than one request to the cloud model can: past the Messages API's own limits -- 100
+     * images on a model with a 200k window, 600 on a larger one, 128 MB in all -- the request is
+     * refused and the task would end with an error that names none of this. Fitting the chat's older
+     * images makes room only for this message's own ({@link AgentContext#fitImages}); these are what
+     * the owner asked about, so none is left out: he is told how to send them. Null to go on -- on
+     * Free too, and with a cloud model that is sent no image.
+     *
+     * @param shown  whether the configured cloud model is shown images ({@code CloudGateway#showsImages})
+     * @param window the cloud model's context window, as its provider tells it, or null
+     */
+    /**
+     * Before the task's first request to the cloud: a message whose own images are more than one
+     * request carries is refused, saying how to send them ({@link #imagesPastOneRequest}). In the
+     * loop, where a Stop and the stall watchdog reach the window's lookup -- before it, a Stop waited
+     * for the Models API -- and before the first step's skill, whose code the cloud writes: so
+     * "nothing was sent" is true. A refused message is no episode: nothing was done.
+     */
+    private AgentResult measureImages(AgentContext context, LlmProvider provider) {
+        if (provider == null || llmRouter.isLocal(provider) || context.imagesMeasured()) return null;
+        context.measureImages();
+        AgentResult tooMany = imagesPastOneRequest(context, com.ownclaw.llm.CloudGateway.showsImages(config),
+                () -> context.cloudWindow(provider));
+        if (tooMany != null) context.forgetEpisode();
+        return tooMany;
+    }
+
+    static AgentResult imagesPastOneRequest(AgentContext ctx, boolean shown, java.util.function.Supplier<Integer> window) {
+        var pasted = ctx.pasted();
+        if (pasted.isEmpty() || !shown || ctx.options().localOnly()) return null;
+        long bytes = pasted.stream().mapToLong(p -> LlmMessage.Image.base64Bytes(p.image().bytes())).sum();
+        int most = LlmMessage.imagesPerRequest(window.get());
+        if (pasted.size() <= most && bytes <= LlmMessage.IMAGE_BYTES_PER_REQUEST) return null;
+        log.warn("Task {}: {} pasted images, {} bytes as sent, are more than one request to the cloud takes",
+                ctx.taskId(), pasted.size(), bytes);
+        return AgentResult.error("this message carries " + pasted.size() + " pasted images ("
+                + String.format(java.util.Locale.ROOT, "%,d", bytes / 1_000_000) + " MB as they are sent), more than one "
+                + "request to the cloud model can carry -- at most " + most + " images and "
+                + LlmMessage.IMAGE_BYTES_PER_REQUEST / 1_000_000 + " MB of them -- so nothing was sent. Paste them "
+                + "over several messages, each within those, or ask about them a few at a time", ctx.trajectory(),
+                ctx.elapsedMs());
     }
 
     /** Above the local model's answer on the owner's screen: who wrote it, and who never saw it. */
@@ -787,7 +920,8 @@ public class AgentLoop {
      */
     static AgentResult stopWithoutLocalModel(AgentContext ctx,
                                              java.util.function.BooleanSupplier localAvailable) {
-        if (ctx.files().isEmpty() || localAvailable.getAsBoolean()) return null;
+        // A private file: an image the owner pasted is shown to the cloud, which can answer from it.
+        if (ctx.privateFiles().isEmpty() || localAvailable.getAsBoolean()) return null;
         log.warn("Task {}: a file was sent and the local model is not answering; stopping "
                 + "before any cloud call.", ctx.taskId());
         return AgentResult.error(LOCAL_DOWN_FOR_FILES, ctx.trajectory(), ctx.elapsedMs());
@@ -809,6 +943,10 @@ public class AgentLoop {
     private AgentResult runLoop(AgentContext context) {
         var nothing = new RunOfNothing(); // steps in a row that ran nothing
         int unansweredQuestions = 0;      // ask_user calls on a task with nobody to answer them
+
+        // Before anything is sent -- the first step's skill too, whose code the cloud writes.
+        AgentResult tooMany = measureImages(context, llmRouter.selectProvider(context));
+        if (tooMany != null) return tooMany;
 
         for (int step = 0; ; step++) {
             // Stopped from outside -- the owner's Stop or /cancel, the ops API, or the stall
@@ -884,7 +1022,11 @@ public class AgentLoop {
             // === THINK ===
             LlmProvider provider = llmRouter.selectProvider(context);
             boolean local = llmRouter.isLocal(provider);
+            // Before this step's first request to the cloud, should the task have started on the local model.
+            AgentResult pastOne = measureImages(context, provider);
+            if (pastOne != null) return pastOne;
             readMessages(context, step + 1, local);
+            imagesNotSeen(context, local, provider);
             String providerLabel = local ? "local" : provider.name();
             statusEmitter.emitForTask(context.userId(), context.taskId(), StatusMessage.Type.STEP,
                     "Step " + (step + 1) + " · " + providerLabel,
@@ -3268,7 +3410,7 @@ public class AgentLoop {
         var promptParts = new ArrayList<String>();
         for (var msg : result.promptMessages()) {
             if (msg.role() == LlmMessage.Role.SYSTEM) continue;
-            promptParts.add("[" + msg.role().apiValue() + "] " + LlmMessage.asRead(msg.content()));
+            promptParts.add("[" + msg.role().apiValue() + "] " + LlmMessage.asShown(msg));
         }
         detail.put("prompt", String.join("\n---\n", promptParts));
 
@@ -3501,6 +3643,15 @@ public class AgentLoop {
      * file's id ({@code TaskTraceController}).
      */
     static Map<String, Object> attachmentDetails(Artifact a) {
+        return attachmentDetails(a, null);
+    }
+
+    /**
+     * An attachment's row: which file, its label and why -- and its kind: a private file, or an
+     * image the owner pasted that the cloud model is shown, with the pixel sizes it was pasted at
+     * and is shown at.
+     */
+    static Map<String, Object> attachmentDetails(Artifact a, FileStorageService.PastedImage image) {
         var d = new LinkedHashMap<String, Object>();
         d.put("artifact", a.handle());
         d.put("tool", a.tool());
@@ -3508,6 +3659,20 @@ public class AgentLoop {
         d.put("label", a.label().name());
         d.put("chars", a.output().length());
         d.put("indexed", a.indexed());
+        d.put("kind", image != null ? "pasted image" : "private file");
+        if (image != null) {
+            d.put("shownToCloud", true);
+            d.put("contentType", image.contentType());
+            d.put("mediaType", image.mediaType());
+            d.put("width", image.width());
+            d.put("height", image.height());
+            d.put("imageWidth", image.originalWidth());
+            d.put("imageHeight", image.originalHeight());
+            if (image.metadata() != null) {
+                d.put("resultsPrivate", true);
+                d.put("metadata", image.metadata());
+            }
+        }
         if (!a.why().isEmpty()) d.put("why", a.why());
         return d;
     }
@@ -3557,7 +3722,7 @@ public class AgentLoop {
         sb.append("**Prompt messages** (").append(result.promptMessages().size()).append("):\n");
         for (var msg : result.promptMessages()) {
             sb.append("\n---\n**[").append(msg.role().name()).append("]**\n");
-            sb.append(LlmMessage.asRead(msg.content())).append('\n');
+            sb.append(LlmMessage.asShown(msg)).append('\n');
         }
 
         sb.append("\n---\n**Raw LLM output** (").append(result.totalTokens()).append(" tokens):\n```json\n");

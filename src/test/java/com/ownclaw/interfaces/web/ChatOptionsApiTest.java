@@ -58,4 +58,22 @@ class ChatOptionsApiTest {
         assertNull(theirs.get("costMode"), "his chat's choice is not shown to another user: " + body);
         assertNull(theirs.get("effort"));
     }
+
+    @Test
+    @DisplayName("a chat's messages say whether its cloud model is shown pasted images, and not which provider it is: that is the owner's setting")
+    void theCloudSaysOnlyWhetherItSeesImages(@TempDir Path tmp) throws Exception {
+        var conversations = new ConversationService(MigratedDatabase.at(tmp.resolve("t.db")));
+        var json = new ObjectMapper();
+        for (String provider : new String[]{"anthropic", "openai"}) {
+            var config = new OwnClawConfig();
+            config.getMentor().setProvider(provider);
+            var controller = new ChatHistoryController(conversations, config);
+            String chat = conversations.createSession("u2", "Images");
+            Map<?, ?> body = json.readValue(json.writeValueAsString(
+                    controller.getMessages(as("u2"), chat, null, 50).getBody()), Map.class);
+            assertEquals(Map.of("seesImages", provider.equals("anthropic")), body.get("cloud"), provider);
+            assertFalse(json.writeValueAsString(body).contains(provider), "the provider is not named to any account");
+        }
+        // Mutation: the provider back in the cloud map -> every account reads the owner's choice.
+    }
 }

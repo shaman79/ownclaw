@@ -257,6 +257,36 @@ public final class TaskChat {
     }
 
     /**
+     * A step of a task holding images the owner pasted goes to a model not shown them
+     * ({@code AgentLoop#imagesNotSeen}): said once, with why, because the owner pasted them to be
+     * seen. Of the step as it is asked, so true however its call goes.
+     *
+     * @param why "it goes to the local model, which cannot see images -- this chat runs on ..."
+     */
+    void imagesNotSeen(int images, String why) {
+        if (sessionId == null) return;
+        note("🖼️ " + (images == 1 ? "The image you pasted is" : "The " + images + " images you pasted are")
+                + " not shown to the model taking this step: " + why + ". Skills are still given "
+                + (images == 1 ? "it as a file." : "them as files."));
+    }
+
+    /**
+     * The chat holds more images than one request to the cloud model takes, and its oldest are
+     * shown by their lines alone from now on ({@link AgentContext#fitImages}): said, so the owner
+     * knows the model no longer sees them -- {@code images} more, {@code inAll} with those the
+     * chat's earlier turns no longer showed.
+     */
+    void imagesFolded(int images, int inAll) {
+        if (sessionId == null) return;
+        String which = inAll > images
+                ? (images == 1 ? "one more of its oldest is" : images + " more of its oldest are") + " no longer shown to it ("
+                    + inAll + " in all)"
+                : (images == 1 ? "its oldest is" : "its " + images + " oldest are") + " no longer shown to it";
+        note("📦 This chat holds more images than one request to the cloud model takes, so " + which
+                + ": each message still says an image was pasted with it.");
+    }
+
+    /**
      * The task's cloud model cannot be used, and the rest of the task runs on the local model
      * ({@code AgentLoop}). Said, with why, because the steps that follow are slower and best
      * effort, and their chips change.

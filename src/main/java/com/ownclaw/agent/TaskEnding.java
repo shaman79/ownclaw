@@ -166,6 +166,22 @@ final class TaskEnding {
         var list = new StringBuilder();
         var publicResults = new StringBuilder();
         for (Artifact a : ctx.artifacts()) {
+            // An image the owner pasted: said as one, and whether a request showed it -- none on Free.
+            var pasted = ctx.pasted().stream().filter(p -> p.artifact() == a).findFirst();
+            if (pasted.isPresent()) {
+                var image = pasted.get().image();
+                int with = com.ownclaw.observability.TaskTraceService.requestsCarrying(trace, image.fileId());
+                int failed = com.ownclaw.observability.TaskTraceService.failedRequestsCarrying(trace, image.fileId());
+                list.append("\n- result ").append(a.n()).append(" (the image you pasted, ").append(image.originalWidth())
+                    .append('x').append(image.originalHeight()).append(" px): ")
+                    .append(with == 0 ? "not shown to a model in this task"
+                            : "shown to the cloud model with " + with + (with == 1 ? " request" : " requests")
+                                + (failed == 0 ? "" : " (" + failed + " failed after the model had read "
+                                    + (failed == 1 ? "it)" : "them)")))
+                    .append(image.metadata() == null ? "."
+                            : "; its file carries " + image.metadata() + ", so what skills read from it is private.");
+                continue;
+            }
             String name = "result " + a.n() + " (" + a.tool() + ")";
             String heading = "**" + name + (a.succeeded() ? "" : ", failed") + ":**\n\n";
             String text = scrubbed(a.output(), ctx);

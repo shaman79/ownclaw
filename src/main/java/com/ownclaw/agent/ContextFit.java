@@ -130,6 +130,26 @@ final class ContextFit {
                        List<String> chat, Map<Integer, ChatFold> chatFolded,
                        long requestChars, Integer window, int round,
                        java.util.function.Function<String, Redactor.Cuttable> readable) {
+        return plan(turns, folded, chat, chatFolded, requestChars, window, round, readable, i -> 0L, i -> 0);
+    }
+
+    /**
+     * {@link #plan(List, Map, List, Map, long, Integer, int, java.util.function.Function)}, with the
+     * images pasted with the chat's messages: a message folded to a line drops its images with it,
+     * so the line fold of one frees its images' size too -- what the model reads them as, in
+     * characters ({@link #CHARS_PER_TOKEN} a visual token) -- and its line says it had them. A
+     * message folded to its first characters keeps its images; an image is not text to cut.
+     *
+     * @param imageChars a message's images, as many characters as the model reads them as, while
+     *                   the request shows them
+     * @param images     how many images were pasted with a message
+     */
+    static Folded plan(List<AgentTrajectory.Turn> turns, Map<Integer, Fold> folded,
+                       List<String> chat, Map<Integer, ChatFold> chatFolded,
+                       long requestChars, Integer window, int round,
+                       java.util.function.Function<String, Redactor.Cuttable> readable,
+                       java.util.function.IntToLongFunction imageChars,
+                       java.util.function.IntUnaryOperator images) {
         long target = target(requestChars, window, round);
         // Each that can fold by size: a step (index >= 0) or a chat message (-1 - index), in the
         // order it was written -- the chat before the task -- so that the stable sort keeps the
@@ -155,6 +175,7 @@ final class ContextFit {
         long size = requestChars;
         long chatChars = 0;
         int chatCount = 0;
+        int chatImages = 0;
         for (var c : candidates) {
             if (size <= target) break;
             if (c.key() >= 0) {
@@ -178,19 +199,23 @@ final class ContextFit {
             ChatFold was = chatNow.containsKey(i) ? chatNow.get(i) : chatFolded.get(i);
             if (was != null && was.line()) continue;
             String message = chat.get(i);
-            ChatFold f = new ChatFold(messageLine(i + 1, chat.size(), readable.apply(message)), true);
-            long shownBefore = was != null ? was.shown().length() : message.length();
+            int pasted = images.applyAsInt(i);
+            ChatFold f = new ChatFold(messageLine(i + 1, chat.size(), readable.apply(message), pasted), true);
+            // Its images go with it: the line shows none.
+            long shownBefore = (was != null ? was.shown().length() : message.length()) + imageChars.applyAsLong(i);
             if (f.shown().length() >= shownBefore) continue;
             if (!chatNow.containsKey(i)) {
                 chatChars += message.length();
                 chatCount++;
             }
+            chatImages += pasted;
             chatNow.put(i, f);
             size -= shownBefore - f.shown().length();
         }
         if (chatCount > 0) {
             labels.add(chatCount + (chatCount == 1 ? " message" : " messages") + " of this chat ("
-                    + count(chatChars) + " characters)");
+                    + count(chatChars) + " characters" + (chatImages == 0 ? ""
+                            : " and " + chatImages + (chatImages == 1 ? " image" : " images")) + ")");
         }
         return new Folded(List.copyOf(steps), stepFolds, chatNow, List.copyOf(labels));
     }
@@ -213,6 +238,15 @@ final class ContextFit {
 
     /** A chat message folded to a line: its number, its size and how it began. */
     static String messageLine(int n, int of, Redactor.Cuttable readable) {
+        return messageLine(n, of, readable, 0);
+    }
+
+    /**
+     * {@link #messageLine(int, int, Redactor.Cuttable)} of a message {@code images} images were
+     * pasted with: the line says so, and that read_result reads its text -- an image is not shown
+     * with a line.
+     */
+    static String messageLine(int n, int of, Redactor.Cuttable readable, int images) {
         String text = readable.text();
         // Its first line that is not blank, cut as every part is: never through an identifier.
         int start = 0;
@@ -224,6 +258,11 @@ final class ContextFit {
         if (line.codePointCount(0, line.length()) > LINE) {
             int end = Math.min(lineEnd, readable.to(start + line.offsetByCodePoints(0, LINE)));
             first = text.substring(start, end).strip() + (end < lineEnd ? "…" : "");
+        }
+        if (images > 0) {
+            return "[Message " + n + " of " + of + ", " + count(text.length()) + " characters and "
+                    + (images == 1 ? "an image" : images + " images") + " pasted with it, folded to a line; "
+                    + "read_result with message=" + n + " reads its text whole] " + first + "\n";
         }
         return "[Message " + n + " of " + of + ", " + count(text.length()) + " characters, folded to a line; "
                 + "read_result with message=" + n + " reads it whole] " + first + "\n";

@@ -28,6 +28,10 @@ import java.util.regex.Pattern;
 // test walks the source tree to keep it so. Every cloud call goes through the door.
 class OpenAiProvider implements LlmProvider {
 
+    /** Why an OpenAI model is shown no image: this provider sends none. */
+    static final String NOT_SENT_IMAGES = "images are not sent to this model";
+
+
     private static final Logger log = LoggerFactory.getLogger(OpenAiProvider.class);
     private static final MediaType JSON_TYPE = MediaType.get("application/json");
     private static final String BASE_URL = "https://api.openai.com/v1";
@@ -125,7 +129,9 @@ class OpenAiProvider implements LlmProvider {
             if (msg.role() == LlmMessage.Role.TOOLS) continue;   // its tools join the array
             ObjectNode m = msgs.addObject();
             m.put("role", msg.role().apiValue());
-            m.put("content", msg.content());
+            // This provider is sent no image: a marked message -- which the engine writes only for
+            // Anthropic -- goes with no marker, each image a line saying so.
+            m.put("content", msg.marked() ? LlmMessage.textOnly(msg.content(), NOT_SENT_IMAGES) : msg.content());
         }
 
         if (reqConfig.hasTools()) {

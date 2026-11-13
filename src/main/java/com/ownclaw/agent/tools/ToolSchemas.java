@@ -64,12 +64,12 @@ public final class ToolSchemas {
         };
     }
 
-    /** A JSON Schema object for a tool's parameters. */
+    /** A JSON Schema object for a tool's parameters, in the same order on every run. */
     public static Map<String, Object> toJsonSchema(Map<String, ToolParam> params) {
         var properties = new LinkedHashMap<String, Object>();
         var required = new ArrayList<String>();
         if (params != null) {
-            for (var e : params.entrySet()) {
+            for (var e : inAStableOrder(params).entrySet()) {
                 ToolParam p = e.getValue();
                 if (p == null) continue;
                 var prop = new LinkedHashMap<String, Object>();
@@ -89,6 +89,17 @@ public final class ToolSchemas {
         // required" and others as malformed, and there is no reason to find out which.
         if (!required.isEmpty()) schema.put("required", required);
         return schema;
+    }
+
+    /**
+     * {@code params} as written -- or, built by Map.of, Map.ofEntries or Map.copyOf with more than
+     * one key, sorted by name: those iterate in an order seeded anew in every JVM, and the tools'
+     * JSON is the front of every cached prompt, so in another order after a restart every chat's
+     * cache would be missed.
+     */
+    static Map<String, ToolParam> inAStableOrder(Map<String, ToolParam> params) {
+        return params.size() > 1 && params.getClass().getName().startsWith("java.util.ImmutableCollections")
+                ? new java.util.TreeMap<>(params) : params;
     }
 
     /**
