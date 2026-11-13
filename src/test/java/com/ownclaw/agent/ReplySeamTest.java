@@ -26,8 +26,45 @@ class ReplySeamTest {
         assertEquals(HEAD + "    y = bb + 1", ReplySeam.join(HEAD + "    y = b", "b + 1"));
         assertEquals(HEAD + "    total = 0\n    return total\n", ReplySeam.join(HEAD + "    total = 0", "\n    return total\n"),
                 "the line break and the indentation, which the model writes itself");
-        assertEquals(HEAD + "    return 1\n\ndef other():\n", ReplySeam.join(HEAD + "    return 1\n", "\ndef other():\n"));
+        // After whole lines (it ends with their line break), the part's first line break ends the line it was shown.
+        assertEquals(HEAD + "    return 1\n\ndef other():\n", ReplySeam.join(HEAD + "    return 1\n", "\n\ndef other():\n"));
         // Mutation: take any end of the text so far, wherever it begins -> "y = b + 1", the b lost.
+    }
+
+    @Test
+    @DisplayName("a part cut off is kept in whole lines: through its last line break, without the blanks before it; one with no whole line is kept whole")
+    void wholeLines() {
+        assertEquals("a\n    b\n", ReplySeam.wholeLines("a\n    b\n    ss"));
+        assertEquals("a\n    b\n", ReplySeam.wholeLines("a\n    b   \n\n  \n    c"), "the blank lines before the cut one go");
+        assertEquals("a\r\n", ReplySeam.wholeLines("a\r\nb"), "the line break as the model wrote it");
+        assertEquals("abc", ReplySeam.wholeLines("abc   "), "no line break: the part whole");
+        assertEquals("\n\n  x", ReplySeam.wholeLines("\n\n  x"), "no line with text before the last line break: whole");
+        assertEquals("", ReplySeam.wholeLines(" \n \n"));
+        assertEquals("", ReplySeam.wholeLines(""));
+    }
+
+    @Test
+    @DisplayName("at a seam between whole lines: the exact continuation, the next line without its line break, the cut line or lines above again -- each the code as written")
+    void aSeamBetweenWholeLines() {
+        String whole = HEAD + "    host = params.get('host')\n\n    ssh = ['ssh', host]\n    return {'output': '', 'success': True}\n";
+        String cut = HEAD + "    host = params.get('host')\n\n    s";
+        String kept = ReplySeam.wholeLines(cut);
+        String shown = kept.stripTrailing();
+        assertEquals(HEAD + "    host = params.get('host')", shown);
+        assertEquals(whole, ReplySeam.join(kept, whole.substring(shown.length())), "exact: the blank line kept");
+        String nextLine = "    ssh = ['ssh', host]\n    return {'output': '', 'success': True}\n";
+        assertEquals(whole.replace("\n\n    ssh", "\n    ssh"), ReplySeam.join(kept, nextLine), "the next line, the line break the model's own");
+        assertEquals(whole.replace("\n\n    ssh", "\n    ssh"), ReplySeam.join(kept, "    host = params.get('host')\n" + nextLine),
+                "the line it was shown again");
+        assertEquals(whole.replace("\n\n    ssh", "\n    ssh"), ReplySeam.join(kept, "def run(params):\n    host = params.get('host')\n" + nextLine),
+                "from a line above");
+        // A part that begins as the last line does but goes on along it is the next line, not that line again.
+        String x = HEAD + "    x = 1\n";
+        assertEquals(x + "    x = 10\n", ReplySeam.join(x, "    x = 10\n"));
+        // Of two equal lines in a row, the exact continuation keeps both.
+        String two = HEAD + "    lines.append('')\n";
+        assertEquals(two + "    lines.append('')\n", ReplySeam.join(two, "\n    lines.append('')\n"));
+        // Mutation: join at a whole-line seam as at one inside a line -> "    s" + "sh" read as a restart.
     }
 
     @Test

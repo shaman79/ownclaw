@@ -891,4 +891,65 @@ class CloudGatewayTest {
         assertTrue(sent.contains("«vault:ROUTER_PASSWORD»"), sent);
         // Mutation: send an echo untouched -> the vault's value leaves in it.
     }
+
+    @Test
+    @DisplayName("the beginning of a reply handed out, up to the end of a line of it, is an echo -- a part kept in whole lines; one that ends inside a line, or goes on past the reply, is not")
+    void aBeginningUpToALineEnd() {
+        var provider = new Writes();
+        var redactor = new Redactor(null);
+        var gw = new CloudGateway(provider, provider, config("anthropic", CloudGateway.Mode.ENFORCE), new Rows(), null, redactor);
+        var cfg = asWritten(new PrivateIndex(), Map.of());
+        String written = "```python\nNET = '<ssid_1>'\nDEFAULTS = {'ssid': 'OpenWrt'}   \n\n    ssh = ['ssh', 'root@<ssid_1>";
+        provider.replies.add(written);
+        gw.chat(List.of(LlmMessage.system("Write code."), LlmMessage.user(SPEC)), cfg);
+
+        String wholeLines = "```python\nNET = '<ssid_1>'\nDEFAULTS = {'ssid': 'OpenWrt'}";
+        provider.replies.add("done");
+        gw.chat(List.of(LlmMessage.system("Write code."), LlmMessage.user(SPEC), LlmMessage.assistant(wholeLines),
+                LlmMessage.user("Continue it.")), cfg);
+        assertEquals(wholeLines, provider.calls.get(1).get(2).content(), "an echo: out as it was");
+        assertFalse(redactor.count("u1", "Audit the OpenWrt routers.", Map.of()).any(), "nothing learned from it");
+
+        // Ending inside a line -- the cut line's beginning -- it is no echo, and filtered like any text.
+        String midLine = "```python\nNET = '<ssid_1>'\nDEFAULTS = {'ssid': 'Open";
+        provider.replies.add("done");
+        gw.chat(List.of(LlmMessage.system("Write code."), LlmMessage.user(SPEC), LlmMessage.assistant(midLine),
+                LlmMessage.user("Continue it.")), cfg);
+        assertTrue(provider.calls.get(2).get(2).content().contains("<text_"),
+                "filtered, the placeholder's shape taken for text: " + provider.calls.get(2).get(2).content());
+        provider.replies.add("done");
+        gw.chat(List.of(LlmMessage.system("Write code."), LlmMessage.user(SPEC),
+                LlmMessage.assistant(written + "'\n    x = 'ExampleHome5G'"), LlmMessage.user("Continue it.")), cfg);
+        assertFalse(provider.calls.get(3).get(2).content().contains("ExampleHome5G"), "more than was handed out is no echo");
+        assertTrue(EgressContext.HandedOut.echoes("a\nb", "a"));
+        assertTrue(EgressContext.HandedOut.echoes("a  \r\nb", "a"));
+        assertTrue(EgressContext.HandedOut.echoes("a \n\n", "a"));
+        assertTrue(EgressContext.HandedOut.echoes("a", "a"));
+        assertFalse(EgressContext.HandedOut.echoes("ab\n", "a"));
+        assertFalse(EgressContext.HandedOut.echoes("a b\n", "a"));
+        // Mutation: take any beginning for an echo -> the mid-line turn goes out unfiltered.
+        // Mutation: take only the whole text for an echo -> the whole lines are filtered and 'OpenWrt' learned.
+    }
+
+    @Test
+    @DisplayName("the texts handed out that a request no longer sends back are forgotten; forgetting never makes an echo")
+    void earlierAttemptsAreForgotten() {
+        var provider = new Writes();
+        var gw = new CloudGateway(provider, provider, config("anthropic", CloudGateway.Mode.ENFORCE), new Rows(), null,
+                new Redactor(null));
+        var cfg = asWritten(new PrivateIndex(), Map.of());
+        provider.replies.add("FIRST = '<ssid_1>'\nx = (");
+        provider.replies.add("SECOND = '<ssid_1>'\ny = (");
+        gw.chat(List.of(LlmMessage.system("Write code."), LlmMessage.user(SPEC)), cfg);
+        gw.chat(List.of(LlmMessage.system("Write code."), LlmMessage.user(SPEC)), cfg);
+        var handedOut = cfg.egress().handedOut();
+        assertEquals(2, handedOut.size());
+        handedOut.keepOnlyEchoedBy(List.of("SECOND = '<ssid_1>'"));
+        assertEquals(1, handedOut.size(), "the first attempt forgotten");
+        assertFalse(handedOut.holds("FIRST = '<ssid_1>'"));
+        assertTrue(handedOut.holds("SECOND = '<ssid_1>'"));
+        handedOut.keepOnlyEchoedBy(List.of("THIRD = '<ssid_1>'"));
+        assertFalse(handedOut.holds("THIRD = '<ssid_1>'"), "naming a text does not hand it out");
+        assertEquals(0, handedOut.size());
+    }
 }

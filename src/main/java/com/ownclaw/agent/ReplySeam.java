@@ -10,12 +10,19 @@ import java.util.List;
  * does not fit in one reply is written in parts, each the model's continuation of the one before
  * ({@code AgentLoop#generateSkillCode}), and joined here, one after the other.
  * <p>
- * The text a part is joined to is exactly the text the model was shown and goes on from: a part
- * cut off is kept, and sent back as the model's turn, without the whitespace it ends with, so the
- * model writes the line break and a line's whole indentation itself -- a cut inside a line's
- * indentation, kept as it fell, was joined as a line begun again and moved the line out of its
- * block. The model is asked to go on from the exact character where its turn stops, and mostly
- * does; read first, a seam is that, except where the part is plainly the model starting again:
+ * A part cut off is kept in whole lines ({@link #wholeLines}): through its last line break, the
+ * line it was cut in dropped, and sent back as the model's turn so -- without the whitespace it
+ * ends with. The model is shown the end of a line, never a line cut through, and writes the line
+ * it was cut in again, whole, from its first character: a cut inside a word or an indentation no
+ * longer has to be read at all. Read through the middle of a line, "    s" continued with
+ * "sh = ..." and with "ssh = ..." are the same bytes, and the seam joined one of them wrong. A part
+ * that holds no whole line -- a single line longer than the model's whole output -- is kept whole,
+ * and that seam falls inside its line.
+ * <p>
+ * The text a part is joined to is exactly the text the model was shown, with the line break the
+ * model wrote after it where the part was kept in whole lines. The model is asked to go on from
+ * the exact character where its turn stops, and mostly does; read first, a seam is that, except
+ * where the part is plainly the model starting again:
  * <ul>
  *   <li>The fence opened again. Inside an open ```python fence, a part whose first line that is
  *   not blank is ```python (any case) loses that line and the blank lines before it -- and keeps
@@ -24,12 +31,15 @@ import java.util.List;
  *   it into the code.</li>
  *   <li>Written again. When the part begins with the end of the text so far, from the beginning of
  *   one of its lines or from after that line's indentation -- the cut line written again, or the
- *   model gone back a line or more -- that much of the part is dropped: the longest such run. A
- *   part that begins with a line break writes nothing again -- it is the model going on after a
+ *   model gone back a line or more -- that much of the part is dropped: the longest such run. At a
+ *   seam between whole lines the run is whole lines too: what follows it in the part begins a line.
+ *   A part that begins with a line break writes nothing again -- it is the model going on after a
  *   line's end, the line break its own -- so of two equal lines in a row an exact continuation
  *   keeps both. A last line that is one or two backticks or quotes is the beginning of a fence or a
  *   triple quote, and is written again only when the part writes all three.</li>
- *   <li>Otherwise the part is the characters that come next, and is appended as it is.</li>
+ *   <li>Otherwise the part is what comes next: on the next line at a seam between whole lines --
+ *   the line break before it is the model's own, written after the line it was shown -- and on the
+ *   cut line at a seam inside one.</li>
  * </ul>
  * When the code joined so fails its checks, the other readings of each seam are tried before a
  * repair is asked for ({@link #readings}): the part appended as written; the cut line alone begun
@@ -46,15 +56,69 @@ final class ReplySeam {
     private ReplySeam() {}
 
     /**
+     * A part cut off at the maximum output, as it is kept and joined: through its last line break
+     * -- the line it was cut in dropped, the model writes it again whole -- without the whitespace
+     * before that line break, and with the line break itself, as the model wrote it. A part that
+     * holds no line with text before its last line break is kept whole, without the whitespace it
+     * ends with. Sent back as the model's turn, either is without its trailing whitespace
+     * ({@link String#stripTrailing}): exactly the beginning of the reply the model wrote, up to
+     * the end of a line ({@code EgressContext.HandedOut}).
+     */
+    static String wholeLines(String text) {
+        int last = text.lastIndexOf('\n');
+        if (last >= 0) {
+            String lines = text.substring(0, last).stripTrailing();
+            if (!lines.isEmpty()) return lines + (last > 0 && text.charAt(last - 1) == '\r' ? "\r\n" : "\n");
+        }
+        return text.stripTrailing();
+    }
+
+    /** Whether {@code sofar} ends with a line break: the seam after it is between whole lines. */
+    static boolean endsAtALine(String sofar) {
+        return sofar.endsWith("\n");
+    }
+
+    /** {@code sofar} without the line break it ends with: the text the model was shown. */
+    private static String shownOf(String sofar) {
+        int cut = sofar.endsWith("\r\n") ? 2 : 1;
+        return sofar.substring(0, sofar.length() - cut);
+    }
+
+    /** Whether {@code text} begins with the end of a line: blanks, then a line break. */
+    static boolean beginsWithALineEnd(String text) {
+        return beginsWithALineEnd(text, 0);
+    }
+
+    /** Whether {@code text} from {@code from} on begins with the end of a line: blanks, then a line break. */
+    private static boolean beginsWithALineEnd(String text, int from) {
+        int i = from;
+        while (i < text.length() && blank(text.charAt(i))) i++;
+        return i < text.length() && (text.charAt(i) == '\n' || text.startsWith("\r\n", i));
+    }
+
+    /**
      * The text so far with {@code part} joined to it, read first.
      *
-     * @param sofar the reply so far: every part before this one, joined
-     * @param part  the next part, as the model wrote it
+     * @param sofar the reply so far: every part before this one, joined -- ending with a line break
+     *              where the last of them was kept in whole lines ({@link #wholeLines})
+     * @param part  the next part, as the model wrote it (or, cut off too, as it is kept)
      */
     static String join(String sofar, String part) {
         if (part == null || part.isEmpty()) return sofar == null ? "" : sofar;
         if (sofar == null || sofar.isEmpty()) return part;
-        String next = inPythonFence(sofar) ? afterReopenedFence(sofar, part) : part;
+        return joinedAfter(sofar, inPythonFence(sofar) ? afterReopenedFence(sofar, part) : part);
+    }
+
+    /** The text so far with {@code next} -- a part, its reopened fence gone -- joined to it, read first. */
+    private static String joinedAfter(String sofar, String next) {
+        if (endsAtALine(sofar)) {
+            String shown = shownOf(sofar);
+            // The line break the model writes after the line it was shown, and anything after it.
+            if (beginsWithALineEnd(next)) return shown + next;
+            int k = restartedWhole(shown, next);
+            if (k > 0) return shown + next.substring(k);
+            return sofar + next;
+        }
         return sofar + next.substring(restarted(sofar, next));
     }
 
@@ -96,6 +160,7 @@ final class ReplySeam {
      * {@code def run}, and the imports were gone.
      */
     private static String withLineBreak(String sofar, String rest) {
+        if (endsAtALine(sofar)) return rest;
         String last = sofar.substring(sofar.lastIndexOf('\n') + 1).strip();
         boolean breaks = rest.startsWith("\n") || rest.startsWith("\r\n");
         return isPythonFence(last) && !rest.isEmpty() && !breaks ? "\n" + rest : rest;
@@ -146,6 +211,20 @@ final class ReplySeam {
     }
 
     /**
+     * {@link #restartedFromHigher} at a seam between whole lines: the longest run of the part that
+     * is an end of {@code shown} from the beginning of one of its lines or after its indentation,
+     * and that ends where a line of the part ends -- what follows it in the part begins with a line
+     * break, or there is nothing after it -- or 0. A line the model was shown whole is written again
+     * whole; a part that begins as the last line does and goes on along it is the next line.
+     */
+    static int restartedWhole(String shown, String part) {
+        for (int k : runs(shown, part)) {
+            if (k == part.length() || beginsWithALineEnd(part, k)) return k;
+        }
+        return 0;
+    }
+
+    /**
      * How many characters at the beginning of {@code part} are the text so far's last line written
      * again, from its beginning or from after its indentation, or 0: the cut line begun again and
      * nothing more, one of the other readings of a seam ({@link #readings}).
@@ -181,8 +260,18 @@ final class ReplySeam {
      * it on its line.
      */
     static int restartedFromHigher(String sofar, String part) {
+        int[] runs = runs(sofar, part);
+        return runs.length == 0 ? 0 : runs[0];
+    }
+
+    /**
+     * Every run {@link #restartedFromHigher} could take, longest first: each length k such that
+     * the part's first k characters are the last k of {@code sofar}, beginning at the beginning of
+     * one of its lines or after only blanks on it.
+     */
+    private static int[] runs(String sofar, String part) {
         int m = Math.min(sofar.length(), part.length());
-        if (m == 0) return 0;
+        if (m == 0) return new int[0];
         // fail[i]: the longest beginning of part[0..i] that is also an end of it, itself excepted.
         int[] fail = new int[m];
         for (int i = 1, k = 0; i < m; i++) {
@@ -209,10 +298,11 @@ final class ReplySeam {
             char c = sofar.charAt(i);
             blanksOnly = c == '\n' || (blanksOnly && blank(c));
         }
+        var out = new java.util.ArrayList<Integer>();
         for (int k = matched; k > 0; k = fail[k - 1]) {
-            if (indented[m - k]) return k;
+            if (indented[m - k]) out.add(k);
         }
-        return 0;
+        return out.stream().mapToInt(Integer::intValue).toArray();
     }
 
     /**
@@ -262,20 +352,20 @@ final class ReplySeam {
         out.putIfAbsent(sofar + part, "appended as written");
         boolean fenced = inPythonFence(sofar);
         String next = fenced ? afterReopenedFence(sofar, part) : part;
-        int line = lastLineAgain(sofar, next);
-        if (line > 0) out.putIfAbsent(sofar + next.substring(line), "the cut line begun again");
-        int higher = restartedFromHigher(sofar, next);
-        if (higher > line) out.putIfAbsent(sofar + next.substring(higher), "begun again from a line above");
+        // At a seam between whole lines, a run is taken from the end of the line the model was shown.
+        String base = endsAtALine(sofar) ? shownOf(sofar) : sofar;
+        int line = lastLineAgain(base, next);
+        if (line > 0) out.putIfAbsent(base + next.substring(line), "the cut line begun again");
+        int higher = restartedFromHigher(base, next);
+        if (higher > line) out.putIfAbsent(base + next.substring(higher), "begun again from a line above");
         if (fenced) {
             String afterLeadIn = afterFirstPythonFence(sofar, part);
             if (afterLeadIn != null) {
-                out.putIfAbsent(sofar + afterLeadIn.substring(restarted(sofar, afterLeadIn)),
-                        "the lead-in before the fence opened again dropped");
+                out.putIfAbsent(joinedAfter(sofar, afterLeadIn), "the lead-in before the fence opened again dropped");
             }
             int[] first = firstLineNotBlank(part);
             if (first != null && part.substring(first[0], first[1]).strip().equals("```")) {
-                String rest = withLineBreak(sofar, part.substring(first[2]));
-                out.putIfAbsent(sofar + rest.substring(restarted(sofar, rest)),
+                out.putIfAbsent(joinedAfter(sofar, withLineBreak(sofar, part.substring(first[2]))),
                         "a bare fence taken as the fence opened again");
             }
         }

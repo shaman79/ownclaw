@@ -2,9 +2,9 @@ package com.ownclaw.llm;
 
 import com.ownclaw.privacy.PrivateIndex;
 
+import java.util.List;
 import java.util.Map;
-import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.function.BiPredicate;
 import java.util.function.IntFunction;
 
@@ -57,26 +57,64 @@ public record EgressContext(String userId, String taskId, String purpose, Privat
     /**
      * The texts the gateway handed out under one context as the model wrote them -- the replies to
      * requests that asked for that ({@link LlmRequestConfig#asWritten}): placeholders where the
-     * model wrote them, no value of the user's put back -- each also without the whitespace it
-     * ends with. An assistant turn whose text is one of them is the model's own words coming back
-     * as they left it, and the gateway sends it so ({@code CloudGateway#chat}). Only the gateway
-     * puts a text in or asks about one; held by the context, it ends with it.
+     * model wrote them, no value of the user's put back. An assistant turn that is one of them, or
+     * the beginning of one up to the end of a line -- what follows it there is blanks and a line
+     * break, or only whitespace -- is the model's own words coming back as they left it, and the
+     * gateway sends it so ({@code CloudGateway#chat}). A part of a skill's code cut off at the
+     * maximum output goes back in whole lines, the line it was cut in dropped (the code's
+     * ReplySeam): that is a beginning of the reply, and nothing in it is not the provider's own.
+     * Only the gateway puts a text in or asks about one; held by the context, it ends with it.
      */
     public static final class HandedOut {
-        private final Set<String> texts = ConcurrentHashMap.newKeySet();
+        private final List<String> texts = new CopyOnWriteArrayList<>();
 
         private HandedOut() {}
 
-        /** {@code text} was handed out as written: it, and it without its trailing whitespace. */
+        /** {@code text} was handed out as written. */
         void add(String text) {
             if (text == null || text.isEmpty()) return;
             texts.add(text);
-            texts.add(text.stripTrailing());
         }
 
-        /** Whether {@code text} is a text handed out as written, or one without its trailing whitespace. */
-        boolean holds(String text) {
-            return text != null && !text.isEmpty() && texts.contains(text);
+        /**
+         * Whether {@code turn} is a text handed out as written, or its beginning up to the end of a
+         * line of it ({@link #echoes}).
+         */
+        boolean holds(String turn) {
+            if (turn == null || turn.isEmpty()) return false;
+            for (String text : texts) {
+                if (echoes(text, turn)) return true;
+            }
+            return false;
+        }
+
+        /**
+         * Forgets every text handed out that none of {@code turns} echoes: a skill's code asked for
+         * again from its latest attempt, the attempts before it no longer go back. It can only take
+         * texts out, so no caller can make a turn an echo with it.
+         */
+        public void keepOnlyEchoedBy(java.util.Collection<String> turns) {
+            texts.removeIf(text -> turns.stream().noneMatch(turn -> turn != null && !turn.isEmpty() && echoes(text, turn)));
+        }
+
+        /** How many texts are held: what a long skill's repairs keep in memory. */
+        public int size() {
+            return texts.size();
+        }
+
+        /**
+         * Whether {@code turn} is {@code text}, or a beginning of it that ends where a line of it
+         * ends: what follows in {@code text} is whitespace through a line break, or nothing but
+         * whitespace.
+         */
+        static boolean echoes(String text, String turn) {
+            if (!text.startsWith(turn)) return false;
+            for (int i = turn.length(); i < text.length(); i++) {
+                char c = text.charAt(i);
+                if (c == '\n') return true;
+                if (!Character.isWhitespace(c)) return false;
+            }
+            return true;
         }
     }
 

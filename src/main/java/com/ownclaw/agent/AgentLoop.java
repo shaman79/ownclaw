@@ -2879,6 +2879,8 @@ public class AgentLoop {
             }
             log.warn("Skill '{}' syntax error (repair {}): {}", name, attempt + 1, syntaxError);
             prompt = repairRequest(spec, reply.parts(), chosen, context);
+            // The attempts before this one never go back: the gateway forgets what it handed out of them.
+            writing.forgetAllBut(prompt);
         }
     }
 
@@ -2999,8 +3001,9 @@ public class AgentLoop {
      * @param text    the reply as the model wrote it, its parts joined (read first): placeholders
      *                where it wrote them, none put back; null when the attempt ends the code
      *                generation
-     * @param parts   its parts as the model wrote them, each cut-off one without its trailing
-     *                whitespace -- as each went back to the model as its turn
+     * @param parts   its parts as the model wrote them, each cut-off one as it is kept and joined
+     *                -- in whole lines ({@link ReplySeam#wholeLines}); without its trailing
+     *                whitespace, each is what went back to the model as its turn
      * @param tokens  their prompt and completion tokens together, for the log
      * @param ended   how the code generation ends, when it ends with this attempt; otherwise null
      * @param onLocal the cloud could not be reached and the task has moved to the local model,
@@ -3047,6 +3050,17 @@ public class AgentLoop {
         }
 
         /**
+         * The texts handed out to these calls that {@code request} does not send back, forgotten
+         * ({@link com.ownclaw.llm.EgressContext.HandedOut#keepOnlyEchoedBy}): a repair sends the
+         * latest attempt's parts only, and a long skill's earlier attempts were each as long.
+         */
+        void forgetAllBut(List<LlmMessage> request) {
+            if (config.egress() == null) return;
+            config.egress().handedOut().keepOnlyEchoedBy(request.stream()
+                    .filter(m -> m.role() == LlmMessage.Role.ASSISTANT).map(LlmMessage::content).toList());
+        }
+
+        /**
          * The reply to {@code prompt}, whole, as the model wrote it. A reply that reaches the
          * model's maximum output with text in it is kept as the reply so far, and the model is asked
          * to go on: the request again, with that text as the model's turn and {@link #CONTINUE}
@@ -3054,11 +3068,16 @@ public class AgentLoop {
          * ({@link ReplySeam}) and asked to go on in its turn, until one ends by itself: joined to
          * them, that is the reply. The model's own limit ends each part, never a count of them.
          * <p>
-         * A cut-off part is kept, and sent back, without the whitespace it ends with: the text the
-         * next part is joined to is then exactly the text the model was shown, and it writes the
-         * line break and the next line's whole indentation itself. Kept as it fell, a cut inside an
+         * A cut-off part is kept, and sent back, in whole lines ({@link ReplySeam#wholeLines}):
+         * through its last line break, without the whitespace before it -- the line it was cut in
+         * is dropped, and the model writes it again whole, from its first character, after the
+         * line it was shown. Read through the middle of a line, a part was joined wrong where its
+         * first characters could be either the cut line's next ones or its last ones again: the
+         * cut after "    s" of "    ssh = ..." continued exactly with "sh = ..." lost no character,
+         * and continued with "ssh = ..." was read the same; kept as it fell, a cut inside an
          * indentation joined the next line at a depth the model had not written, and a `continue`
-         * or an `os.remove` moved out of its block and still compiled.
+         * or an `os.remove` moved out of its block and still compiled. A part that holds no whole
+         * line is kept whole, without the whitespace it ends with.
          * <p>
          * Every reply is handed back as the model wrote it ({@link LlmRequestConfig#asWritten}):
          * each part goes back as the model's turn exactly so, which the gateway recognises as its
@@ -3183,8 +3202,10 @@ public class AgentLoop {
                             tokens, null, false);
                 }
 
-                // Kept, and sent back, as the model will be shown it: without the whitespace it ends with.
-                String kept = text.stripTrailing();
+                // Kept in whole lines, the line it was cut in dropped, and sent back without the
+                // whitespace it ends with: the model is shown the end of a line, and writes the cut
+                // line again whole (ReplySeam#wholeLines).
+                String kept = ReplySeam.wholeLines(text);
                 if (kept.isEmpty()) {
                     if (part > 1) return Written.ending(gotNoFurther(part, cut, sofar));
                     if (!provider.takesEffort() || "low".equals(config.effort())) {
@@ -3215,7 +3236,7 @@ public class AgentLoop {
                 sofar = joined;
                 parts.add(kept);
                 var next = new ArrayList<>(asked);
-                next.add(LlmMessage.assistant(kept));
+                next.add(LlmMessage.assistant(kept.stripTrailing()));
                 next.add(LlmMessage.user(CONTINUE));
                 asked = List.copyOf(next);
                 log.info("Skill '{}': part {} of its code reached the model's maximum output; {} characters so "

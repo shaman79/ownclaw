@@ -34,8 +34,14 @@ import static org.junit.jupiter.api.Assertions.*;
  */
 class SkillCodeInPartsTest {
 
+    /** The first part, cut off in its last line. */
     static final String PART1 = "```python\nimport json\n\ndef run(params):\n    total = 0\n    for i in range(";
-    static final String PART2 = "3):\n        total += i\n    if total > 2:";
+    /** What the model is shown of it: its whole lines, the line it was cut in dropped. */
+    static final String PART1_SHOWN = "```python\nimport json\n\ndef run(params):\n    total = 0";
+    /** What follows PART1_SHOWN as the model was shown it: the cut line again, whole, after the line break. */
+    static final String PART2 = "\n    for i in range(3):\n        total += i\n    if total > 2:";
+    /** PART2 cut off inside the next line's indentation. */
+    static final String PART2_CUT = PART2 + "\n        ";
     /** What follows PART2 as the model was shown it: the line break and the indentation are its own. */
     static final String PART3 = "\n        return {'output': json.dumps(total), 'success': True}\n"
             + "    return {'output': '', 'success': False}\n```\n\n```requirements\nrequests\n```\n";
@@ -85,7 +91,7 @@ class SkillCodeInPartsTest {
         var rig = new LoopRig(tmp, List.of());
         realSyntaxCheck(rig, tmp);
         rig.cloud.codegen.add(cutOff(PART1));
-        rig.cloud.codegen.add(cutOff(PART2 + "\n        "));   // cut inside the next line's indentation
+        rig.cloud.codegen.add(cutOff(PART2_CUT));   // cut inside the next line's indentation
         rig.cloud.codegen.add(ends(PART3));
 
         AgentLoop.Codegen out = rig.loop.generateSkillCode(spec(), task());
@@ -96,7 +102,8 @@ class SkillCodeInPartsTest {
         List<Call> calls = rig.cloud.calls("codegen");
         assertEquals(3, calls.size());
         assertEquals(2, calls.get(0).messages().size(), "the specification, as before");
-        assertEquals(LlmMessage.assistant(PART1), calls.get(1).messages().get(2), "the part as the model wrote it");
+        assertEquals(LlmMessage.assistant(PART1_SHOWN), calls.get(1).messages().get(2),
+                "the part as the model wrote it, in whole lines: the line it was cut in dropped");
         assertEquals(LlmMessage.user(AgentLoop.CONTINUE), calls.get(1).messages().get(3));
         assertEquals(LlmMessage.assistant(PART2), calls.get(2).messages().get(4),
                 "without the blanks it was cut in: the model writes the line's whole indentation itself");
@@ -145,7 +152,7 @@ class SkillCodeInPartsTest {
         rig.skills.syntax = code -> code.contains("def broken(:") ? "line 5: invalid syntax" : null;
         rig.cloud.codegen.add(finished(module("def broken(:\n    pass")));
         rig.cloud.codegen.add(cutOff("```python\nimport json\n\ndef run(params):\n    return {'output': json.dumps(1), "));
-        rig.cloud.codegen.add(ends(" 'success': True}\n```\n"));
+        rig.cloud.codegen.add(ends("\n    return {'output': json.dumps(1), 'success': True}\n```\n"));
 
         AgentLoop.Codegen out = rig.loop.generateSkillCode(spec(), task());
 
@@ -159,6 +166,26 @@ class SkillCodeInPartsTest {
         assertEquals(repair, calls.get(2).messages().subList(0, 4), "the repair's own request, continued");
         assertEquals(LlmMessage.user(AgentLoop.CONTINUE), calls.get(2).messages().getLast());
         // Mutation: continue the first reply only -> the repair's cut-off part is the reply, and fails.
+    }
+
+    @Test
+    @DisplayName("a repair sends the latest attempt only, and the gateway forgets what it handed out of the attempts before it")
+    void earlierAttemptsForgotten(@TempDir Path tmp) throws Exception {
+        var rig = new LoopRig(tmp, List.of());
+        rig.skills.syntax = code -> code.contains("def broken(:") ? "line 5: invalid syntax"
+                : code.contains("x = = 1") ? "line 6: cannot assign" : null;
+        rig.cloud.codegen.add(cutOff("```python\nimport json\n\ndef run(params):\n    return {'output': '', 'success': True}\n\ndef bro"));
+        rig.cloud.codegen.add(ends("\ndef broken(:\n    pass\n```\n"));
+        rig.cloud.codegen.add(finished(module("x = = 1")));
+        rig.cloud.codegen.add(finished(module("")));
+
+        AgentLoop.Codegen out = rig.loop.generateSkillCode(spec(), task());
+
+        assertNull(out.error(), out.error());
+        assertEquals(4, rig.cloud.calls("codegen").size());
+        var handedOut = rig.cloud.calls("codegen").getLast().config().egress().handedOut();
+        assertEquals(2, handedOut.size(), "the second repair's own reply and the attempt it mended; the first attempt's two parts forgotten");
+        // Mutation: forget nothing -> 4 texts held, every attempt's parts for the whole of the code generation.
     }
 
     @Test
@@ -182,7 +209,8 @@ class SkillCodeInPartsTest {
     @DisplayName("a continuation that adds nothing -- the cut line again, or no text at all -- ends the code at low effort, saying so")
     void noProgress(@TempDir Path tmp) throws Exception {
         String part = "```python\nimport json\n\ndef run(params):\n    x = compute(";
-        for (String nothing : List.of("x = compute(", "", "\n\n    ")) {
+        // Its last whole line written again and cut off in the next, no text at all, or only blanks.
+        for (String nothing : List.of("def run(params):\n    x = comp", "", "\n\n    ")) {
             var rig = new LoopRig(tmp.resolve("n" + nothing.length()), List.of());
             rig.cloud.codegen.add(cutOff(part));
             rig.cloud.codegen.add(cutOff(nothing));
@@ -196,7 +224,8 @@ class SkillCodeInPartsTest {
             assertNull(out.params());
             assertEquals("ERROR: continuing the code for 'openwrt_audit' got no further: part 2, asked at low effort, "
                     + "was cut off again ([anthropic] the reply reached the model's maximum output of 128,000 tokens "
-                    + "and was cut off) and added nothing to the " + part.length() + " characters written before it, "
+                    + "and was cut off) and added nothing to the " + ReplySeam.wholeLines(part).length()
+                    + " characters written before it, "
                     + "so nothing was created. A smaller skill fits: one job per skill, or split this one into "
                     + "several.", out.error());
             assertEquals(2 * 131_000, ctx.cloudTokens(), "both parts were billed, and counted");
@@ -243,7 +272,7 @@ class SkillCodeInPartsTest {
         realSyntaxCheck(rig, tmp);
         rig.cloud.codegen.add(cutOff(""));
         rig.cloud.codegen.add(cutOff(PART1));
-        rig.cloud.codegen.add(cutOff(PART2));
+        rig.cloud.codegen.add(cutOff(PART2_CUT));
         rig.cloud.codegen.add(ends(PART3));
 
         AgentLoop.Codegen out = rig.loop.generateSkillCode(spec(), task());
@@ -351,7 +380,7 @@ class SkillCodeInPartsTest {
         ctx.setChat(new TaskChat(ctx, session, TaskChat.Channel.WEB, rig.chat, rig.emitter, null, null, null));
         rig.cloud.codegen.add(cutOff(""));
         rig.cloud.codegen.add(cutOff(PART1));
-        rig.cloud.codegen.add(cutOff(PART2));
+        rig.cloud.codegen.add(cutOff(PART2_CUT));
         rig.cloud.codegen.add(ends(PART3));
 
         assertNull(rig.loop.generateSkillCode(spec(), ctx).error());
@@ -401,19 +430,20 @@ class SkillCodeInPartsTest {
             throw new OutputTruncated("anthropic", OutputTruncated.Limit.CONTEXT_WINDOW, 1_000_000, null);
         });
         assertEquals("ERROR: the code for 'openwrt_audit' outgrew the model's context window: written in 1 part so "
-                + "far, its " + PART1.length() + " characters and the request no longer fit ([anthropic] the "
+                + "far, its " + ReplySeam.wholeLines(PART1).length() + " characters and the request no longer fit ([anthropic] the "
                 + "conversation is longer than the model's 1,000,000-token context window), so nothing was created. "
                 + "A smaller skill fits: one job per skill, or split this one into several.",
                 rig.loop.generateSkillCode(spec(), task()).error());
 
         rig.cloud.codegen.add(cutOff(PART1));
-        rig.cloud.codegen.add(cutOff(PART2));
+        rig.cloud.codegen.add(cutOff(PART2_CUT));
         rig.cloud.codegen.add(c -> {
             throw new OutputTruncated("anthropic", OutputTruncated.Limit.CONTEXT_WINDOW, 1_000_000,
                     Replies.of("        total += i\n", 870_000, 130_000, 0, 0, "model_context_window_exceeded"));
         });
         assertEquals("ERROR: the code for 'openwrt_audit' outgrew the model's context window: written in 2 parts so "
-                + "far, its " + (PART1 + PART2).length() + " characters and the request no longer fit ([anthropic] a "
+                + "far, its " + ReplySeam.join(ReplySeam.wholeLines(PART1), ReplySeam.wholeLines(PART2_CUT)).length()
+                + " characters and the request no longer fit ([anthropic] a "
                 + "request of 870,000 tokens and a reply of 130,000 tokens filled the model's 1,000,000-token context "
                 + "window), so nothing was created. A smaller skill fits: one job per skill, or split this one into "
                 + "several.", rig.loop.generateSkillCode(spec(), task()).error());
