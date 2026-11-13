@@ -988,6 +988,9 @@ class SkillSelfRepairTest {
         assertEquals("stopped", row.get("outcome"));
         assertTrue(fix.rig.cloud.calls("think").stream().noneMatch(c -> String.join("\n", LoopRig.userParts(c))
                 .contains("Repair the skill '" + MENU + "'")), "the repair ran");
+        // Dropped by the queue: its task never started, so it has no ending of its own.
+        assertTrue(fix.rig.jdbc.queryForList("SELECT 1 FROM events WHERE event_type = 'task_completed' AND task_id = ?",
+                repairTask).isEmpty(), "the repair's task was started");
     }
 
     @Test
