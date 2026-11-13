@@ -2850,7 +2850,7 @@
             </select>
         </label>
     </div>
-    <div class="input-hint"><span id="hint-keys">Enter to send &nbsp;&middot;&nbsp; Shift+Enter for new line</span> &nbsp;&middot;&nbsp; Screenshots and pictures pasted from the clipboard are shown to the cloud model as pictures (the privacy filter reads text, not pictures); files you attach, drop or paste from a file manager stay private &nbsp;&middot;&nbsp; <strong>/help</strong> for commands</div>
+    <div class="input-hint"><span id="hint-keys">Enter to send &nbsp;&middot;&nbsp; Shift+Enter for new line</span> &nbsp;&middot;&nbsp; <span id="hint-images">Screenshots and pictures pasted from the clipboard are shown to the cloud model as pictures (the privacy filter reads text, not pictures); files you attach, drop or paste from a file manager stay private</span> &nbsp;&middot;&nbsp; <strong>/help</strong> for commands</div>
 </div>
 
     </div><!-- end #chat-main -->
@@ -7380,12 +7380,19 @@
     /**
      * Whether the chat's cloud model is shown the images pasted here, as the server says (cloud, with
      * a chat's messages; the settings page's provider): OwnClaw sends images to Anthropic's models only.
+     * The hint under the box says it too.
      */
     var cloudSeesImages = true;
 
     function noteCloud(cloud) {
         if (!cloud) return;
         cloudSeesImages = cloud.seesImages !== false;
+        var hint = document.getElementById('hint-images');
+        if (hint) hint.textContent = cloudSeesImages
+                ? 'Screenshots and pictures pasted from the clipboard are shown to the cloud model as pictures (the privacy '
+                    + 'filter reads text, not pictures); files you attach, drop or paste from a file manager stay private'
+                : 'This chat\'s cloud model is sent no images: screenshots and pictures you paste are not shown to it, and '
+                    + 'skills are given them as files; files you attach, drop or paste from a file manager stay private';
         refreshSeen();
     }
 
@@ -7411,8 +7418,11 @@
         } else if (chatRunsFree()) {
             line = '🏠 Free: the local model can\'t see it';
             full = 'This chat runs on the local model only (Free), and the local model cannot see images, so no model '
-                    + 'is shown this one now. If the chat later runs on the cloud model, the image goes with the '
-                    + 'chat\'s history, as its text does. Skills are given it as a file.';
+                    + 'is shown this one now. ' + (cloudSeesImages
+                        ? 'If the chat later runs on the cloud model, the image goes with the chat\'s history, as its '
+                            + 'text does. '
+                        : 'Nor would the cloud model be, if the chat later ran on it: it is sent no images. ')
+                    + 'Skills are given it as a file.';
         } else if (!cloudSeesImages) {
             line = '☁️ not seen: the cloud model is sent no images';
             full = 'OwnClaw sends images to Anthropic\'s models only, and this chat\'s cloud model is sent none; the '

@@ -91,8 +91,9 @@ class ChatPastePageTest {
         int sees = line.indexOf("} else { line = '☁️ the cloud model will see it';");
         assertTrue(attached >= 0 && kept > attached && onFree > kept && notSent > onFree && carries > notSent && sees > carries,
                 "each case, in this order -- Free and a cloud sent none before any 'will see it': " + line);
-        assertTrue(line.contains("If the chat later runs on the cloud model, the image goes with the '"
-                + " + 'chat\\'s history, as its text does."), "Free says what a later cloud turn does: " + line);
+        assertTrue(line.contains("+ (cloudSeesImages ? 'If the chat later runs on the cloud model, the image goes with "
+                + "the chat\\'s history, as its ' + 'text does. ' : 'Nor would the cloud model be, if the chat later ran on "
+                + "it: it is sent no images. ')"), "Free says what a later cloud turn does -- and with a cloud sent none, not that: " + line);
         assertFalse(line.contains("cloudProvider"), "the provider is the owner's setting, not every account's: " + line);
         assertTrue(line.contains("so what skills ' + 'read from it stays private."), line);
         assertTrue(line.contains("seen.textContent = line; seen.title = full; detail.textContent = full;"), line);
@@ -114,6 +115,11 @@ class ChatPastePageTest {
         String note = between("function noteCloud(cloud) {", "function seenLine(chip)");
         assertTrue(note.contains("cloudSeesImages = cloud.seesImages !== false;"), note);
         assertTrue(page.contains("noteCloud({ seesImages: provider === 'anthropic' });"), "the settings page's provider too");
+        assertTrue(note.contains("var hint = document.getElementById('hint-images'); if (hint) hint.textContent = cloudSeesImages "
+                + "? 'Screenshots and pictures pasted from the clipboard are shown to the cloud model"), "and the hint under the box: " + note);
+        assertTrue(page.contains("<span id=\"hint-images\">Screenshots and pictures pasted"), "the hint's words are that span");
+        assertTrue(note.contains("'This chat\\'s cloud model is sent no images: screenshots and pictures you paste are not "
+                + "shown to it, and ' + 'skills are given them as files;"), note);
         // Mutation: refresh in nameDefaults only -> the chip keeps the last chat's wording (the review's Free-to-Cheaper send).
     }
 
