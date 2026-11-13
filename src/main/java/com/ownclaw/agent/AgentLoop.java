@@ -1838,8 +1838,9 @@ public class AgentLoop {
         return switch (action) {
             case "read" -> {
                 String read = skillManager.readSkill(name);
-                // Its code with the user's values in it: sent as code wherever it is replayed.
-                context.declareSkillCode(read, false);
+                // Its code, the user's values in it, is sent as code wherever it is replayed; the
+                // rest of what was read as any text.
+                context.declareSkillCode(skillManager.readSkillCode(name), com.ownclaw.privacy.Redactor.Declared.CODE);
                 yield read;
             }
             case "delete" -> skillManager.deleteSkill(name, context.userId(), context::isCancelled,
@@ -2627,9 +2628,9 @@ public class AgentLoop {
      * quietly on the case nobody thought about. Showing the failures to the model repairing the
      * code gets most of the benefit with none of that risk.
      */
-    private String pastFailureEvidence(String skillName) {
+    private String pastFailureEvidence(String skillName, String userId) {
         try {
-            var failures = curatorService.failures(skillName);
+            var failures = curatorService.failures(skillName, userId);
             if (failures.isEmpty()) return null;
             var sb = new StringBuilder("Real calls to this skill that FAILED previously "
                     + "(parameters are redacted where they looked sensitive):\n");
@@ -2693,8 +2694,11 @@ public class AgentLoop {
             result = code.error() != null ? code.error()
                     : skillManager.createSkill(code.params(), code.asWritten(), context.userId(), context::isCancelled,
                             () -> waitingForSkill(context, str(action.params(), "name")));
-            // A load error is Python's traceback of the code, the user's values put back in it.
-            if (code.error() == null && result.startsWith("ERROR")) context.declareSkillCode(result, false);
+            // A load error is Python's traceback of the code, the user's values put back in it: what a
+            // skill printed, filtered as text and its known values replaced wherever they stand.
+            if (code.error() == null && result.startsWith("ERROR")) {
+                context.declareSkillCode(result, com.ownclaw.privacy.Redactor.Declared.OUTPUT);
+            }
         }
         // The skill the model has just created is one of its tools from the next step.
         if (!result.startsWith("ERROR") && context.toolsAdded() != null) {
@@ -2766,12 +2770,15 @@ public class AgentLoop {
             // The code as the model wrote it, where it was kept with this skill.py: its placeholders
             // where the values are, and sent so. Otherwise skill.py itself, every value the user's
             // table holds replaced in it wherever it stands (AgentContext#declareSkillCode).
-            String asWritten = skillManager.readAsWritten(name);
+            // Only on the cloud, where the placeholders are put back: the local model is shown the values
+            // themselves, and nothing would put back what it copied of a placeholder. And only one kept
+            // for this account's placeholders (SkillManager#readAsWritten).
+            String asWritten = local ? null : skillManager.readAsWritten(name, context.userId());
             if (asWritten != null) {
                 oldCode = asWritten;
-                context.declareSkillCode(asWritten, true);
+                context.declareSkillCode(asWritten, com.ownclaw.privacy.Redactor.Declared.CODE_AS_WRITTEN);
             } else {
-                context.declareSkillCode(oldCode, false);
+                context.declareSkillCode(oldCode, com.ownclaw.privacy.Redactor.Declared.CODE);
             }
             // Walk trajectory backwards to find the most recent failed execution of this skill
             var turns = context.trajectory().turns();
@@ -2787,13 +2794,14 @@ public class AgentLoop {
             // blind, against an error it could not see. skill_usage now keeps the parameters
             // and the error of real failures, which is evidence rather than guesswork: the
             // exact calls that broke, so the fix can be aimed at them.
-            String history = pastFailureEvidence(name);
+            String history = pastFailureEvidence(name, context.userId());
             if (history != null) {
                 context.givenEarlier(history);
                 lastError = lastError == null ? history : lastError + "\n\n" + history;
             }
-            // A run's traceback quotes the code's lines, its values in them.
-            context.declareSkillCode(lastError, false);
+            // A run's output and traceback, its values in them: filtered as text, and its known values
+            // replaced wherever they stand.
+            context.declareSkillCode(lastError, com.ownclaw.privacy.Redactor.Declared.OUTPUT);
             log.info("Skill '{}' exists — will attempt targeted fix{}{}",
                     name,
                     lastError != null ? " (error available)" : " (no error known)",
@@ -2901,9 +2909,18 @@ public class AgentLoop {
                             reply.parts().size() > 1 ? ", in " + reply.parts().size() + " parts" : "");
                     Map<String, Object> enhanced = new HashMap<>(originalParams);
                     enhanced.put("code", chosen.restored());
-                    // The model may also name better requirements: text, its values put back as text.
+                    // The model may also name better requirements: its values put back only where each is
+                    // one plain token, which pip cannot read as an option or a second line.
                     String cloudRequirements = extractRequirements(chosen.asWritten());
                     if (cloudRequirements != null) {
+                        for (String value : CodeValues.valuesIn(cloudRequirements, writing::restored).values()) {
+                            if (!PLAIN_TOKEN.matcher(value).matches()) {
+                                log.error("Skill '{}': its requirements name a value that is not a plain token", name);
+                                return Codegen.failed("the requirements for '" + name + "' name a value of yours that "
+                                        + "is not a plain package name or version -- put back there it could be a pip "
+                                        + "option or another line -- so nothing was created.");
+                            }
+                        }
                         enhanced.put("requirements", writing.restored(cloudRequirements));
                     }
                     return new Codegen(enhanced, null, code);
@@ -3021,6 +3038,14 @@ public class AgentLoop {
         Integer line = errorLine(error);
         return line == null ? last : "line " + line + ": " + last;
     }
+
+    /**
+     * A value that may be put back into a skill's requirements: one token of the characters a package
+     * name or a version is made of, not beginning with "-". Anything else -- a line break, a blank, a
+     * leading "-", an "@" or a ";" -- would let the value add a pip option, an index URL, a direct
+     * reference or another requirement.
+     */
+    private static final java.util.regex.Pattern PLAIN_TOKEN = java.util.regex.Pattern.compile("[A-Za-z0-9][A-Za-z0-9._+-]*");
 
     /** What a reading whose code ends at a seam while more follows is told as: its "error". */
     static final String DROPS_CODE = "the code ends where its ```python fence closes, and more code follows it in "

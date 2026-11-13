@@ -360,7 +360,7 @@ public class SkillManager {
             // Registered over the old one, not after unregistering it: in between, another task's
             // look-up of the skill found no such tool.
             dynamicSkillRegistry.register(skill);
-            keepAsWritten(name, asWritten, code);
+            keepAsWritten(name, asWritten, code, requester);
 
             return "Skill '" + name + "' " + (isUpdate ? "updated" : "created") +
                     " and registered. It is now available as a tool.";
@@ -400,15 +400,20 @@ public class SkillManager {
                 .resolve("_as_written").resolve(name + ".py");
     }
 
-    /** The first line of a kept copy: the digest of the skill.py it was kept with. */
+    /** The first line of a kept copy: the digest of the skill.py it was kept with, and whose placeholders it holds. */
     private static final String KEPT_WITH = "# skill.py sha256 ";
 
+    /** The first line of the copy kept with {@code code}, {@code userId}'s placeholders in it. */
+    private static String keptWith(String code, String userId) {
+        return KEPT_WITH + sha256(code) + " for " + sha256(userId == null ? "" : userId);
+    }
+
     /**
-     * Keeps {@code asWritten} -- skill {@code name}'s code as the model wrote it, its placeholders in
-     * it -- with the digest of {@code code}, the skill.py it was made into; or, null, forgets any
-     * copy kept: code written otherwise has none.
+     * Keeps {@code asWritten} -- skill {@code name}'s code as the model wrote it, {@code userId}'s
+     * placeholders in it -- with the digest of {@code code}, the skill.py it was made into; or, null,
+     * forgets any copy kept: code written otherwise has none.
      */
-    private void keepAsWritten(String name, String asWritten, String code) {
+    private void keepAsWritten(String name, String asWritten, String code, String userId) {
         try {
             Path file = asWrittenFile(name);
             if (asWritten == null) {
@@ -416,7 +421,7 @@ public class SkillManager {
                 return;
             }
             Files.createDirectories(file.getParent());
-            Files.writeString(file, KEPT_WITH + sha256(code) + "\n" + asWritten, StandardCharsets.UTF_8);
+            Files.writeString(file, keptWith(code, userId) + "\n" + asWritten, StandardCharsets.UTF_8);
         } catch (IOException | RuntimeException e) {
             log.warn("The code of '{}' as written could not be kept: {}", name, e.getClass().getSimpleName());
         }
@@ -424,10 +429,13 @@ public class SkillManager {
 
     /**
      * Skill {@code name}'s code exactly as the model wrote it -- its placeholders where the user's
-     * values are in skill.py -- when one was kept with the skill.py the skill has now; otherwise null:
-     * a skill made before copies were kept, or changed since by hand or by a page.
+     * values are in skill.py -- when one was kept with the skill.py the skill has now, for
+     * {@code userId}: the placeholders are one account's, and read in another's table they are that
+     * account's values -- the owner fixing another account's skill put his own network's name into
+     * it. Otherwise null: a skill made before copies were kept, changed since by hand or by a page,
+     * or made by another account.
      */
-    public String readAsWritten(String name) {
+    public String readAsWritten(String name, String userId) {
         String code = readSkillCode(name);
         if (code == null) return null;
         try {
@@ -435,7 +443,7 @@ public class SkillManager {
             if (!Files.isRegularFile(file, java.nio.file.LinkOption.NOFOLLOW_LINKS)) return null;
             String kept = Files.readString(file, StandardCharsets.UTF_8);
             int newline = kept.indexOf('\n');
-            if (newline < 0 || !kept.substring(0, newline).equals(KEPT_WITH + sha256(code))) return null;
+            if (newline < 0 || !kept.substring(0, newline).equals(keptWith(code, userId))) return null;
             return kept.substring(newline + 1);
         } catch (IOException | RuntimeException e) {
             return null;
@@ -541,7 +549,7 @@ public class SkillManager {
         dynamicSkillRegistry.unregister(name);
 
         boolean dirGone = SkillJail.deleteTree(skill.skillDir());
-        keepAsWritten(name, null, null);
+        keepAsWritten(name, null, null, null);
         // The environment too. This deleted the code and kept the 7 GB of packages the code had
         // pulled in, for every skill ever deleted.
         boolean envsGone = pythonEnv.removeEnvironments(name);

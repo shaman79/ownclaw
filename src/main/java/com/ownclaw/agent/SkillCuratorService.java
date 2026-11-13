@@ -210,17 +210,19 @@ public class SkillCuratorService {
      * repair must fix, and the cases a repaired version must then survive. The same call failing
      * the same way is one row, with how many times it did ({@code times}).
      */
-    public List<Map<String, Object>> failures(String toolName) {
+    public List<Map<String, Object>> failures(String toolName, String userId) {
         try {
             return jdbc.queryForList(
                     // PUBLIC rows only: these go into the code-generation prompt, which goes to
                     // the cloud. A private skill's traceback carries what it fetched. Rows from
-                    // before the label existed are NULL and are treated as not public.
+                    // before the label existed are NULL and are treated as not public. And only
+                    // the runs of the account whose task fixes the skill: a skill is offered to
+                    // every account, and another's runs carry its parameters and what they printed.
                     "SELECT params_json, error, COUNT(*) AS times FROM skill_usage "
-                    + "WHERE tool_name = ? AND success = 0 AND params_json IS NOT NULL "
+                    + "WHERE tool_name = ? AND user_id = ? AND success = 0 AND params_json IS NOT NULL "
                     + "AND label = 'PUBLIC' "
                     + "GROUP BY params_json, error ORDER BY MAX(id) DESC",
-                    toolName);
+                    toolName, userId);
         } catch (Exception e) {
             log.debug("Could not read failures for '{}': {}", toolName, e.getMessage());
             return List.of();

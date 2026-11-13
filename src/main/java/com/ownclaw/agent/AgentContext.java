@@ -1217,23 +1217,21 @@ public class AgentContext {
                 secretValues(), new Excuses(), this::toolOf, null, Map.copyOf(skillCode));
     }
 
-    /**
-     * Texts of this task that are skill code, or what Python printed of it, each to whether it is
-     * the code exactly as the model wrote it ({@link #declareSkillCode}).
-     */
-    private final Map<String, Boolean> skillCode = new java.util.concurrent.ConcurrentHashMap<>();
+    /** Texts of this task that are skill code, or what a skill printed, each with what it is ({@link #declareSkillCode}). */
+    private final Map<String, com.ownclaw.privacy.Redactor.Declared> skillCode = new java.util.concurrent.ConcurrentHashMap<>();
 
     /**
-     * {@code text} is skill code as it is on disk, its values in it, or what Python printed of it --
-     * a skill read, a load error, a run's traceback -- or, {@code asWritten}, the code exactly as the
-     * model wrote it, kept beside the skill: wherever it stands in a call this task makes, the
-     * gateway sends it as code ({@code Redactor#filterCode}). Its values are in its literals, where
-     * the filter of text, which replaces a value only as a word, left one inside a longer word, or
-     * a short one, in clear.
+     * {@code text} is a skill's code -- as the model wrote it, kept beside the skill (CODE_AS_WRITTEN),
+     * or as it is on disk, its values in it (CODE) -- or what a skill printed: a run's output, a
+     * traceback, a load error (OUTPUT). Wherever it stands in a call this task makes, the gateway
+     * filters the part as any, and inside it also replaces every value the user's table holds
+     * wherever it stands ({@code Redactor#filter(String, String, Map, Redactor.Tally, Map)}): the
+     * filter of text, which replaces a value only as a word, left one inside a longer word, or a
+     * short one, in clear. Declared twice as different things, it is the one filtered most as text.
      */
-    public void declareSkillCode(String text, boolean asWritten) {
-        if (text == null || text.isBlank()) return;
-        skillCode.merge(text, asWritten, (was, now) -> was && now);
+    public void declareSkillCode(String text, com.ownclaw.privacy.Redactor.Declared what) {
+        if (text == null || text.isBlank() || what == null) return;
+        skillCode.merge(text, what, (was, now) -> was.ordinal() >= now.ordinal() ? was : now);
     }
 
     /** The tool that produced result {@code n}, or null when there is no such result. */

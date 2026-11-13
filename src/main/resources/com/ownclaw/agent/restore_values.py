@@ -262,7 +262,10 @@ def joined(tree):
 def meant(code, values):
     """The program the code as written means once its values are put back: its tree, each placeholder
     in a string constant replaced by its value."""
-    tree = ast.parse(source(code))
+    try:
+        tree = ast.parse(source(code))
+    except (SyntaxError, ValueError):
+        raise Refused(0, 'read')
 
     def text(m):
         return values.get(m.group(0), m.group(0))

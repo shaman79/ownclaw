@@ -1,6 +1,7 @@
 package com.ownclaw.llm;
 
 import com.ownclaw.privacy.PrivateIndex;
+import com.ownclaw.privacy.Redactor;
 
 import java.util.List;
 import java.util.Map;
@@ -29,19 +30,19 @@ import java.util.function.IntFunction;
  * @param handedOut    the replies the gateway handed out under this context as the model wrote
  *                     them ({@link HandedOut}): always this context's own, and empty when it is
  *                     made -- whatever a caller passes is not taken
- * @param skillCode    texts the task holds that are skill code, or what Python printed of it -- a
- *                     skill read, a load error, a run's traceback -- each to whether it is the code
- *                     exactly as the model wrote it: wherever one stands in a part, the gateway sends
- *                     it as code ({@code Redactor#filterCode}), every value the user's table holds
- *                     replaced wherever it stands, and nothing learned. Only the task declares them
- *                     ({@code AgentContext#declareSkillCode})
+ * @param skillCode    texts the task holds that are skill code, or what a skill printed -- the code
+ *                     being fixed, a skill read's code, a load error, a run's output -- each to what it
+ *                     is ({@link Redactor.Declared}): the gateway filters every part whole, as any,
+ *                     and inside each such text also replaces every value the user's table holds
+ *                     wherever it stands ({@code Redactor#filter(String, String, Map, Redactor.Tally,
+ *                     Map)}). Only the task declares them ({@code AgentContext#declareSkillCode})
  */
 public record EgressContext(String userId, String taskId, String purpose, PrivateIndex index,
                             Map<String, String> secretValues,
                             BiPredicate<Integer, String> allowed,
                             IntFunction<String> toolOf,
                             HandedOut handedOut,
-                            Map<String, Boolean> skillCode) {
+                            Map<String, Redactor.Declared> skillCode) {
 
     public EgressContext {
         index = index == null ? new PrivateIndex() : index;

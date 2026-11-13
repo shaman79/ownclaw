@@ -89,9 +89,9 @@ class SkillCodeAsWrittenTest {
         String asWritten = code.replace("ExampleHome5G", "<ssid_1>");
         var params = new HashMap<String, Object>(Map.of("name", "net_report", "description", "Reports the network.",
                 "parameters", "{}", "code", code));
-        String made = skills.createSkill(params, asWritten, null, () -> false, () -> { });
+        String made = skills.createSkill(params, asWritten, "u1", () -> false, () -> { });
         assertTrue(made.startsWith("Skill 'net_report' created"), made);
-        assertEquals(asWritten, skills.readAsWritten("net_report"));
+        assertEquals(asWritten, skills.readAsWritten("net_report", "u1"));
         Path skillDir = tmp.resolve("generated").resolve("net_report");
         try (var files = Files.walk(skillDir)) {
             assertTrue(files.noneMatch(f -> f.toString().contains("<ssid_1>") || readQuietly(f).contains("<ssid_1>")),
@@ -102,13 +102,15 @@ class SkillCodeAsWrittenTest {
 
         // skill.py changed otherwise -- by hand, by a page: the copy is not its code any more.
         Files.writeString(skillDir.resolve("skill.py"), code.replace("NET", "NETWORK"));
-        assertNull(skills.readAsWritten("net_report"));
+        assertNull(skills.readAsWritten("net_report", "u1"));
         // Made again without a copy: none is kept.
-        assertTrue(skills.createSkill(params, null, null, () -> false, () -> { }).startsWith("Skill 'net_report' updated"));
+        assertTrue(skills.createSkill(params, null, "u1", () -> false, () -> { }).startsWith("Skill 'net_report' updated"));
         assertFalse(Files.exists(kept));
-        assertNull(skills.readAsWritten("net_report"));
-        skills.createSkill(params, asWritten, null, () -> false, () -> { });
+        assertNull(skills.readAsWritten("net_report", "u1"));
+        skills.createSkill(params, asWritten, "u1", () -> false, () -> { });
         assertTrue(Files.exists(kept));
+        assertNull(skills.readAsWritten("net_report", "u2"),
+                "kept with u1's placeholders: another account's fix -- the owner's -- reads them in its own table");
         skills.deleteSkill("net_report");
         assertFalse(Files.exists(kept), "deleted with the skill");
         // Mutation: no digest check -> the copy of the old code is sent for a skill.py it is not.
@@ -128,6 +130,7 @@ class SkillCodeAsWrittenTest {
         var rig = new LoopRig(tmp, List.of());
         String session = rig.chat.createSession("u1", "Backup");
         rig.skills.files = name -> "## Skill: router_backup\n\n### skill.py\n```python\n" + ON_DISK + "\n```\n";
+        rig.skills.source = name -> ON_DISK;
         rig.cloud.think.add(call(AgentAction.SKILL_MANAGE, Map.of("action", "read", "name", "router_backup")));
         rig.cloud.think.add(respond("It backs up the router."));
 

@@ -319,48 +319,152 @@ public final class Redactor {
     private static final int MIN_CODE_SUBSTRING = 3;
 
     /**
-     * Skill code, or what Python printed of it -- a load error's traceback, a run's -- as a cloud
-     * model may read it: the vault's values and every secret the detectors find removed, as by
-     * {@link #filter}; and every value the user's table holds replaced by its placeholder wherever it
-     * stands, inside a longer word too -- as written, and as Python or JSON escape it inside a
-     * string -- not only as a word, as the filter replaces it in text. Code holds the values in its
-     * literals, where they are put back, so one inside a longer word -- a path built on an SSID --
-     * or a short one that the filter knows only by the name written before it, went out in clear.
-     * Nothing is learned from the code: what it holds that the table does not know is the model's or
-     * the owner's own writing, and a word of the code learned as an identifier would be replaced in
-     * every text from then on. A placeholder's shape in it is given one of its own (TEXT), as the
-     * filter gives it -- except, with {@code keepPlaceholders}, one the table knows: the code exactly as
-     * the model wrote it, kept beside the skill, whose placeholders the model wrote and goes on
-     * writing ({@code AgentContext#declareSkillCode}).
+     * What a text the task declared stands for in a part ({@link #filter(String, String, Map, Tally, Map)}).
+     * <ul>
+     *   <li>CODE_AS_WRITTEN: a skill's code exactly as the model wrote it, kept beside the skill --
+     *   its placeholders are the model's, and go as they are where the table knows them.</li>
+     *   <li>CODE: a skill's code as it is on disk, its values in its literals.</li>
+     *   <li>OUTPUT: what a skill printed -- a run's output, a traceback, a load error.</li>
+     * </ul>
+     */
+    public enum Declared { CODE_AS_WRITTEN, CODE, OUTPUT }
+
+    /**
+     * A declared text shorter than this is not looked for: "0", a run's whole output, stood in every
+     * part, and found everywhere it was nothing of the code's.
+     */
+    static final int MIN_DECLARED = 16;
+
+    /**
+     * {@link #filter}, over the whole of {@code text} -- the detectors see all of it, as they always
+     * do -- and, inside every stretch of it that is one of the texts the task {@code declared}, every
+     * value the user's table holds also replaced wherever it stands: inside a longer word, and as
+     * Python, JSON or a bytes literal writes it ({@link Table#byValue}), a short one only as a word.
+     * A skill's code holds the values in its literals, where they were put back, and a run's output
+     * prints them inside paths and names: the filter of text replaces a value only as a word, so one
+     * inside a longer word, or a short one known only by the name written before it, went out in
+     * clear. In code -- CODE and CODE_AS_WRITTEN -- nothing is learned: what it holds that the table
+     * does not know is the model's or the owner's own writing, and a word of it learned as an
+     * identifier would be replaced in every text from then on; a run's output (OUTPUT) is text, and
+     * an address or a number in it is learned and replaced as in any. A placeholder's shape is given
+     * one of its own (TEXT), except in CODE_AS_WRITTEN where the table knows it. The text is never
+     * filtered in pieces: split at each declared text, a part's detectors saw only fragments -- an
+     * address, an IBAN or a token cut at every "0" went out whole.
+     */
+    public String filter(String userId, String text, Map<String, String> vault, Tally tally,
+                         Map<String, Declared> declared) {
+        if (text == null || text.isEmpty()) return text;
+        if (declared == null || declared.isEmpty()) return filter(userId, text, vault, tally);
+        return filtered(userId, text, vault, tally, s -> stretches(s, declared, vault));
+    }
+
+    /**
+     * {@code text} -- skill code -- as {@link #filter(String, String, Map, Tally, Map)} sends it when
+     * the whole of it is declared: the code as the model wrote it ({@code keepPlaceholders}), or as
+     * it is on disk.
      */
     public String filterCode(String userId, String text, Map<String, String> vault, Tally tally,
                              boolean keepPlaceholders) {
         if (text == null || text.isEmpty()) return text;
+        Declared as = keepPlaceholders ? Declared.CODE_AS_WRITTEN : Declared.CODE;
+        return filtered(userId, text, vault, tally, s -> List.of(new int[] {0, s.length(), as.ordinal()}));
+    }
+
+    /** The filter over all of {@code text}, its declared stretches -- in the text the vault scrub left -- as they are. */
+    private String filtered(String userId, String text, Map<String, String> vault, Tally tally,
+                            java.util.function.Function<String, List<int[]>> stretchesOf) {
         Scrubbed scrubbed = scrubVault(text, vault);
         tally.secrets += scrubbed.count();
         String s = scrubbed.text();
+        List<int[]> stretches = stretchesOf.apply(s);
         Table table = table(userId);
+        var found = new ArrayList<Finding>();
+        for (Finding f : find(s, table.named())) {
+            Declared in = within(stretches, f.start(), f.end());
+            boolean inCode = in == Declared.CODE || in == Declared.CODE_AS_WRITTEN;
+            // In code an identifier is replaced only as one the table knows, by the pass over every
+            // form a value takes there, longest first -- {{ExampleNet}} in an f-string whole, not the
+            // {ExampleNet} inside it -- and is never learned. What the text names outside the code is
+            // learned first, as the filter learns it, so a value the same part names -- a
+            // specification and the code it fixes -- is known inside the code.
+            if (inCode && f.kind() != null && f.kind() != Kind.TEXT) continue;
+            if (!inCode && f.kind() != null && f.kind() != Kind.TEXT) table.placeholder(f.kind(), f.valueIn(s));
+            found.add(f);
+        }
+        Map<String, String> known = stretches.isEmpty() ? Map.of() : table.byValue();
         var sb = new StringBuilder(s.length());
         int from = 0;
-        Map<String, String> known = table.byValue();
-        for (Finding f : find(s, table.named())) {
-            sb.append(knownReplaced(s.substring(from, f.start()), known, tally));
+        for (Finding f : found) {
+            sb.append(knownReplacedIn(s, from, f.start(), stretches, known, tally));
             String span = s.substring(f.start(), f.end());
+            Declared in = within(stretches, f.start(), f.end());
             if (f.kind() == null) {
                 sb.append(SECRET_REMOVED);
                 tally.secrets++;
             } else if (f.kind() == Kind.TEXT) {
-                sb.append(keepPlaceholders && table.value(span) != null ? span : table.placeholder(Kind.TEXT, f.valueIn(s)));
-            } else if (table.knows(f.kind(), f.valueIn(s))) {
+                sb.append(in == Declared.CODE_AS_WRITTEN && table.value(span) != null ? span
+                        : table.placeholder(Kind.TEXT, f.valueIn(s)));
+            } else {
                 sb.append(table.placeholder(f.kind(), f.valueIn(s)));
                 tally.identifiers++;
-            } else {
-                // Not the user's as far as the table knows: the code's own writing, and not learned.
-                sb.append(knownReplaced(span, known, tally));
             }
             from = f.end();
         }
-        return sb.append(knownReplaced(s.substring(from), known, tally)).toString();
+        return sb.append(knownReplacedIn(s, from, s.length(), stretches, known, tally)).toString();
+    }
+
+    /**
+     * Where the {@code declared} texts stand in {@code s}, each as the vault scrub left it: {start, end,
+     * the Declared's ordinal}, in order, none inside another -- the longer first. One shorter than
+     * {@link #MIN_DECLARED} is not looked for.
+     */
+    private static List<int[]> stretches(String s, Map<String, Declared> declared, Map<String, String> vault) {
+        var texts = new ArrayList<Map.Entry<String, Declared>>();
+        for (var e : declared.entrySet()) {
+            String t = scrubVault(e.getKey(), vault).text();
+            if (t.length() >= MIN_DECLARED) texts.add(Map.entry(t, e.getValue()));
+        }
+        texts.sort(Comparator.comparingInt((Map.Entry<String, Declared> e) -> e.getKey().length()).reversed());
+        var taken = new BitSet(s.length());
+        var out = new ArrayList<int[]>();
+        for (var e : texts) {
+            String t = e.getKey();
+            for (int at = s.indexOf(t); at >= 0; at = s.indexOf(t, at + 1)) {
+                int end = at + t.length();
+                int set = taken.nextSetBit(at);
+                if (set >= 0 && set < end) continue;
+                taken.set(at, end);
+                out.add(new int[] {at, end, e.getValue().ordinal()});
+            }
+        }
+        out.sort(Comparator.comparingInt((int[] a) -> a[0]));
+        return out;
+    }
+
+    /** The declared kind of the stretch [{@code from}, {@code to}) lies inside, or null. */
+    private static Declared within(List<int[]> stretches, int from, int to) {
+        for (int[] st : stretches) {
+            if (st[0] <= from && to <= st[1]) return Declared.values()[st[2]];
+            if (st[0] >= to) break;
+        }
+        return null;
+    }
+
+    /** {@code s} from {@code from} to {@code to}, the known values replaced where it lies inside a stretch. */
+    private static String knownReplacedIn(String s, int from, int to, List<int[]> stretches,
+                                          Map<String, String> known, Tally tally) {
+        if (from >= to) return "";
+        if (stretches.isEmpty()) return s.substring(from, to);
+        var sb = new StringBuilder(to - from);
+        int at = from;
+        for (int[] st : stretches) {
+            if (st[1] <= at) continue;
+            if (st[0] >= to) break;
+            int a = Math.max(at, st[0]), b = Math.min(to, st[1]);
+            sb.append(s, at, a).append(knownReplaced(s.substring(a, b), known, tally));
+            at = b;
+        }
+        return sb.append(s, at, to).toString();
     }
 
     /**
@@ -736,6 +840,82 @@ public final class Redactor {
         return sb.toString();
     }
 
+    /**
+     * Every way skill code holds {@code value}: as it is; as the code's restore_values.py writes it
+     * into a string literal of either quote, an f-string's text (its braces doubled), a bytes
+     * literal (UTF-8, every byte but printable ASCII as \xNN), a comment, and after an octal escape
+     * (its first digit as \xNN) -- every character but printable ASCII as an escape, the same in
+     * every Python whatever Unicode it knows; as Python's repr writes it; and as json.dumps does.
+     */
+    public static List<String> restoredForms(String value) {
+        var forms = new java.util.LinkedHashSet<String>();
+        forms.add(value);
+        for (char q : new char[] {'\'', '"'}) {
+            String str = restoredInString(value, q);
+            forms.add(str);
+            forms.add(str.replace("{", "{{").replace("}", "}}"));
+            forms.add(restoredInBytes(value, q));
+            if (!value.isEmpty() && value.charAt(0) >= '0' && value.charAt(0) <= '7') {
+                String first = String.format(Locale.ROOT, "\\x%02x", (int) value.charAt(0));
+                forms.add(first + restoredInString(value.substring(1), q));
+                forms.add(first + restoredInBytes(value.substring(1), q));
+            }
+            forms.add(pythonEscaped(value, q));
+        }
+        forms.add(restoredInComment(value));
+        forms.add(pythonJson(value, false));
+        forms.add(pythonJson(value, true));
+        forms.remove("");
+        return List.copyOf(forms);
+    }
+
+    /** {@code value} as restore_values.py writes it inside a string literal of {@code quote}. */
+    static String restoredInString(String value, char quote) {
+        var sb = new StringBuilder(value.length() + 8);
+        value.codePoints().forEach(c -> {
+            if (c == '\\') sb.append("\\\\");
+            else if (c == quote) sb.append('\\').append(quote);
+            else if (c >= 0x20 && c < 0x7f) sb.appendCodePoint(c);
+            else sb.append(escapedChar(c));
+        });
+        return sb.toString();
+    }
+
+    /** {@code value} as restore_values.py writes it inside a bytes literal of {@code quote}: its UTF-8. */
+    static String restoredInBytes(String value, char quote) {
+        var sb = new StringBuilder(value.length() * 2);
+        for (byte b : value.getBytes(java.nio.charset.StandardCharsets.UTF_8)) {
+            int c = b & 0xff;
+            if (c == '\\') sb.append("\\\\");
+            else if (c == quote) sb.append('\\').append(quote);
+            else if (c >= 0x20 && c < 0x7f) sb.append((char) c);
+            else sb.append(String.format(Locale.ROOT, "\\x%02x", c));
+        }
+        return sb.toString();
+    }
+
+    /** {@code value} as restore_values.py writes it into a comment. */
+    static String restoredInComment(String value) {
+        var sb = new StringBuilder(value.length() + 8);
+        value.codePoints().forEach(c -> {
+            if (c >= 0x20 && c < 0x7f) sb.appendCodePoint(c);
+            else sb.append(escapedChar(c));
+        });
+        return sb.toString();
+    }
+
+    /** A character that is not printable ASCII, as restore_values.py escapes it. */
+    private static String escapedChar(int c) {
+        return switch (c) {
+            case '\n' -> "\\n";
+            case '\r' -> "\\r";
+            case '\t' -> "\\t";
+            default -> c < 0x100 ? String.format(Locale.ROOT, "\\x%02x", c)
+                    : c < 0x10000 ? String.format(Locale.ROOT, "\\u%04x", c)
+                    : String.format(Locale.ROOT, "\\U%08x", c);
+        };
+    }
+
     /** Whether Python's {@code str.isprintable} holds for the character: not a control, format, separator or unassigned one. */
     private static boolean pythonPrintable(int c) {
         return switch (Character.getType(c)) {
@@ -977,10 +1157,7 @@ public final class Redactor {
                 String value = e.getKey().substring(nul + 1);
                 if (kind == Kind.TEXT || value.isEmpty() || namesNoDevice(kind, value)) continue;
                 String placeholder = "<" + kind.tag() + "_" + e.getValue() + ">";
-                for (String form : List.of(value, pythonEscaped(value, '\''), pythonEscaped(value, '"'),
-                        pythonJson(value, false))) {
-                    out.putIfAbsent(form, placeholder);
-                }
+                for (String form : restoredForms(value)) out.putIfAbsent(form, placeholder);
             }
             return out;
         }

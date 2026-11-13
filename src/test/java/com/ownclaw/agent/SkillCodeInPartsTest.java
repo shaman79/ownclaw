@@ -616,7 +616,8 @@ class SkillCodeInPartsTest {
             return cutOff("```python\nimport json\n\nHOME = '" + ph[0] + "'\nGUEST = '" + ph[1] + "'\n"
                     + "ARCHIVE = '/tmp/" + ph[0] + "_backup.tar'\n\ndef run(params):\n    x = (").answer(c);
         });
-        rig.cloud.codegen.add(ends("1)\n    return {'output': json.dumps([HOME, GUEST, ARCHIVE, x]), 'success': True}\n```\n"));
+        // Shown its whole lines, the model writes the line it was cut in again.
+        rig.cloud.codegen.add(ends("\n    x = (1)\n    return {'output': json.dumps([HOME, GUEST, ARCHIVE, x]), 'success': True}\n```\n"));
 
         AgentLoop.Codegen out = rig.loop.generateSkillCode(backupSpec(), task());
 

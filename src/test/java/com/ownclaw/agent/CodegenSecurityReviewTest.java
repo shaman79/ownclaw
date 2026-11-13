@@ -12,6 +12,11 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
+import com.ownclaw.llm.LlmMessage;
+import com.ownclaw.privacy.Redactor;
+
+import static com.ownclaw.agent.SkillCodeInPartsTest.*;
+import static com.ownclaw.agent.SkillCodegenTest.*;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
@@ -159,5 +164,165 @@ class CodegenSecurityReviewTest {
         assertTrue(r.code().endsWith("X = 'ExampleHome5G'\n"));
         assertTrue(seconds < 30, seconds + " s");
         // Mutation: sum the lines before each token again -> minutes, past the 60 s the check is given.
+    }
+
+    static String everything(LoopRig.Call c) {
+        var sb = new StringBuilder();
+        for (LlmMessage m : c.messages()) sb.append(m.content()).append("\n---\n");
+        return sb.toString();
+    }
+
+    @Test
+    @DisplayName("F2: a run's output in a fix's request is text, filtered as on main -- an address and a phone number the table does not know are replaced, and learned")
+    void aRunsOutputIsText(@TempDir Path tmp) throws Exception {
+        var rig = new LoopRig(tmp, List.of());
+        var spec = spec();
+        spec.put("name", "mail_report");
+        rig.skills.source = name -> "import json\n\ndef run(params):\n    return {'output': '', 'success': False}\n";
+        AgentContext ctx = task();
+        String error = "SMTP 550 mailbox postmaster0@example.com unavailable (relay 192.0.2.25, phone +420 601 234 567)";
+        ctx.trajectory().record(new AgentAction("mail_report", Map.of(), null), AgentObservation.failure("mail_report", error, 5));
+        rig.cloud.codegen.add(finished(module("")));
+        assertNull(rig.loop.generateSkillCode(spec, ctx).error());
+        String sent = everything(rig.cloud.calls("codegen").get(0));
+        assertTrue(sent.contains("SMTP 550 mailbox"), "premise: the error is in the fix's request: " + sent);
+        assertFalse(sent.contains("postmaster0@example.com"), "address in clear: " + sent);
+        assertFalse(sent.contains("601 234 567"), "phone in clear: " + sent);
+        String onMain = new Redactor(null).filter("u1", error, Map.of(), new Redactor.Tally());
+        assertFalse(onMain.contains("postmaster0@example.com") || onMain.contains("601 234 567"), "as on main: " + onMain);
+        // Mutation: declare a run's output CODE -> what the table does not know goes out, not learned.
+    }
+
+    @Test
+    @DisplayName("F3: a run whose whole output is \"0\" splits nothing: the request is filtered whole -- an address and an IBAN in the specification replaced")
+    void aShortOutputSplitsNothing(@TempDir Path tmp) throws Exception {
+        var rig = new LoopRig(tmp, List.of());
+        var spec = spec();
+        spec.put("name", "router_check");
+        spec.put("description", "Checks the router and mails ops0@example.com; invoices to CZ65 0800 0000 1920 0014 5399.");
+        rig.skills.source = name -> "import json\n\ndef run(params):\n    return {'output': 0, 'success': False}\n";
+        AgentContext ctx = task();
+        ctx.trajectory().record(new AgentAction("router_check", Map.of(), null), AgentObservation.failure("router_check", "0", 5));
+        rig.cloud.codegen.add(finished(module("")));
+        assertNull(rig.loop.generateSkillCode(spec, ctx).error());
+        String sent = everything(rig.cloud.calls("codegen").get(0));
+        assertFalse(sent.contains("ops0@example.com"), "address in clear: " + sent);
+        assertFalse(sent.contains("0800 0000 1920"), "IBAN in clear: " + sent);
+        // Mutation: filter each declared stretch apart -> the address and the IBAN, cut at every "0", go out.
+    }
+
+    @Test
+    @DisplayName("F9: a fix on the local model is shown skill.py, not the copy with placeholders: nothing on that path would put them back")
+    void aLocalFixIsShownTheCode(@TempDir Path tmp) throws Exception {
+        var local = LocalModeTest.localModel();
+        var rig = new LoopRig(tmp, List.of(), 600, local);
+        rig.cloud.codegen.add(LocalModeTest.noInternet());
+        rig.cloud.codegen.add(LocalModeTest.noInternet());
+        String onDisk = "import json\nNET = 'ExampleHome5G'\n\ndef run(params):\n    return {'output': NET, 'success': True}\n";
+        rig.skills.source = name -> onDisk;
+        rig.skills.asWritten = name -> onDisk.replace("ExampleHome5G", "<ssid_1>");
+        // The local model keeps the line it was shown.
+        local.codegen.add(c -> {
+            String shown = LocalModeTest.all(local.calls("codegen").getLast());
+            String line = shown.contains("NET = 'ExampleHome5G'") ? "NET = 'ExampleHome5G'" : "NET = '<ssid_1>'";
+            return com.ownclaw.llm.Replies.of("```python\nimport json\n" + line
+                    + "\n\ndef run(params):\n    return {'output': NET + '!', 'success': True}\n```\n", 100, 100, 0, 0, "end_turn");
+        });
+        var spec = spec();
+        spec.put("name", "net_report");
+        AgentLoop.Codegen out = rig.loop.generateSkillCode(spec, task());
+        assertNull(out.error(), out.error());
+        assertTrue(String.valueOf(out.params().get("code")).contains("NET = 'ExampleHome5G'"),
+                "skill.py written with a placeholder in it: " + out.params().get("code"));
+        // Mutation: show the local model the copy -> skill.py holds NET = '<ssid_1>'.
+    }
+
+    @Test
+    @DisplayName("F5: the copy is one account's placeholders: a fix by another account -- the owner -- is shown skill.py, never the copy read in its own table")
+    void theCopyIsTheAuthors(@TempDir Path tmp) throws Exception {
+        SkillManager skills = SyntaxCheckTest.manager(tmp);
+        String code = "import json\n\nNET = 'ExampleHome5G'\n\ndef run(params):\n    return {'output': NET, 'success': True}\n";
+        var params = new java.util.HashMap<String, Object>(Map.of("name", "net_report", "description", "Reports the network.",
+                "parameters", "{}", "code", code));
+        assertTrue(skills.createSkill(params, code.replace("ExampleHome5G", "<ssid_1>"), "author", () -> false, () -> { })
+                .startsWith("Skill 'net_report' created"));
+        assertNotNull(skills.readAsWritten("net_report", "author"));
+        assertNull(skills.readAsWritten("net_report", "owner"), "the author's <ssid_1> is the owner's own network in his table");
+        // Mutation: keep no account with the copy -> the owner's fix is shown the author's placeholders.
+    }
+
+    @Test
+    @DisplayName("pre-existing (a): a value goes back into the requirements only as one plain token -- not a line, an option or a reference")
+    void requirementsTakePlainTokensOnly(@TempDir Path tmp) throws Exception {
+        for (String value : List.of("-e git+https://example.com/x.git", "requests\n--index-url https://example.com/simple",
+                "x@https://example.com/x.whl", "a b", "pkg;os_name=='nt'")) {
+            var r = new Redactor(null);
+            var rig = new LoopRig(tmp.resolve(String.valueOf(Math.abs(value.hashCode()))), List.of());
+            var spec = spec();
+            spec.put("description", "Uses the package ssid=\"" + value.replace("\n", "\\n") + "\".");
+            rig.cloud.codegen.add(c -> {
+                String shown = rig.cloud.calls("codegen").get(0).messages().get(1).content();
+                var m = java.util.regex.Pattern.compile("(<ssid_\\d+>)").matcher(shown);
+                assertTrue(m.find(), "premise: learned: " + shown);
+                return ends("```python\nimport json\n\ndef run(params):\n    return {'output': '', 'success': True}\n```\n\n"
+                        + "```requirements\n" + m.group(1) + "\n```\n").answer(c);
+            });
+            AgentLoop.Codegen out = rig.loop.generateSkillCode(spec, task());
+            assertNotNull(out.error(), value + " -> " + (out.params() == null ? null : out.params().get("requirements")));
+            assertTrue(out.error().contains("not a plain package name or version"), out.error());
+        }
+        var rig = new LoopRig(tmp.resolve("plain"), List.of());
+        var spec = spec();
+        spec.put("description", "Uses the host ssid=\"pypi-mirror.example\".");
+        rig.cloud.codegen.add(c -> {
+            String shown = rig.cloud.calls("codegen").get(0).messages().get(1).content();
+            var m = java.util.regex.Pattern.compile("(<ssid_\\d+>)").matcher(shown);
+            assertTrue(m.find(), shown);
+            return ends("```python\nimport json\n\ndef run(params):\n    return {'output': '', 'success': True}\n```\n\n"
+                    + "```requirements\n" + m.group(1) + "\n```\n").answer(c);
+        });
+        AgentLoop.Codegen plain = rig.loop.generateSkillCode(spec, task());
+        assertNull(plain.error(), plain.error());
+        assertEquals("pypi-mirror.example", plain.params().get("requirements"));
+        // Mutation: put the values back into the requirements as text -> a line of pip options is added.
+    }
+
+    @Test
+    @DisplayName("F8: every form the restore writes a value in -- either quote, f-string text, bytes, a comment, after an octal escape -- is found by the code pass, whatever the Unicode")
+    void theCodePassFindsEveryForm(@TempDir Path tmp) throws Exception {
+        SkillManager python = SyntaxCheckTest.manager(tmp.resolve("python"));
+        var r = new Redactor(null);
+        var wrong = new ArrayList<String>();
+        for (String value : List.of("Kavárna Wi-Fi", "Example Guest's WiFi", "a\"b'c\\d", "tab\tand\nline", "{ExampleNet}",
+                "🫨 Net", "007-net", "NUL\u0000x")) {
+            String user = "u" + Math.abs(value.hashCode());
+            r.filter(user, "ssid=\"" + value.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n").replace("\t", "\\t")
+                    .replace("\u0000", "\\u0000") + "\"", Map.of(), new Redactor.Tally());
+            String ph = r.filterCode(user, "X = '" + value.replace("\\", "\\\\").replace("'", "\\'") + "'", Map.of(), new Redactor.Tally(), false);
+            var m = java.util.regex.Pattern.compile("<ssid_\\d+>").matcher(ph);
+            if (!m.find()) {
+                wrong.add("not learned: " + value + " -> " + ph);
+                continue;
+            }
+            String p = m.group();
+            String asWritten = "import json\n\n# Seen: " + p + "\nA = '" + p + "'\nB = \"" + p + "\"\nC = b'" + p + "'\n"
+                    + "D = f'{1}" + p + "'\nE = " + "'''" + p + "'''" + "\nF = r'" + p + "'\nG = '\\0" + p + "'\n";
+            CodeValues.Restored restored = python.restoreValues(asWritten, Map.of(p, value));
+            if (restored.code() == null) {
+                wrong.add(value + ": not restored: " + restored.refused() + " " + restored.failed());
+                continue;
+            }
+            String sent = r.filterCode(user, restored.code(), Map.of(), new Redactor.Tally(), false);
+            for (String form : Redactor.restoredForms(value)) {
+                if (form.length() >= 3 && sent.contains(form)) wrong.add(value + ": [" + form + "] in clear in " + sent);
+            }
+            for (String line : List.of("# Seen: " + p + "\n", "D = f'{1}" + p + "'\n", "E = " + "\'\'\'" + p + "\'\'\'\n",
+                    "G = '\\0" + p + "'\n")) {
+                if (!sent.contains(line)) wrong.add(value + ": [" + line.strip() + "] not in " + sent);
+            }
+            if (!sent.contains(" = b'" + p + "'") && !sent.contains(" = b\"" + p + "\"")) wrong.add(value + ": bytes: " + sent);
+        }
+        assertEquals(List.of(), wrong);
+        // Mutation: look for the value as written only -> its bytes form, and its escaped forms, go out.
     }
 }

@@ -55,22 +55,28 @@ class SkillUsageLabelTest {
         var curator = new SkillCuratorService(jdbc, null, null);
 
         curator.recordUsage("imap_fetch", "u1", "t1", false, 10,
-                Map.of("folder", "INBOX"), "Traceback: mailbox petr@example.com", Label.PRIVATE);
+                Map.of("folder", "INBOX"), "Traceback: mailbox mailbox@example.com", Label.PRIVATE);
         curator.recordUsage("imap_fetch", "u1", "t2", false, 10,
                 Map.of("folder", "INBOX"), "Traceback: KeyError 'uid'", Label.PUBLIC);
         curator.recordUsage("imap_fetch", "u1", "t3", false, 10,
                 Map.of("folder", "INBOX"), "old row, no label");   // pre-slice shape
 
-        var evidence = curator.failures("imap_fetch");
-        assertEquals(1, evidence.size(), "one PUBLIC row; the private one and the unlabelled one stay out");
+        // Another account's run of the same skill: its parameters and what it printed are its own.
+        curator.recordUsage("imap_fetch", "u2", "t4", false, 10,
+                Map.of("folder", "Other"), "Traceback: KeyError 'other'", Label.PUBLIC);
+
+        var evidence = curator.failures("imap_fetch", "u1");
+        assertEquals(1, evidence.size(), "one PUBLIC row of u1's; the private one, the unlabelled one and u2's stay out");
         assertEquals("Traceback: KeyError 'uid'", evidence.get(0).get("error"));
 
         Integer all = jdbc.queryForObject("SELECT count(*) FROM skill_usage WHERE success = 0", Integer.class);
-        assertEquals(3, all, "nothing is dropped from the table itself — it is the owner's diagnostic");
+        assertEquals(4, all, "nothing is dropped from the table itself — it is the owner's diagnostic");
         String priv = jdbc.queryForObject(
                 "SELECT error FROM skill_usage WHERE label = 'PRIVATE'", String.class);
-        assertTrue(priv.contains("petr@example.com"), "stored in full, read through ops");
+        assertTrue(priv.contains("mailbox@example.com"), "stored in full, read through ops");
+        assertEquals(1, curator.failures("imap_fetch", "u2").size(), "u2's own, for u2's fix");
         // Mutation: drop the WHERE label clause -> three rows come back.
+        // Mutation: drop the user_id clause -> u2's failure is shown to u1's fix.
     }
 
     @Test
@@ -86,7 +92,7 @@ class SkillUsageLabelTest {
         }
         curator.recordUsage("imap_fetch", "u1", "t3", false, 10, Map.of("folder", "INBOX"), "timed out", Label.PUBLIC);
 
-        var failures = curator.failures("imap_fetch");
+        var failures = curator.failures("imap_fetch", "u1");
         assertEquals(2, failures.size(), "the same call failing the same way is one row");
         assertEquals("timed out", failures.get(0).get("error"), "newest first");
         assertEquals(error, failures.get(1).get("error"), "the error, whole");

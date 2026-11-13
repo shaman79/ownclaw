@@ -172,7 +172,7 @@ public final class CloudGateway implements LlmProvider {
             // are only where the provider splits it (LlmMessage#marked), and nothing the filter
             // removes is let off because a marker stands in it -- and goes on marked.
             String content = m.authored() ? Redactor.filterAuthored(m.content(), vault, tally)
-                    : filtered(user, m.content(), vault, tally, egress.skillCode());
+                    : redactor.filter(user, m.content(), vault, tally, egress.skillCode());
             filteredMessages.add(new LlmMessage(m.role(), content, m.authored(), m.marked()));
         }
         List<ToolSpec> tools = cfg.tools();
@@ -338,42 +338,6 @@ public final class CloudGateway implements LlmProvider {
             return response.requireComplete(providerName);
         }
         return restoredReply(user, response).requireComplete(providerName);
-    }
-
-    /**
-     * A part's text as the filter sends it, and every stretch of it that is skill code the task
-     * declared ({@link EgressContext#skillCode}) as code ({@link Redactor#filterCode}): every value
-     * the user's table holds replaced wherever it stands, nothing learned -- placeholders kept where
-     * it is the code exactly as the model wrote it. The rest of the part, in order, as any text.
-     */
-    private String filtered(String user, String text, Map<String, String> vault, Redactor.Tally tally,
-                            Map<String, Boolean> skillCode) {
-        if (text == null || text.isEmpty() || skillCode.isEmpty()) return redactor.filter(user, text, vault, tally);
-        var spans = new ArrayList<int[]>();   // start, end, as written (1) or not (0)
-        var codes = new ArrayList<>(skillCode.keySet());
-        codes.sort(java.util.Comparator.comparingInt(String::length).reversed());
-        var taken = new java.util.BitSet(text.length());
-        for (String code : codes) {
-            if (code.isEmpty()) continue;
-            for (int at = text.indexOf(code); at >= 0; at = text.indexOf(code, at + 1)) {
-                int end = at + code.length();
-                int set = taken.nextSetBit(at);
-                if (set >= 0 && set < end) continue;
-                taken.set(at, end);
-                spans.add(new int[] {at, end, Boolean.TRUE.equals(skillCode.get(code)) ? 1 : 0});
-            }
-        }
-        if (spans.isEmpty()) return redactor.filter(user, text, vault, tally);
-        spans.sort(java.util.Comparator.comparingInt((int[] a) -> a[0]));
-        var sb = new StringBuilder(text.length());
-        int from = 0;
-        for (int[] span : spans) {
-            if (span[0] > from) sb.append(redactor.filter(user, text.substring(from, span[0]), vault, tally));
-            sb.append(redactor.filterCode(user, text.substring(span[0], span[1]), vault, tally, span[2] == 1));
-            from = span[1];
-        }
-        if (from < text.length()) sb.append(redactor.filter(user, text.substring(from), vault, tally));
-        return sb.toString();
     }
 
     /**

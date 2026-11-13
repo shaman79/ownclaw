@@ -160,7 +160,7 @@ final class LoopRig {
         volatile Function<String, String> asWritten = name -> null;
         final List<String> keptAsWritten = new java.util.concurrent.CopyOnWriteArrayList<>();
 
-        @Override public String readAsWritten(String name) { return asWritten.apply(name); }
+        @Override public String readAsWritten(String name, String userId) { return asWritten.apply(name); }
         @Override public String readSkillCode(String name) { return source.apply(name); }
         @Override public String readSkill(String name) { return files.apply(name); }
         @Override String checkPythonSyntax(String code) { return syntax.apply(code); }
