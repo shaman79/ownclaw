@@ -596,30 +596,28 @@ class SkillSelfRepairTest {
     }
 
     @Test
-    @DisplayName("progress: a repair that changed the code, then the problem again -- a new repair, given the last one's report")
+    @DisplayName("progress: after a repair that fixed and checked the skill, a later problem starts a new repair, given its report")
     void progressStartsAnotherWithTheReport(@TempDir Path tmp) throws Exception {
         fix = new Fix(tmp);
-        fix.fixedOutput = DEGRADED_OTHERWISE;   // the change did something: the output is not the same
         fix.rig.queue.start();
-        // Changed, not run again: unverified.
         fix.scriptMenu(true);
-        scriptFixAndCheck(fix.rig, null, respond("I added browser headers; I did not run it again."));
+        scriptFixAndCheck(fix.rig, Map.of("debug", true), verdict("It asks as a browser now; checked.", "passed"));
         fix.unattended(TASK);
         var first = fix.ended(fix.lastId());
-        assertEquals("unverified", first.get("outcome"));
-        String note = fix.told().get(fix.told().size() - 1);
-        assertTrue(note.contains("Changed, but not checked: the repair did not run it again after its change and say the check passed."), note);
+        assertEquals("fixed", first.get("outcome"));
 
-        fix.menuRun(true);
-        var rows = fix.repairs();
-        assertEquals(2, rows.size(), rows.toString());
-        var second = rows.get(1);
+        // Weeks later the site changes again.
+        fix.menuOutput.set(DEGRADED_OTHERWISE);
+        fix.scriptMenu(true);
+        fix.rig.cloud.think.add(respond("Blocked another way; nothing to change yet."));
+        fix.unattended(TASK);
+        var second = fix.ended(fix.lastId());
         assertEquals(first.get("id"), second.get("previous_id"));
         assertNotEquals(first.get("repair_task_id"), second.get("repair_task_id"));
         String goal = (String) second.get("goal");
         assertTrue(goal.contains(": the report of the previous self-repair of this skill (task "
                 + first.get("repair_task_id") + ")"), goal);
-        assertTrue(String.valueOf(second.get("evidence")).contains("I added browser headers; I did not run it again."),
+        assertTrue(String.valueOf(second.get("evidence")).contains("It asks as a browser now; checked."),
                 String.valueOf(second.get("evidence")));
     }
 

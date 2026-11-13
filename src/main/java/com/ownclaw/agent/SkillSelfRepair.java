@@ -54,12 +54,14 @@ import java.util.function.BiPredicate;
  *       the task with its output when that is PUBLIC and its descriptor when it is not.</li>
  *   <li>What a repair may do ({@link #outOfScope}): change its one skill, and call no tool that has
  *       side effects -- refused in the loop's steps and in every delegated call alike.</li>
- *   <li>When none starts: while the skill is still what the last repair left and no clean run has
- *       come since, the problem again is no progress when that repair changed nothing; or, a repair
- *       that completed, when it brought back a version the skill had had, or the skill fails again
- *       exactly as it did before the change -- the owner is told, once, and it is left to him. Any
- *       other change followed by the problem again is progress: the next repair is given its
- *       report. A repair that did not finish is no verdict. No count of attempts ends anything.</li>
+ *   <li>When none starts: only a VERIFIED fix earns another automatic repair. After a repair that
+ *       ended {@code fixed} -- it ran the skill after its change, the run worked, and its check said
+ *       passed -- a later problem starts a new one, given its report. After one that ended any
+ *       other judged way -- changed nothing, could not check its change, or checked it and still saw
+ *       the problem -- the problem again starts none: the owner is told once, and it is left to him
+ *       until a run of the skill goes well (a completed run whose model reported nothing of it) or
+ *       the skill is changed. A repair that did not finish -- stopped, cut short, interrupted, never
+ *       started -- is no verdict. No count of attempts ends anything.</li>
  *   <li>How it ended ({@link #finish}), by code: the code's hash before and after, whether the
  *       skill was run after its last change, and whether that run worked and the repair's own
  *       answer named no problem with it. The owner is told through the channels unattended
@@ -469,10 +471,9 @@ public class SkillSelfRepair {
      * no longer stand in the way of the next repair -- the problem they were about went away.
      */
     private void cleared(AgentContext ctx, Map<String, Found> found) {
-        // Every finished repair of it whose problem came with another output: what they changed is
-        // history from here, and the versions they saw are no longer "had before" (hadBefore). A run
-        // that gave the same output as the one a repair started on is no clean run, whether or not its
-        // model said so: the record stays.
+        // Every finished repair of it: a run that went well -- its last call worked, and its model, asked
+        // for what did not do its whole job, named nothing -- is what lets the next problem start a
+        // repair again after one that could not show progress.
         var last = new LinkedHashMap<String, Artifact>();
         for (Artifact a : ctx.artifacts()) last.put(a.tool(), a);
         for (var e : last.entrySet()) {
@@ -498,9 +499,6 @@ public class SkillSelfRepair {
         String problem = String.join(" ", f.what());
         String tellOwner = null;
         String line;
-        // What the skill gave in this task, as its last call there left it: what tells a change that changed
-        // nothing it does from one that did (sameOutput), and a clean run from the same problem (cleared).
-        String output = f.calls().isEmpty() ? null : failureKey(f.calls().getLast());
         synchronized (lock) {
             String code = codeHash(skill);
             // One repair of a skill at a time, whoever's: a skill's code is global. Another account's
@@ -527,22 +525,18 @@ public class SkillSelfRepair {
             Map<String, Object> last = row("WHERE skill_name = ? AND user_id = ? AND outcome NOT IN (?, ?, ?, ?, ?) "
                     + "ORDER BY id DESC LIMIT 1", skill, ctx.userId(), RUNNING, INTERRUPTED, NOT_STARTED, STOPPED,
                     NOT_FINISHED);
-            // No progress, while the skill is still what the last repair left and no run since went
-            // well: that repair changed nothing, or it brought back a version the skill had already had
-            // since its last clean run -- A, B, A is going round, as the code-writing loop's own rule
-            // has it. No count: the next repair that changes it to a version not seen is progress.
-            boolean stuck = last != null && last.get("cleared_at") == null && Objects.equals(code, last.get("code_after"));
-            boolean changedNothing = stuck && (UNCHANGED.equals(last.get("outcome")) || GAVE_UP.equals(last.get("outcome")));
-            // A verdict only of a repair that completed: one cut off after a change never really tried.
-            boolean judged = last != null && last.get("completed") instanceof Number c && c.intValue() != 0;
-            boolean cameBack = stuck && !changedNothing && judged && changed(last)
-                    && hadBefore(skill, ctx.userId(), id(last)).contains(str(last, "code_after"));
-            // And a change that changed nothing the skill gives: the problem is back with the very output
-            // the last repair started on -- what a skill a repair may not run shows of a rewrite that
-            // missed. A mechanism, not a count.
-            boolean sameOutput = stuck && !changedNothing && judged && changed(last) && output != null
-                    && output.equals(last.get("output_hash"));
-            boolean noProgress = changedNothing || cameBack || sameOutput;
+            // Only a VERIFIED fix earns another automatic repair. While the skill is still what the last
+            // repair left and no clean run has come since, a problem after a repair that ended any other
+            // judged way -- changed nothing, could not check its change, or checked it and still saw the
+            // problem -- starts none: the owner is told once, and it is left to him until a run of the
+            // skill goes well or the skill is changed. A repair that did not finish is no verdict. A
+            // mechanism, no count: no key of "the same failure" is reliable -- dates, timestamps and
+            // what a skill prints change every run, and a private failure has none to give.
+            boolean current = last != null && last.get("cleared_at") == null
+                    && Objects.equals(code, last.get("code_after"));
+            boolean judged = last != null && (GAVE_UP.equals(last.get("outcome"))
+                    || last.get("completed") instanceof Number c && c.intValue() != 0);
+            boolean noProgress = current && judged && !FIXED.equals(last.get("outcome"));
             if (noProgress && GAVE_UP.equals(last.get("outcome"))) {
                 addProblem(id(last), ctx, problem);
                 log.info("Task {}: '{}' showed its problem again; self-repair left it to the owner before, so nothing "
@@ -553,29 +547,31 @@ public class SkillSelfRepair {
             if (noProgress) {
                 jdbc.update("""
                         INSERT INTO skill_repairs (user_id, skill_name, trigger_task_id, trigger_message, trigger_at,
-                            problem, side_effects, code_before, code_after, outcome, report, previous_id,
-                            output_hash, ended_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+                            problem, side_effects, code_before, code_after, outcome, report, previous_id, ended_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
                         """, ctx.userId(), skill, ctx.taskId(), ctx.originalMessage(), startedAt(ctx), problem,
                         Declared.of(tools.find(skill).orElse(null)).sideEffectsText(), code, code, GAVE_UP,
-                        last.get("report"), id(last), output);
-                String did = cameBack ? "brought back a version of the skill it had had before"
-                        : sameOutput ? "changed it, and it still gives the same output as before the change"
-                        : "changed nothing";
+                        last.get("report"), id(last));
+                String did = switch (String.valueOf(last.get("outcome"))) {
+                    case UNVERIFIED -> "changed it, but could not check the change";
+                    case NOT_FIXED -> "changed it, and its check still showed the problem";
+                    default -> "changed nothing";
+                };
                 log.warn("Task {}: '{}' showed its problem again after a repair that {} (task {}): no repair starts, "
                         + "the owner is told.", ctx.taskId(), skill, did, last.get("repair_task_id"));
                 event(ctx.userId(), ctx.taskId(), "left", skill, problem, str(last, "repair_task_id"), ctx.taskId());
                 tellOwner = "Self-repair could not fix " + skill + ". After " + trigger(ctx.originalMessage(),
                         startedAt(ctx)) + " the problem is back: " + problem + "\n\nThe last repair (task "
-                        + last.get("repair_task_id") + ") " + did + ", so self-repair does not try again: it is "
-                        + "left to you. That repair's report:\n\n" + last.get("report");
+                        + last.get("repair_task_id") + ") " + did + ", and only a fix self-repair has checked earns "
+                        + "another try: it is left to you, until a run of the skill goes well or the skill is changed. "
+                        + "That repair's report:\n\n" + last.get("report");
                 line = "_🔧 Self-repair is not tried again for " + skill + ": its last repair (task "
                         + last.get("repair_task_id") + ") " + did + ". You were told; it is left to you._";
             } else {
                 Map<String, Object> previous = last != null && changed(last)
                         && List.of(FIXED, UNVERIFIED, NOT_FIXED).contains(String.valueOf(last.get("outcome")))
                         ? last : null;
-                line = start(ctx, f, problem, code, previous, output);
+                line = start(ctx, f, problem, code, previous);
             }
         }
         if (tellOwner != null) {
@@ -587,20 +583,6 @@ public class SkillSelfRepair {
     /** Whether a finished repair changed the skill: its own change, recorded as it made it ({@link #changedByRepair}). */
     private static boolean changed(Map<String, Object> row) {
         return row.get("code_after") != null && !Objects.equals(row.get("code_before"), row.get("code_after"));
-    }
-
-    /**
-     * The versions of the skill this account's repairs saw since its last clean run, up to repair
-     * {@code upTo}: what each found as it began, and what each before that one left.
-     */
-    private java.util.Set<String> hadBefore(String skill, String userId, long upTo) {
-        var had = new java.util.HashSet<String>();
-        for (var r : jdbc.queryForList("SELECT id, code_before, code_after FROM skill_repairs WHERE skill_name = ? "
-                + "AND user_id = ? AND cleared_at IS NULL AND id <= ?", skill, userId, upTo)) {
-            if (r.get("code_before") != null) had.add(String.valueOf(r.get("code_before")));
-            if (id(r) < upTo && r.get("code_after") != null) had.add(String.valueOf(r.get("code_after")));
-        }
-        return had;
     }
 
     /**
@@ -620,8 +602,7 @@ public class SkillSelfRepair {
     }
 
     /** Record a repair, mark both tasks, and queue it. Held under the lock. */
-    private String start(AgentContext ctx, Found f, String problem, String code, Map<String, Object> previous,
-                         String output) {
+    private String start(AgentContext ctx, Found f, String problem, String code, Map<String, Object> previous) {
         String skill = f.skill();
         Tool tool = tools.find(skill).orElse(null);
         Declared declared = Declared.of(tool);
@@ -641,11 +622,11 @@ public class SkillSelfRepair {
         long id = insertReturningId("""
                 INSERT INTO skill_repairs (user_id, skill_name, trigger_task_id, trigger_message, trigger_at,
                     repair_task_id, problem, goal, evidence, declared, side_effects, code_before, outcome,
-                    previous_id, local_only, output_hash)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    previous_id, local_only)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, ctx.userId(), skill, ctx.taskId(), ctx.originalMessage(), startedAt(ctx), taskId, problem, goal,
                 json(evidence), json(declared), declared.sideEffectsText(), code, RUNNING,
-                previous == null ? null : id(previous), localOnly ? 1 : 0, output);
+                previous == null ? null : id(previous), localOnly ? 1 : 0);
         var job = new Job(id, skill, taskId, declared, localOnly, evidence);
         log.info("Task {}: '{}' did not do its whole job -- self-repair {} started as task {}.", ctx.taskId(), skill,
                 id, taskId);
@@ -875,26 +856,29 @@ public class SkillSelfRepair {
                 ended.ownerText() == null ? null : head + ended.ownerText() + rerun);
     }
 
+    /** The rule, for the owner, after a repair that ended without a fix it checked. */
+    static final String LEFT = " Only a fix self-repair has checked earns another try: if the problem shows again, it "
+            + "is left to you -- until a run of the skill goes well, or the skill is changed.";
+
     /** What an outcome is, for the owner. */
     private static String said(String outcome, String notRun, AgentResult ended) {
         boolean completed = ended.terminationReason() == TerminationReason.COMPLETED;
         String which = completed ? "What the repair said:" : "How the repair ended:";
         return switch (outcome) {
-            case FIXED -> "Fixed and checked: it was run again, and the problem is gone. " + which;
+            case FIXED -> "Fixed and checked: it was run again, and the problem is gone. If a problem shows later, "
+                    + "self-repair tries again. " + which;
             case UNVERIFIED -> (!completed
                     ? "Changed, but the repair did not finish, so the change was not checked."
-                    : notRun != null ? "Changed, but not run again to check it: " + notRun + "."
+                    + " The next time the problem shows, a repair starts again."
+                    : (notRun != null ? "Changed, but not run again to check it: " + notRun + "."
                     : "Changed, but not checked: the repair did not run it again after its change and say the check "
-                            + "passed.") + " " + which;
-            case NOT_FIXED -> "Changed, but run again it still shows the problem. If the problem shows again, "
-                    + "self-repair tries again with this report -- unless the skill fails again exactly as it did "
-                    + "before this change: then it is left to you. " + which;
+                            + "passed.") + LEFT) + " " + which;
+            case NOT_FIXED -> "Changed, but run again it still shows the problem." + LEFT + " " + which;
             case STOPPED -> "Stopped before it changed the skill. The next time the problem shows, a repair "
                     + "starts again. " + which;
             case NOT_FINISHED -> "The repair did not finish, and changed nothing. The next time the problem shows, "
                     + "a repair starts again. " + which;
-            default -> "Not fixed: the repair did not change the skill. If the problem comes back, self-repair "
-                    + "does not try again: it is left to you. " + which;
+            default -> "Not fixed: the repair did not change the skill." + LEFT + " " + which;
         };
     }
 
@@ -1159,37 +1143,6 @@ public class SkillSelfRepair {
     private void addProblem(long id, AgentContext ctx, String problem) {
         jdbc.update("UPDATE skill_repairs SET added_problems = COALESCE(added_problems || char(10), '') || ? "
                 + "WHERE id = ?", "task " + ctx.taskId() + ": " + problem, id);
-    }
-
-    /** A Python traceback: what a skill that raised returns, from its harness. */
-    private static final java.util.regex.Pattern TRACEBACK = java.util.regex.Pattern.compile(
-            "Traceback \\(most recent call last\\):");
-
-    /**
-     * What a failed call failed WITH, as a key that is the same for the same failure, or null for a call
-     * that worked: identical clean outputs -- a constant {"ok": true, "sent": 1} -- say nothing of a
-     * problem, so they never block a clean run's clearing nor read as "the same problem". A skill that
-     * raised is keyed by its exception and message, the traceback's last line: its frames name the
-     * harness's runner file, a new random name on every run, and line numbers. Anything else, with the
-     * runner's name, a file and line, and the "ERROR: " a delegation puts in front, taken out. None of a
-     * PRIVATE result: a hash of its bytes in skill_repairs -- which the ops API's SQL reads -- gives a
-     * short private output (a count, a balance) away to whoever hashes the candidates.
-     */
-    static String failureKey(Artifact a) {
-        if (a == null || a.succeeded() || a.isPrivate()) return null;
-        String text = a.output().strip();
-        if (text.startsWith("ERROR: ")) text = text.substring("ERROR: ".length());
-        var traceback = TRACEBACK.matcher(text);
-        if (traceback.find()) {
-            String raised = "";
-            for (String line : text.substring(traceback.end()).split("\\R")) {
-                if (!line.isBlank() && !Character.isWhitespace(line.charAt(0))) raised = line.strip();
-            }
-            if (!raised.isEmpty()) return sha256(raised);
-        }
-        return sha256(text.replaceAll("_runner_[0-9a-f]{32}", "_runner_")
-                .replaceAll("File \"[^\"]*\", line \\d+", "File")
-                .replaceAll("line \\d+", "line"));
     }
 
     /** The sha256 of the skill's authored files -- skill.py, SKILL.yaml, requirements.txt -- or null when it has none. */

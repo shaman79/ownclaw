@@ -262,40 +262,6 @@ class SelfRepairReviewTest {
         assertEquals("unchanged", fix.ended(fix.lastId()).get("outcome"));
     }
 
-    // F6: progress was any change of the code's hash, so A -> B -> A repaired for ever.
-    @Test
-    @DisplayName("F6: a repair that brings back a version the skill had since its last clean run is no progress: the next problem is left to the owner")
-    void aCycleIsNoProgress(@TempDir Path tmp) throws Exception {
-        fix = new Fix(tmp);
-        fix.rig.queue.start();
-        for (String v : new String[] {"# A", "# B", "# A"}) {
-            // Each version degrades its own way, so it is the version coming back that stops it.
-            fix.fixedOutput = DEGRADED.replace("logo.png", "logo-" + v.substring(2) + ".png");
-            fix.scriptMenu(true);
-            fix.rig.cloud.think.add(LoopRig.call(AgentAction.SKILL_CREATE, java.util.Map.of("name", MENU,
-                    "description", "retry " + v, "parameters", "{}")));
-            fix.rig.cloud.codegen.add(SkillCodegenTest.finished(SkillCodegenTest.module(v)));
-            fix.rig.cloud.think.add(LoopRig.call(MENU, java.util.Map.of()));
-            fix.rig.cloud.think.add(verdict("Still blocked.", "failed"));
-            fix.unattended(TASK);
-            assertEquals("not_fixed", fix.ended(fix.lastId()).get("outcome"));
-        }
-        var rows = fix.repairs();
-        assertEquals(rows.get(0).get("code_after"), rows.get(2).get("code_after"), "A again");
-
-        // The fourth day: no fourth repair.
-        fix.scriptMenu(true);
-        AgentResult r = fix.unattended(TASK);
-        rows = fix.repairs();
-        assertEquals(4, rows.size(), rows.toString());
-        assertEquals("gave_up", rows.get(3).get("outcome"));
-        assertEquals(0, fix.rig.queue.getQueueSize());
-        assertTrue(r.response().contains("brought back a version of the skill it had had before"), r.response());
-        String note = fix.told().get(fix.told().size() - 1);
-        assertTrue(note.contains("Self-repair could not fix " + MENU), note);
-        assertTrue(note.contains("brought back a version of the skill it had had before"), note);
-    }
-
     // 10: the hash was skill.py's alone, and a change by another task during the repair counted as the repair's.
     @Test
     @DisplayName("10: a change another task makes while the repair runs is not the repair's")
@@ -320,21 +286,23 @@ class SelfRepairReviewTest {
     void localOnlyReportStaysLocal(@TempDir Path tmp) throws Exception {
         var local = LocalModeTest.localModel();
         fix = new Fix(tmp, null, registry -> null, local);
-        fix.fixedOutput = DEGRADED_OTHERWISE;
         fix.rig.queue.start();
         local.think.add(LoopRig.call(MENU, java.util.Map.of()));
         local.think.add(problems("Cafe Two's menu could not be read.", List.of(java.util.Map.of("tool", MENU, "what", PROBLEM))));
+        // The local-only repair fixes it and checks it -- only a verified fix earns the next repair.
         local.think.add(LoopRig.call(AgentAction.SKILL_CREATE, java.util.Map.of("name", MENU, "description", "retry",
                 "parameters", "{}")));
         local.codegen.add(SkillCodegenTest.finished(SkillCodegenTest.module("# v2")));
-        local.think.add(respond("Changed headers. LOCAL-ONLY-MARKER-7731 was in what I read."));
+        local.think.add(LoopRig.call(MENU, java.util.Map.of()));
+        local.think.add(verdict("Changed headers; checked. LOCAL-ONLY-MARKER-7731 was in what I read.", "passed"));
         fix.rig.loop.executeFull("u1", TASK, true, null, List.of(), null, null,
                 new com.ownclaw.conversation.ChatOptions("free", null));
         var first = fix.ended(fix.lastId());
-        assertEquals("unverified", first.get("outcome"));
+        assertEquals("fixed", first.get("outcome"));
         assertEquals(1, ((Number) first.get("local_only")).intValue());
 
-        // The next run is on the cloud (the default): the problem again, and a repair that may use it.
+        // Weeks later, on the cloud (the default): a problem again, and a repair that may use it.
+        fix.menuOutput.set(DEGRADED_OTHERWISE);
         fix.scriptMenu(true);
         fix.rig.cloud.think.add(respond("Nothing more."));
         fix.unattended(TASK);
@@ -440,86 +408,6 @@ class SelfRepairReviewTest {
                         + "')\nValueError: " + error + "\n"));
     }
 
-    // R3-2 (P5, kept): a skill a repair may not run fails again exactly as before the change: no progress.
-    @Test
-    @DisplayName("R3-2: a skill failing again exactly as before a completed repair's change is no progress: one repair, then it is left to the owner")
-    void theSameFailureAfterAChangeIsNoProgress(@TempDir Path tmp) throws Exception {
-        var calls = new java.util.concurrent.CopyOnWriteArrayList<java.util.Map<String, Object>>();
-        fix = new Fix(tmp, raising("page_probe", "HTTP 455 Blocked", calls));
-        fix.rig.queue.start();
-        int repairs = 0;
-        for (int day = 1; day <= 4; day++) {
-            fix.rig.cloud.think.add(LoopRig.call("page_probe", java.util.Map.of()));
-            fix.rig.cloud.think.add(respond("The page could not be probed."));
-            if (day == 1) {
-                fix.rig.cloud.think.add(LoopRig.call(AgentAction.SKILL_CREATE, java.util.Map.of("name", "page_probe",
-                        "description", "Probe the page; retry", "parameters", "{}")));
-                fix.rig.cloud.codegen.add(SkillCodegenTest.finished(SkillCodegenTest.module("# v2")));
-                fix.rig.cloud.think.add(verdict("Added a retry; not run.", "not_run"));
-            }
-            AgentResult r = fix.unattended("Using page_probe, probe the page.");
-            if (r.response().contains("Self-repair started for page_probe")) {
-                repairs++;
-                fix.ended(fix.lastId());
-            }
-        }
-        assertEquals(1, repairs, fix.repairs().toString());
-        assertEquals(List.of("unverified", "gave_up"), fix.repairs().stream().map(r -> r.get("outcome")).toList());
-        String note = fix.told().get(fix.told().size() - 1);
-        assertTrue(note.contains("changed it, and it still gives the same output as before the change"), note);
-    }
-
-    // R3-2 (B1): the same exception from the same skill hashed differently every run.
-    @Test
-    @DisplayName("R3-2 (B1): the same exception from the same skill has the same failure key run after run")
-    void theSameExceptionHasTheSameKey(@TempDir Path root) throws Exception {
-        Path generated = java.nio.file.Files.createDirectories(root.resolve("generated"));
-        var cfg = new com.ownclaw.config.OwnClawConfig();
-        cfg.getSkills().setGeneratedPath(generated.toString());
-        cfg.getSandbox().setPythonPath("python3");
-        var jail = com.ownclaw.sandbox.JailTestKit.off();
-        var pyEnv = new com.ownclaw.skills.PythonEnvironmentService(cfg, jail);
-        pyEnv.init();
-        var sandbox = new com.ownclaw.sandbox.ProcessSandbox(jail);
-        var registry = new com.ownclaw.agent.tools.ToolRegistry(List.of());
-        var dynamic = new com.ownclaw.agent.tools.DynamicSkillRegistry(cfg, registry, sandbox, null, pyEnv, null, null);
-        var manager = new SkillManager(dynamic, registry, cfg, sandbox, pyEnv, null, null);
-        var p = new java.util.LinkedHashMap<String, Object>();
-        p.put("name", "menu_probe");
-        p.put("description", "Fetch the menu.");
-        p.put("parameters", "{}");
-        p.put("code", "def run(params):\n    raise ValueError('HTTP 455 Blocked')\n");
-        assertFalse(manager.createSkill(p).startsWith("ERROR"));
-        var outputs = new java.util.ArrayList<String>();
-        for (String task : List.of("t1", "t2")) {
-            var r = registry.find("menu_probe").orElseThrow().execute(java.util.Map.of(),
-                    new com.ownclaw.agent.tools.ToolExecutionContext("u1", task, null, () -> false));
-            assertFalse(r.success());
-            outputs.add(r.output());
-        }
-        assertNotEquals(outputs.get(0), outputs.get(1), "the runner's name differs: the raw outputs do");
-        String first = SkillSelfRepair.failureKey(new Artifact("menu_probe", java.util.Map.of(), outputs.get(0), false));
-        assertEquals(first, SkillSelfRepair.failureKey(new Artifact("menu_probe", java.util.Map.of(), outputs.get(1), false)));
-        assertEquals(first, SkillSelfRepair.failureKey(new Artifact("menu_probe", java.util.Map.of(),
-                "ERROR: " + outputs.get(1), false)), "a delegation's ERROR: in front changes nothing");
-        assertNotEquals(first, SkillSelfRepair.failureKey(new Artifact("menu_probe", java.util.Map.of(),
-                outputs.get(1).replace("455 Blocked", "403 Forbidden"), false)), "another failure is another key");
-        assertNull(SkillSelfRepair.failureKey(new Artifact("menu_probe", java.util.Map.of(), "{\"ok\": true}", true)),
-                "a call that worked has none");
-        // The exception and its message are the failure; the code it was raised from, line by line, is not.
-        assertEquals(first, SkillSelfRepair.failureKey(new Artifact("menu_probe", java.util.Map.of(),
-                outputs.get(1).replace("raise ValueError('HTTP 455 Blocked')", "raise ValueError(blocked)"), false)));
-        // A failure with no traceback: the delegation's prefix, a runner's name, a file and line taken out.
-        java.util.function.Function<String, String> key = text ->
-                SkillSelfRepair.failureKey(new Artifact("menu_probe", java.util.Map.of(), text, false));
-        assertEquals(key.apply("HTTP 455 Blocked"), key.apply("ERROR: HTTP 455 Blocked"));
-        assertEquals(key.apply("exited 1: /srv/menu_probe/_runner_0123456789abcdef0123456789abcdef.py"),
-                key.apply("exited 1: /srv/menu_probe/_runner_fedcba9876543210fedcba9876543210.py"));
-        assertEquals(key.apply("SyntaxError at File \"/srv/a/skill.py\", line 3"),
-                key.apply("SyntaxError at File \"/srv/b/skill.py\", line 7"));
-        assertNotEquals(key.apply("HTTP 455 Blocked"), key.apply("HTTP 403 Forbidden"));
-    }
-
     // R3-2 (B2): a constant clean output was never cleared, and a new problem weeks later was refused.
     @Test
     @DisplayName("R3-2 (B2): days of clean runs clear a repair's record, and a new problem after them starts a repair")
@@ -550,27 +438,6 @@ class SelfRepairReviewTest {
         assertNotNull(fix.repairs().get(0).get("cleared_at"), "three clean runs cleared nothing: " + fix.repairs());
         assertTrue(day5.response().contains("Self-repair started for notify_send"),
                 "a new problem after days of clean runs was left to the owner: " + day5.response());
-    }
-
-    // R3-2 (D): 'not fixed' promised another try that the rule then refused.
-    @Test
-    @DisplayName("R3-2 (D): after 'not fixed' the owner is told what happens next, and it does")
-    void notFixedSaysWhatHappens(@TempDir Path tmp) throws Exception {
-        fix = new Fix(tmp);
-        fix.fixedOutput = DEGRADED;
-        fix.rig.queue.start();
-        fix.scriptMenu(true);
-        scriptFixAndCheck(fix.rig, java.util.Map.of("debug", true), verdict("I changed the headers, but it is still blocked.",
-                "failed"));
-        fix.unattended(TASK);
-        assertEquals("not_fixed", fix.ended(fix.lastId()).get("outcome"));
-        String promise = fix.told().get(fix.told().size() - 1);
-        assertTrue(promise.contains("If the problem shows again, self-repair tries again with this report -- unless "
-                + "the skill fails again exactly as it did before this change: then it is left to you."), promise);
-        fix.scriptMenu(true);
-        fix.rig.cloud.think.add(respond("Still blocked; nothing more to change."));
-        AgentResult next = fix.unattended(TASK);                    // the same degraded output -- it worked
-        assertTrue(next.response().contains("Self-repair started for " + MENU), next.response());
     }
 
     // R3-2 (F): a repair cut short after a partial change ended unverified, and the same output then gave up.
@@ -604,23 +471,111 @@ class SelfRepairReviewTest {
                 "a repair that never finished counted as no progress: " + next.response());
     }
 
-    // R3-4 (C): a hash of a PRIVATE result's bytes was stored, and skill_repairs is readable through the ops SQL.
+    // R4 design: only a VERIFIED fix earns another automatic repair (the review showed no "same failure" key
+    // is reliable: dates in a message, what a skill prints, a private failure with no key at all).
     @Test
-    @DisplayName("R3-4 (C): no hash of a PRIVATE result's bytes is stored in a repair's record")
-    void noHashOfAPrivateResult(@TempDir Path tmp) throws Exception {
+    @DisplayName("R4: a failure whose message changes every day, of a skill its repair cannot run, is repaired once; then it is left to the owner")
+    void aDatedFailureIsRepairedOnce(@TempDir Path tmp) throws Exception {
+        var calls = new java.util.concurrent.CopyOnWriteArrayList<java.util.Map<String, Object>>();
+        var error = new java.util.concurrent.atomic.AtomicReference<String>();
+        fix = new Fix(tmp, skill("page_probe", null, List.of(), false, calls,
+                p -> com.ownclaw.agent.tools.ToolResult.failure("ValueError: " + error.get())));
+        fix.rig.queue.start();
+        int repairs = 0;
+        for (int day = 1; day <= 4; day++) {
+            error.set("No menu for 2026-11-1" + day + ": HTTP 455 Blocked");
+            fix.rig.cloud.think.add(LoopRig.call("page_probe", java.util.Map.of()));
+            fix.rig.cloud.think.add(respond("The page could not be probed."));
+            if (day == 1) {
+                fix.rig.cloud.think.add(LoopRig.call(AgentAction.SKILL_CREATE, java.util.Map.of("name", "page_probe",
+                        "description", "Probe the page; retry", "parameters", "{}")));
+                fix.rig.cloud.codegen.add(SkillCodegenTest.finished(SkillCodegenTest.module("# v2")));
+                fix.rig.cloud.think.add(verdict("Added a retry; not run.", "not_run"));
+            }
+            AgentResult r = fix.unattended("Using page_probe, probe the page.");
+            if (r.response().contains("Self-repair started for page_probe")) {
+                repairs++;
+                fix.ended(fix.lastId());
+            }
+        }
+        assertEquals(1, repairs, fix.repairs().toString());
+        assertEquals(List.of("unverified", "gave_up"), fix.repairs().stream().map(r -> r.get("outcome")).toList());
+        String note = fix.told().get(fix.told().size() - 1);
+        assertTrue(note.contains("changed it, but could not check the change, and only a fix self-repair has checked "
+                + "earns another try"), note);
+        assertEquals(2, fix.told().size(), "the repair's outcome, then left to the owner once: " + fix.told());
+    }
+
+    @Test
+    @DisplayName("R4: a mail skill's private failure every day is repaired once, then left to the owner")
+    void aPrivateFailureIsRepairedOnce(@TempDir Path tmp) throws Exception {
         var read = new java.util.concurrent.CopyOnWriteArrayList<java.util.Map<String, Object>>();
         fix = new Fix(tmp, skill("mail_count", false, List.of("IMAP_PASS"), false, read,
-                p -> com.ownclaw.agent.tools.ToolResult.success("{\"ok\": false, \"unread\": 7}")));
-        fix.rig.cloud.think.add(LoopRig.call("mail_count", java.util.Map.of()));
-        fix.rig.cloud.think.add(respond("The count failed."));
-        fix.unattended("Using mail_count, count the unread mail.");
-        var row = fix.repairRow(0);
-        assertTrue(String.valueOf(row.get("goal")).contains("its result is private"), "the call is PRIVATE");
-        assertEquals(SkillSelfRepair.LAST_CALL_FAILED, row.get("problem"), "it failed: a key would be kept");
-        assertNull(row.get("output_hash"), "a hash of the private output is stored");
-        // And a PUBLIC one that failed the same way has its key.
-        var pub = new Artifact("mail_count", java.util.Map.of(), "{\"ok\": false, \"unread\": 7}", true);
-        assertNotNull(SkillSelfRepair.failureKey(pub));
+                p -> com.ownclaw.agent.tools.ToolResult.failure("imaplib.IMAP4.error: [AUTHENTICATIONFAILED] Invalid")));
+        fix.rig.queue.start();
+        int repairs = 0;
+        for (int day = 1; day <= 3; day++) {
+            fix.rig.cloud.think.add(LoopRig.call("mail_count", java.util.Map.of()));
+            fix.rig.cloud.think.add(respond("The count failed."));
+            if (day == 1) {
+                fix.rig.cloud.think.add(LoopRig.call(AgentAction.SKILL_CREATE, java.util.Map.of("name", "mail_count",
+                        "description", "Count unread mail; retry the login", "parameters", "{}")));
+                fix.rig.cloud.codegen.add(SkillCodegenTest.finished(SkillCodegenTest.module("# v2")));
+                fix.rig.cloud.think.add(verdict("Retried the login; not run.", "not_run"));
+            }
+            AgentResult r = fix.unattended("Using mail_count, count the unread mail.");
+            if (r.response().contains("Self-repair started for mail_count")) {
+                repairs++;
+                fix.ended(fix.lastId());
+            }
+        }
+        assertTrue(fix.repairRow(0).get("goal").toString().contains("its result is private"), "precondition: PRIVATE");
+        assertEquals(1, repairs, fix.repairs().toString());
+    }
+
+    @Test
+    @DisplayName("R4: after 'not fixed' the problem again starts no repair: the owner is told so, once, and a clean run lets the next one start")
+    void notFixedIsLeftToTheOwner(@TempDir Path tmp) throws Exception {
+        fix = new Fix(tmp);
+        fix.fixedOutput = DEGRADED;
+        fix.rig.queue.start();
+        fix.scriptMenu(true);
+        scriptFixAndCheck(fix.rig, java.util.Map.of("debug", true), verdict("I changed the headers, but it is still "
+                + "blocked.", "failed"));
+        fix.unattended(TASK);
+        assertEquals("not_fixed", fix.ended(fix.lastId()).get("outcome"));
+        String said = fix.told().get(fix.told().size() - 1);
+        assertTrue(said.contains("Changed, but run again it still shows the problem." + SkillSelfRepair.LEFT), said);
+        AgentResult next = fix.menuRun(true);
+        assertTrue(next.response().contains("Self-repair is not tried again for " + MENU), next.response());
+        assertEquals("gave_up", fix.repairRow(1).get("outcome"));
+        // A run that goes well, then the problem: a repair again.
+        fix.menuOutput.set(GOOD);
+        fix.menuRun(false);
+        fix.menuOutput.set(DEGRADED);
+        fix.scriptMenu(true);
+        fix.rig.cloud.think.add(respond("Blocked; nothing to change."));
+        AgentResult after = fix.unattended(TASK);
+        assertTrue(after.response().contains("Self-repair started for " + MENU), after.response());
+        fix.ended(fix.lastId());                                   // it ends before the test does (9)
+    }
+
+    @Test
+    @DisplayName("R4: a change of the skill since the repair that could not show progress lets the next problem start one")
+    void aChangedSkillIsRepairedAgain(@TempDir Path tmp) throws Exception {
+        fix = new Fix(tmp);
+        fix.rig.queue.start();
+        fix.scriptMenu(true);
+        fix.rig.cloud.think.add(respond("Nothing to change."));
+        fix.unattended(TASK);
+        assertEquals("unchanged", fix.ended(fix.lastId()).get("outcome"));
+        // The owner has the skill changed in a chat of his.
+        fix.code.put(MENU, "def run(params):\n    return {}  # changed by the owner\n");
+        fix.scriptMenu(true);
+        fix.rig.cloud.think.add(respond("Still blocked."));
+        AgentResult r = fix.unattended(TASK);
+        assertTrue(r.response().contains("Self-repair started for " + MENU), r.response());
+        fix.ended(fix.lastId());
     }
 
     // R2-4 (P11): the evidence kept the trigger's {{n}}, which name other results inside the repair.

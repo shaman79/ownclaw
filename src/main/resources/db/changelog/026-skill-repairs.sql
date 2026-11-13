@@ -22,9 +22,9 @@
 -- credentials, system packages, container image -- the bounds of what the repair may do.
 -- resumed_at / code_at_resume: when a repair cut off by a restart was started again, and its own
 -- change of the skill then; one cut off again with no change of its own since is not started again.
--- output_hash: what the skill's last call in the task that started it failed with (SkillSelfRepair#
--- failureKey; null when it worked): the skill failing again exactly so after a completed repair's
--- change is no progress. completed: the repair ran to its answer -- only such a repair is a verdict.
+-- completed: the repair ran to its answer -- only such a repair is a verdict. After one that ended
+-- 'fixed' a later problem starts another; after any other verdict it is left to the owner until a
+-- clean run (cleared_at) or a change of the skill.
 -- stopped_by: the owner stopped it (who and how, as the Stop said), kept as the Stop is pressed: one whose
 -- ending never came, OwnClaw stopping first, is not started again.
 -- local_only: the repair ran on the local model only (the work it repairs did); its report is never
@@ -56,7 +56,6 @@ CREATE TABLE IF NOT EXISTS skill_repairs (
     report           TEXT,
     previous_id      INTEGER,
     local_only       INTEGER NOT NULL DEFAULT 0,
-    output_hash      TEXT,
     completed        INTEGER NOT NULL DEFAULT 0,
     stopped_by       TEXT,
     cleared_at       TEXT,
