@@ -22,8 +22,9 @@
 -- credentials, system packages, container image -- the bounds of what the repair may do.
 -- resumed_at / code_at_resume: when a repair cut off by a restart was started again, and its own
 -- change of the skill then; one cut off again with no change of its own since is not started again.
--- output_hash: the sha256 of what the skill's last call gave in the task that started it; the problem
--- back with the same output after a change is no progress, and a run with it clears nothing.
+-- output_hash: what the skill's last call in the task that started it failed with (SkillSelfRepair#
+-- failureKey; null when it worked): the skill failing again exactly so after a completed repair's
+-- change is no progress. completed: the repair ran to its answer -- only such a repair is a verdict.
 -- local_only: the repair ran on the local model only (the work it repairs did); its report is never
 -- handed to a repair that may use the cloud.
 -- code_before / code_after: the sha256 of the skill's skill.py when the repair was started and when
@@ -54,6 +55,7 @@ CREATE TABLE IF NOT EXISTS skill_repairs (
     previous_id      INTEGER,
     local_only       INTEGER NOT NULL DEFAULT 0,
     output_hash      TEXT,
+    completed        INTEGER NOT NULL DEFAULT 0,
     cleared_at       TEXT,
     resumed_at       TEXT,
     code_at_resume   TEXT,
