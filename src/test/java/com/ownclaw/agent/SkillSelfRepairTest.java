@@ -973,6 +973,39 @@ class SkillSelfRepairTest {
         assertNull(fix.repairRow(0).get("stopped_by"), "marked stopped by a Stop that did not cover it");
     }
 
+    @Test
+    @DisplayName("R4-6: a Stop by task id of a repair waiting in the queue -- the ops API's -- is honoured: it never runs")
+    void aStopByTaskIdOfAWaitingRepairIsHonoured(@TempDir Path tmp) throws Exception {
+        fix = new Fix(tmp);
+        fix.menuRun(true);                                         // queued; the queue is not started
+        String repairTask = (String) fix.repairRow(0).get("repair_task_id");
+        fix.rig.cancellation.request("u1", repairTask, "a stop request from the ops API");
+        assertEquals("a stop request from the ops API", fix.repairRow(0).get("stopped_by"));
+        fix.rig.queue.start();
+        fix.rig.cloud.think.add(respond("Hello."));
+        fix.rig.queue.submit("u2", "Say hello.", TaskQueue.BACKGROUND_PRIORITY);   // wakes the queue
+        var row = fix.ended(fix.lastId());
+        assertEquals("stopped", row.get("outcome"));
+        assertTrue(fix.rig.cloud.calls("think").stream().noneMatch(c -> String.join("\n", LoopRig.userParts(c))
+                .contains("Repair the skill '" + MENU + "'")), "the repair ran");
+    }
+
+    @Test
+    @DisplayName("R4-6: a Stop by task id of a repair that has just started is not wiped by its start")
+    void aStopByTaskIdSurvivesTheStart(@TempDir Path tmp) throws Exception {
+        fix = new Fix(tmp);
+        fix.menuRun(true);
+        String repairTask = (String) fix.repairRow(0).get("repair_task_id");
+        fix.rig.cancellation.request("u1", repairTask, "a stop request from the ops API");
+        // Run it directly, as the queue would once its drop check had passed it.
+        fix.rig.cloud.think.add(respond("never asked"));
+        var job = new SkillSelfRepair.Job(((Number) fix.repairRow(0).get("id")).longValue(), MENU, repairTask,
+                new SkillSelfRepair.Declared(false, true, List.of(), List.of(), null), false, List.of());
+        AgentResult r = fix.rig.loop.executeRepair("u1", "Repair the skill '" + MENU + "'.", job);
+        assertEquals(AgentResult.TerminationReason.CANCELLED, r.terminationReason(), r.response());
+        assertEquals("stopped", fix.repairRow(0).get("outcome"));
+    }
+
     static List<String> states(Fix fix, String taskId) {
         return fix.rig.jdbc.queryForList("SELECT json_extract(details, '$.state') FROM events WHERE event_type = "
                 + "'self_repair' AND task_id = ? ORDER BY id", String.class, taskId);

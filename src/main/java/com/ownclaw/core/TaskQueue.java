@@ -310,7 +310,9 @@ public class TaskQueue {
             // Drop work that was already waiting when the user stopped everything, or its chat:
             // asked with when it was queued, not when it would start, which is after the Stop. The
             // answer says who stopped it -- Stop, /cancel, the ops API.
-            String stoppedBy = cancellationService.why(task.userId(), null,
+            // A repair has its task id before it runs (SkillSelfRepair), so a Stop of it by that id -- the
+            // ops API's -- is honoured while it waits, as a Stop of its chat or of everything is.
+            String stoppedBy = cancellationService.why(task.userId(), task.repair() == null ? null : task.repair().taskId(),
                     task.chat() == null ? null : task.chat().sessionId(), task.enqueuedAt());
             if (stoppedBy != null) {
                 log.info("Dropping a queued task of {}, waiting when it was stopped: {}",

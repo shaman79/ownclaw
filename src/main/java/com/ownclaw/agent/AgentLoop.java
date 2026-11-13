@@ -449,8 +449,9 @@ public class AgentLoop {
     AgentResult run(AgentContext context) {
         String userId = context.userId();
         String taskId = context.taskId();
-        // Clear any stale cancel flag from a previous task
-        cancellationService.clear(userId, taskId);
+        // Clear any stale cancel flag from a previous task -- not a repair's: its id is new, given before it
+        // was queued, and a Stop of it by that id while it waited is the owner's, to be honoured.
+        if (context.repair() == null) cancellationService.clear(userId, taskId);
 
         // Point the context at the authoritative cancel source. Without this, every
         // context.isCancelled() check inside a step — LocalExecutor's per-step poll, the
