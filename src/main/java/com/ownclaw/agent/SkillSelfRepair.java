@@ -403,8 +403,10 @@ public class SkillSelfRepair {
      * no longer stand in the way of the next repair -- the problem they were about went away.
      */
     private void cleared(AgentContext ctx, Map<String, Found> found) {
-        // Every finished repair of it: what they changed is history from here, and the versions they
-        // saw are no longer "had before" (hadBefore).
+        // Every finished repair of it whose problem came with another output: what they changed is
+        // history from here, and the versions they saw are no longer "had before" (hadBefore). A run
+        // that gave the same output as the one a repair started on is no clean run, whether or not its
+        // model said so: the record stays.
         var last = new LinkedHashMap<String, Artifact>();
         for (Artifact a : ctx.artifacts()) last.put(a.tool(), a);
         for (var e : last.entrySet()) {
@@ -413,7 +415,8 @@ public class SkillSelfRepair {
             }
             // This account's repairs only: another's record is never touched by this one's runs.
             jdbc.update("UPDATE skill_repairs SET cleared_at = datetime('now') WHERE skill_name = ? AND user_id = ? "
-                    + "AND cleared_at IS NULL AND outcome != ?", e.getKey(), ctx.userId(), RUNNING);
+                    + "AND cleared_at IS NULL AND outcome != ? AND (output_hash IS NULL OR output_hash != ?)",
+                    e.getKey(), ctx.userId(), RUNNING, sha256(e.getValue().output()));
         }
     }
 
@@ -430,6 +433,9 @@ public class SkillSelfRepair {
         String problem = String.join(" ", f.what());
         String tellOwner = null;
         String line;
+        // What the skill gave in this task, as its last call there left it: what tells a change that changed
+        // nothing it does from one that did (sameOutput), and a clean run from the same problem (cleared).
+        String output = f.calls().isEmpty() ? null : sha256(f.calls().getLast().output());
         synchronized (lock) {
             String code = codeHash(skill);
             // One repair of a skill at a time, whoever's: a skill's code is global. Another account's
@@ -464,7 +470,12 @@ public class SkillSelfRepair {
             boolean changedNothing = stuck && (UNCHANGED.equals(last.get("outcome")) || GAVE_UP.equals(last.get("outcome")));
             boolean cameBack = stuck && !changedNothing && changed(last)
                     && hadBefore(skill, ctx.userId(), id(last)).contains(str(last, "code_after"));
-            boolean noProgress = changedNothing || cameBack;
+            // And a change that changed nothing the skill gives: the problem is back with the very output
+            // the last repair started on -- what a skill a repair may not run shows of a rewrite that
+            // missed. A mechanism, not a count.
+            boolean sameOutput = stuck && !changedNothing && changed(last) && output != null
+                    && output.equals(last.get("output_hash"));
+            boolean noProgress = changedNothing || cameBack || sameOutput;
             if (noProgress && GAVE_UP.equals(last.get("outcome"))) {
                 addProblem(id(last), ctx, problem);
                 log.info("Task {}: '{}' showed its problem again; self-repair left it to the owner before, so nothing "
@@ -475,12 +486,15 @@ public class SkillSelfRepair {
             if (noProgress) {
                 jdbc.update("""
                         INSERT INTO skill_repairs (user_id, skill_name, trigger_task_id, trigger_message, trigger_at,
-                            problem, side_effects, code_before, code_after, outcome, report, previous_id, ended_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+                            problem, side_effects, code_before, code_after, outcome, report, previous_id,
+                            output_hash, ended_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
                         """, ctx.userId(), skill, ctx.taskId(), ctx.originalMessage(), startedAt(ctx), problem,
                         Declared.of(tools.find(skill).orElse(null)).sideEffectsText(), code, code, GAVE_UP,
-                        last.get("report"), id(last));
-                String did = cameBack ? "brought back a version of the skill it had had before" : "changed nothing";
+                        last.get("report"), id(last), output);
+                String did = cameBack ? "brought back a version of the skill it had had before"
+                        : sameOutput ? "changed it, and it still gives the same output as before the change"
+                        : "changed nothing";
                 log.warn("Task {}: '{}' showed its problem again after a repair that {} (task {}): no repair starts, "
                         + "the owner is told.", ctx.taskId(), skill, did, last.get("repair_task_id"));
                 event(ctx.userId(), ctx.taskId(), "left", skill, problem, str(last, "repair_task_id"), ctx.taskId());
@@ -494,7 +508,7 @@ public class SkillSelfRepair {
                 Map<String, Object> previous = last != null && changed(last)
                         && List.of(FIXED, UNVERIFIED, NOT_FIXED).contains(String.valueOf(last.get("outcome")))
                         ? last : null;
-                line = start(ctx, f, problem, code, previous);
+                line = start(ctx, f, problem, code, previous, output);
             }
         }
         if (tellOwner != null) {
@@ -539,7 +553,8 @@ public class SkillSelfRepair {
     }
 
     /** Record a repair, mark both tasks, and queue it. Held under the lock. */
-    private String start(AgentContext ctx, Found f, String problem, String code, Map<String, Object> previous) {
+    private String start(AgentContext ctx, Found f, String problem, String code, Map<String, Object> previous,
+                         String output) {
         String skill = f.skill();
         Tool tool = tools.find(skill).orElse(null);
         Declared declared = Declared.of(tool);
@@ -558,11 +573,11 @@ public class SkillSelfRepair {
         long id = insertReturningId("""
                 INSERT INTO skill_repairs (user_id, skill_name, trigger_task_id, trigger_message, trigger_at,
                     repair_task_id, problem, goal, evidence, declared, side_effects, code_before, outcome,
-                    previous_id, local_only)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    previous_id, local_only, output_hash)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, ctx.userId(), skill, ctx.taskId(), ctx.originalMessage(), startedAt(ctx), taskId, problem, goal,
                 json(evidence), json(declared), declared.sideEffectsText(), code, RUNNING,
-                previous == null ? null : id(previous), localOnly ? 1 : 0);
+                previous == null ? null : id(previous), localOnly ? 1 : 0, output);
         var job = new Job(id, skill, taskId, declared, localOnly, evidence);
         log.info("Task {}: '{}' did not do its whole job -- self-repair {} started as task {}.", ctx.taskId(), skill,
                 id, taskId);

@@ -41,6 +41,9 @@ class SkillSelfRepairTest {
             + "\"Cafe Two\": \"WARNING: OCR failed -- the picture held no text (HTTP 455 Blocked, fell back to logo.png)\"}}";
     static final String GOOD = "{\"success\": true, \"menus\": {\"Cafe One\": \"Soup, schnitzel\", \"Cafe Two\": \"Goulash\"}}";
     static final String PROBLEM = "The menu of Cafe Two was not read: OCR failed on a fallback picture.";
+    /** Degraded another way: what a change that did something but not enough gives. */
+    static final String DEGRADED_OTHERWISE = "{\"success\": true, \"menus\": {\"Cafe One\": \"Soup, schnitzel\", "
+            + "\"Cafe Two\": \"WARNING: OCR failed -- HTTP 403 with browser headers\"}}";
 
     /** A fake skill: records its calls, answers with {@code body}. */
     /** @param sideEffects what its SKILL.yaml says of its side effects: true, false, or null for nothing */
@@ -595,7 +598,7 @@ class SkillSelfRepairTest {
     @DisplayName("progress: a repair that changed the code, then the problem again -- a new repair, given the last one's report")
     void progressStartsAnotherWithTheReport(@TempDir Path tmp) throws Exception {
         fix = new Fix(tmp);
-        fix.fixedOutput = DEGRADED;
+        fix.fixedOutput = DEGRADED_OTHERWISE;   // the change did something: the output is not the same
         fix.rig.queue.start();
         // Changed, not run again: unverified.
         fix.scriptMenu(true);
