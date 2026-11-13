@@ -31,6 +31,55 @@ class SelfRepairReviewTest {
                 + "ORDER BY c.rowid", String.class, user);
     }
 
+    // F5: a repair that never got to try counted as "changed nothing", and the skill was left to the owner for good.
+    @Test
+    @DisplayName("F5: a repair cut short by an outage is no verdict: the owner is told it did not finish, and the next problem starts a repair")
+    void outageIsNoVerdict(@TempDir Path tmp) throws Exception {
+        fix = new Fix(tmp);
+        fix.rig.queue.start();
+        fix.scriptMenu(true);
+        for (int i = 0; i < 2; i++) {
+            fix.rig.cloud.think.add(c -> {
+                throw new com.ownclaw.llm.LlmException("anthropic", "Connection failed: api.example.com", 0,
+                        new java.net.UnknownHostException("api.example.com"));
+            });
+        }
+        fix.unattended(TASK);
+        var first = fix.ended(fix.lastId());
+        assertEquals("not_finished", first.get("outcome"), String.valueOf(first.get("report")));
+        String note = fix.told().get(fix.told().size() - 1);
+        assertTrue(note.contains("The repair did not finish, and changed nothing"), note);
+        assertTrue(note.contains("a repair starts again"), note);
+
+        fix.scriptMenu(true);
+        fix.rig.cloud.think.add(respond("Blocked; nothing to change."));
+        AgentResult again = fix.unattended(TASK);
+        assertTrue(again.response().contains("Self-repair started for " + MENU), again.response());
+        assertEquals("unchanged", fix.ended(fix.lastId()).get("outcome"));
+    }
+
+    @Test
+    @DisplayName("F5: a repair the owner stops before it changes anything is no verdict either")
+    void stoppedIsNoVerdict(@TempDir Path tmp) throws Exception {
+        fix = new Fix(tmp);
+        fix.rig.queue.start();
+        fix.scriptMenu(true);
+        fix.rig.cloud.think.add(c -> {
+            fix.rig.cancellation.requestAll("u1", "the owner pressed Stop");
+            return LoopRig.call(AgentAction.SKILL_MANAGE, java.util.Map.of("action", "read", "name", MENU)).answer(c);
+        });
+        fix.unattended(TASK);
+        var first = fix.ended(fix.lastId());
+        assertEquals("stopped", first.get("outcome"), String.valueOf(first.get("report")));
+        assertTrue(fix.told().get(fix.told().size() - 1).contains("Stopped before it changed the skill"));
+
+        fix.scriptMenu(true);
+        fix.rig.cloud.think.add(respond("Blocked; nothing to change."));
+        AgentResult again = fix.unattended(TASK);
+        assertTrue(again.response().contains("Self-repair started for " + MENU), again.response());
+        assertEquals("unchanged", fix.ended(fix.lastId()).get("outcome"));
+    }
+
     // F4: repair records were looked up by skill name alone: one account was told another's report.
     @Test
     @DisplayName("F4: another account's repair that changed nothing neither stops this account's repair nor is told to it")

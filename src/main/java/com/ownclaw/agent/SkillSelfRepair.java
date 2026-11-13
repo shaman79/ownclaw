@@ -95,7 +95,11 @@ public class SkillSelfRepair {
     record Found(String skill, List<String> what, List<Artifact> calls) {}
 
     static final String RUNNING = "running", FIXED = "fixed", UNVERIFIED = "unverified", NOT_FIXED = "not_fixed",
-            UNCHANGED = "unchanged", GAVE_UP = "gave_up", INTERRUPTED = "interrupted", NOT_STARTED = "not_started";
+            UNCHANGED = "unchanged", GAVE_UP = "gave_up", INTERRUPTED = "interrupted", NOT_STARTED = "not_started",
+            STOPPED = "stopped", NOT_FINISHED = "not_finished";
+    // interrupted, not_started, stopped and not_finished are no verdict on the skill: the repair never
+    // ran, was cut off, was stopped, or did not finish -- an outage, the stall watchdog, the window, a
+    // question nobody answers -- without changing anything. The no-progress rule reads none of them.
 
     /** The event rows of a triggering task and of a repair task: the task page reads them. */
     static final String EVENT = "self_repair";
@@ -338,8 +342,9 @@ public class SkillSelfRepair {
                         + "it._";
             }
             // What this account's own repairs of the skill did: never another account's report.
-            Map<String, Object> last = row("WHERE skill_name = ? AND user_id = ? AND outcome NOT IN (?, ?, ?) "
-                    + "ORDER BY id DESC LIMIT 1", skill, ctx.userId(), RUNNING, INTERRUPTED, NOT_STARTED);
+            Map<String, Object> last = row("WHERE skill_name = ? AND user_id = ? AND outcome NOT IN (?, ?, ?, ?, ?) "
+                    + "ORDER BY id DESC LIMIT 1", skill, ctx.userId(), RUNNING, INTERRUPTED, NOT_STARTED, STOPPED,
+                    NOT_FINISHED);
             boolean noProgress = last != null && last.get("cleared_at") == null
                     && Objects.equals(code, last.get("code_after"))
                     && (UNCHANGED.equals(last.get("outcome")) || GAVE_UP.equals(last.get("outcome")));
@@ -498,7 +503,12 @@ public class SkillSelfRepair {
             boolean changed = !Objects.equals(row.get("code_before"), after);
             sideEffects = job.sideEffects() || sideEffects(job.skill());
             Boolean check = changed && !sideEffects ? checked(ctx, ended, job.skill()) : null;
-            outcome = !changed ? UNCHANGED : check == null ? UNVERIFIED : check ? FIXED : NOT_FIXED;
+            // "Changed nothing" is a verdict only of a repair that finished: one stopped, cut short by
+            // an outage, the watchdog or the window, or left waiting for an answer never really tried.
+            TerminationReason how = ended.terminationReason();
+            outcome = changed ? (check == null ? UNVERIFIED : check ? FIXED : NOT_FIXED)
+                    : how == TerminationReason.COMPLETED ? UNCHANGED
+                    : how == TerminationReason.CANCELLED ? STOPPED : NOT_FINISHED;
             jdbc.update("UPDATE skill_repairs SET code_after = ?, outcome = ?, report = ?, ended_at = datetime('now') "
                     + "WHERE id = ?", after, outcome, ended.response(), job.id());
             event(ctx.userId(), ctx.taskId(), outcome, job.skill(), str(row, "problem"), ctx.taskId(),
@@ -528,9 +538,12 @@ public class SkillSelfRepair {
                     : "Changed, but the repair did not finish, so the change was not checked.") + " " + which;
             case NOT_FIXED -> "Changed, but run again it still shows the problem. When the problem shows again, "
                     + "self-repair tries again with this report. " + which;
-            default -> (ended.terminationReason() == TerminationReason.CANCELLED
-                    ? "Stopped before it changed the skill." : "Not fixed: the repair did not change the skill.")
-                    + " If the problem comes back, self-repair does not try again: it is left to you. " + which;
+            case STOPPED -> "Stopped before it changed the skill. The next time the problem shows, a repair "
+                    + "starts again. " + which;
+            case NOT_FINISHED -> "The repair did not finish, and changed nothing. The next time the problem shows, "
+                    + "a repair starts again. " + which;
+            default -> "Not fixed: the repair did not change the skill. If the problem comes back, self-repair "
+                    + "does not try again: it is left to you. " + which;
         };
     }
 
