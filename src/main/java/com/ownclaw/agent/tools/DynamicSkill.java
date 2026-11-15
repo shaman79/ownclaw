@@ -160,6 +160,12 @@ public class DynamicSkill implements Tool {
     @Override public int estimatedMaxDurationSeconds() { return timeoutSec; }
     @Override public List<String> requiredCredentials() { return requiredCredentials; }
 
+    @Override
+    public List<String> ungranted(String userId) {
+        if (requiredCredentials.isEmpty() || credentialVault == null || userId == null) return List.of();
+        return credentialVault.grants().ungranted(userId, name, requiredCredentials);
+    }
+
     /** The directory containing this skill's files. */
     public Path skillDir() { return skillDir; }
 
@@ -450,20 +456,28 @@ public class DynamicSkill implements Tool {
             if (!requiredCredentials.isEmpty() && credentialVault != null && context.userId() != null) {
                 log.info("Skill '{}': requesting credentials {} for user='{}'",
                         name, requiredCredentials, context.userId());
-                Map<String, String> found = credentialVault.getCredentials(
-                        context.userId(), requiredCredentials);
+                // Only what its user granted this skill, and all of it or nothing: whoever calls
+                // a skill asks first (Tool#ungranted), and this is where it is decided.
+                CredentialVault.Handover fromVault = credentialVault.forSkill(
+                        context.userId(), name, requiredCredentials);
+                String missing = fromVault.missing().isEmpty() ? null
+                        : "Missing required credentials: " + String.join(", ", fromVault.missing())
+                        + ". Ask the user to store each one by typing: /cred set KEY value"
+                        + " — do not ask them to paste the value to you.";
+                if (!fromVault.ungranted().isEmpty()) {
+                    log.warn("Skill '{}' not run: user '{}' has not granted it {}", name, context.userId(),
+                            fromVault.ungranted());
+                    return ToolResult.failure("Not run: "
+                            + com.ownclaw.users.CredentialGrantService.notAllowed(name, fromVault.ungranted())
+                            + (missing == null ? "" : " " + missing));
+                }
+                if (missing != null) {
+                    log.warn("Skill '{}' missing credentials: {}", name, fromVault.missing());
+                    return ToolResult.failure(missing);
+                }
+                Map<String, String> found = fromVault.values();
                 log.info("Skill '{}': vault returned {} credentials, keys={}",
                         name, found.size(), found.keySet());
-                if (found.size() < requiredCredentials.size()) {
-                    List<String> missing = requiredCredentials.stream()
-                            .filter(k -> !found.containsKey(k))
-                            .toList();
-                    log.warn("Skill '{}' missing credentials: {}", name, missing);
-                    return ToolResult.failure(
-                            "Missing required credentials: " + String.join(", ", missing)
-                            + ". Ask the user to store each one by typing: /cred set KEY value"
-                            + " — do not ask them to paste the value to you.");
-                }
                 creds = found;
                 log.info("Skill '{}': all {} credentials handed over with its input", name, creds.size());
             } else {

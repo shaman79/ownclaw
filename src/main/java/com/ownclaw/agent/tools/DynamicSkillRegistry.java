@@ -71,11 +71,24 @@ public class DynamicSkillRegistry {
         Path generatedDir = Path.of(config.getSkills().getGeneratedPath());
         if (!Files.isDirectory(generatedDir)) {
             log.info("No generated skills directory at {} — no dynamic skills loaded", generatedDir);
-            return;
+        } else {
+            scan(generatedDir, new java.util.HashSet<>());
+            log.info("Loaded {} dynamic skill(s)", dynamicSkills.size());
         }
+        keepGranted();
+    }
 
-        scan(generatedDir, new java.util.HashSet<>());
-        log.info("Loaded {} dynamic skill(s)", dynamicSkills.size());
+    /**
+     * The skills there are at the first start that checks grants keep the credentials they were
+     * being handed (CredentialGrantService#grantExisting): asked once, here, before any task can
+     * run one -- with no skill there is nothing to keep, and it is still asked, so that it is
+     * never asked again for a skill made later.
+     */
+    private void keepGranted() {
+        if (credentialVault == null) return;
+        var declared = new LinkedHashMap<String, List<String>>();
+        for (DynamicSkill skill : dynamicSkills.values()) declared.put(skill.name(), skill.requiredCredentials());
+        credentialVault.grants().grantExisting(declared);
     }
 
     /** Load and register each skill in the directory; one a task writes or runs now is left as it is, named in {@code busy}. */

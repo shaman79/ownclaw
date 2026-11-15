@@ -183,11 +183,14 @@ public class CommandHandler {
                 if (command.equals("/log") || command.startsWith("/log ")) {
                     yield Optional.of(handleLog(userId, command.substring(4).strip()));
                 }
-                if (command.startsWith("/grant ")) {
-                    yield Optional.of(handleGrant(userId, message.trim().substring(7).strip()));
+                if (command.equals("/grants")) {
+                    yield Optional.of(handleGrants(userId));
                 }
-                if (command.startsWith("/revoke ")) {
-                    yield Optional.of(handleRevoke(userId, message.trim().substring(8).strip()));
+                if (command.equals("/grant") || command.startsWith("/grant ")) {
+                    yield Optional.of(handleGrant(userId, message.trim().substring(6).strip()));
+                }
+                if (command.equals("/revoke") || command.startsWith("/revoke ")) {
+                    yield Optional.of(handleRevoke(userId, message.trim().substring(7).strip()));
                 }
                 if (command.startsWith("/cred ")) {
                     yield Optional.of(handleCred(userId, message.trim().substring(6).strip()));
@@ -662,8 +665,9 @@ public class CommandHandler {
                 - `/debug` — Toggle debug mode
                 - `/cancel` — Stop this chat's work: its running task, and what waits in it
                 - `/cancel all` — Stop the work of every chat, scheduled and /bg work too
-                - `/grant <tool> <credential>` — Grant credential access to a tool
-                - `/revoke <tool>` — Revoke credential access
+                - `/grant <skill> [KEY ...]` — Let a skill read credentials of yours: the ones named, or every one it declares. A skill reads none it was not granted
+                - `/revoke <skill> [KEY ...]` — Take that back: the ones named, or all of them
+                - `/grants` — What each skill may read, and which skills wait for a grant
                 - `/cred set <KEY> <VALUE>` — Store a credential
                 - `/cred list` — List stored credential keys
                 - `/cred delete <KEY>` — Delete a credential
@@ -1147,21 +1151,87 @@ public class CommandHandler {
 
     // ── Grants ──
 
+    private static final String GRANT_USAGE = "Usage: `/grant <skill> [KEY ...]` — with no key, every "
+            + "credential the skill declares. `/grants` lists what is granted.";
+
+    /**
+     * {@code /grant <skill> [KEY ...]}: its user lets a skill read credentials of theirs -- the one
+     * way a grant is made (CredentialGrantService). Only what the skill declares can be granted,
+     * so the answer says exactly what it may read from here.
+     */
     private String handleGrant(String userId, String args) {
-        String[] parts = args.split("\\s+", 2);
-        if (parts.length < 2 || parts[0].isEmpty() || parts[1].isEmpty()) {
-            return "Usage: `/grant <tool_name> <credential_key>`";
+        String[] parts = args.isEmpty() ? new String[0] : args.split("\\s+");
+        if (parts.length == 0) return GRANT_USAGE;
+        var tool = toolRegistry.find(parts[0]).or(() -> toolRegistry.find(parts[0].toLowerCase(Locale.ROOT)));
+        if (tool.isEmpty()) return "Skill not found: " + parts[0];
+        String skill = tool.get().name();
+        var declared = new java.util.LinkedHashSet<String>();
+        for (String key : tool.get().requiredCredentials()) declared.add(key.strip().toUpperCase(Locale.ROOT));
+        if (declared.isEmpty()) return "'" + skill + "' declares no credential: there is nothing to grant it.";
+
+        var keys = new java.util.LinkedHashSet<String>();
+        for (int i = 1; i < parts.length; i++) keys.add(parts[i].toUpperCase(Locale.ROOT));
+        if (keys.isEmpty()) keys.addAll(declared);
+        for (String key : keys) {
+            if (!declared.contains(key)) {
+                return "Not granted: '" + skill + "' does not declare " + key + ". It declares "
+                        + String.join(", ", declared) + ".";
+            }
         }
-        String toolName = parts[0];
-        String credential = parts[1].toUpperCase();
-        if (toolRegistry.find(toolName).isEmpty()) return "Tool not found: " + toolName;
-        credentialGrants.grantPermanent(userId, toolName, List.of(credential));
-        return "\u2705 Permanent credential access granted for '" + toolName + "': " + credential;
+        keys.removeIf(key -> !CredentialVault.forSkills(key));
+        if (keys.isEmpty()) return "Not granted: that credential is never handed to a skill.";
+        credentialGrants.grant(userId, skill, keys);
+
+        var sb = new StringBuilder("\u2705 '" + skill + "' may now read: " + String.join(", ", keys) + ".");
+        List<String> still = credentialGrants.ungranted(userId, skill, declared);
+        if (!still.isEmpty()) sb.append("\nStill not allowed: ").append(String.join(", ", still)).append('.');
+        var stored = new java.util.HashSet<>(credentialVault.listCredentialKeys(userId));
+        List<String> missing = keys.stream().filter(key -> !stored.contains(key)).toList();
+        if (!missing.isEmpty()) {
+            sb.append("\nNot in your vault yet: ").append(String.join(", ", missing))
+                    .append(" — store each with `/cred set <KEY> <VALUE>`.");
+        }
+        return sb.toString();
     }
 
-    private String handleRevoke(String userId, String toolName) {
-        if (toolName.isEmpty()) return "Usage: `/revoke <tool_name>`";
-        credentialGrants.resetGrants(userId, toolName);
-        return "\u274c Credential grants revoked for '" + toolName + "'";
+    /** {@code /revoke <skill> [KEY ...]}: its user takes back what they granted a skill. */
+    private String handleRevoke(String userId, String args) {
+        String[] parts = args.isEmpty() ? new String[0] : args.split("\\s+");
+        if (parts.length == 0) return "Usage: `/revoke <skill> [KEY ...]` — with no key, everything it was granted.";
+        // By the name as it is registered, or as typed: what a skill that is gone was granted can still be taken back.
+        String skill = toolRegistry.find(parts[0]).or(() -> toolRegistry.find(parts[0].toLowerCase(Locale.ROOT)))
+                .map(com.ownclaw.agent.tools.Tool::name).orElse(parts[0]);
+        List<String> keys = java.util.Arrays.asList(parts).subList(1, parts.length);
+        List<String> revoked = credentialGrants.revoke(userId, skill, keys);
+        if (revoked.isEmpty()) {
+            return "'" + skill + "' had been granted " + (keys.isEmpty() ? "nothing." : "none of those.");
+        }
+        return "\u274c '" + skill + "' may no longer read: " + String.join(", ", revoked) + ".";
+    }
+
+    /** {@code /grants}: what each skill may read of this user's vault, and which skills wait for a grant. */
+    private String handleGrants(String userId) {
+        var granted = credentialGrants.all(userId);
+        var sb = new StringBuilder();
+        if (granted.isEmpty()) {
+            sb.append("No skill has been granted a credential of yours.");
+        } else {
+            sb.append("\uD83D\uDD11 What each skill may read of your vault:\n");
+            granted.forEach((skill, keys) -> sb.append("  \u2022 ").append(skill).append(": ")
+                    .append(String.join(", ", keys)).append('\n'));
+        }
+        var waiting = new StringBuilder();
+        for (var tool : toolRegistry.all().stream()
+                .sorted(java.util.Comparator.comparing(com.ownclaw.agent.tools.Tool::name)).toList()) {
+            List<String> ungranted = tool.ungranted(userId);
+            if (!ungranted.isEmpty()) {
+                waiting.append("  \u2022 `").append(CredentialGrantService.command(tool.name(), ungranted)).append("`\n");
+            }
+        }
+        if (!waiting.isEmpty()) {
+            sb.append("\nNot allowed — a skill here declares credentials you have not granted it, and is not run "
+                    + "until you send its line:\n").append(waiting);
+        }
+        return sb.toString().stripTrailing();
     }
 }

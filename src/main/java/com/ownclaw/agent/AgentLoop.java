@@ -537,9 +537,40 @@ public class AgentLoop {
         // ending says so; a repair that ended is recorded and the owner told (SkillSelfRepair).
         SkillSelfRepair repairs = selfRepair;
         if (repairs != null) ended = repairs.taskEnded(context, ended);
+        ended = grantsAsked(context, ended);
         emitResult(context, ended);
         if (remember) storeEpisode(context, ended);
         return ended;
+    }
+
+    /**
+     * A task that could not run a skill because its user has not granted it a credential says so
+     * in its ending, by code: which skill, which credentials, and the command that grants them --
+     * offered to click, as a question's answers are. Only a command its user sends makes a grant,
+     * and this one is written here, from the skill's name and what it declares: a model's own
+     * choices never hold a command (AgentAction#choices). A skill granted since is not named.
+     * Nothing here may break a task's ending: what fails is logged, and the ending is as it was.
+     */
+    private AgentResult grantsAsked(AgentContext context, AgentResult ended) {
+        try {
+            var lines = new ArrayList<String>();
+            var choices = new ArrayList<>(ended.choices());
+            for (String skill : context.notAllowed()) {
+                List<String> still = toolRegistry.find(skill)
+                        .map(tool -> tool.ungranted(context.userId())).orElse(List.of());
+                if (still.isEmpty()) continue;
+                lines.add(com.ownclaw.users.CredentialGrantService.asked(skill, still));
+                choices.add(com.ownclaw.users.CredentialGrantService.command(skill, still));
+            }
+            if (lines.isEmpty()) return ended;
+            String said = "\n\n" + String.join("\n\n", lines);
+            return new AgentResult(ended.success(), ended.response() + said, ended.trajectory(), ended.totalSteps(),
+                    ended.totalDurationMs(), ended.terminationReason(), ended.taskId(),
+                    ended.ownerText() == null ? null : ended.ownerText() + said, choices, ended.localOnly());
+        } catch (RuntimeException e) {
+            log.error("Task {}: could not say which skills wait for a grant: {}", context.taskId(), e.getMessage(), e);
+            return ended;
+        }
     }
 
     /**
@@ -1889,6 +1920,18 @@ public class AgentLoop {
         }
 
         Tool tool = toolOpt.get();
+
+        // A skill its user has not allowed a credential it declares is not run: only they can
+        // allow it, and the task's ending asks them (grantsAsked). Nothing ran, so nothing is
+        // recorded as a result of the skill -- a refusal is no failure of it to repair.
+        List<String> ungranted = tool.ungranted(context.userId());
+        if (!ungranted.isEmpty()) {
+            log.warn("Task {}: '{}' not run — user {} has not granted it {}.",
+                    context.taskId(), action.tool(), context.userId(), ungranted);
+            context.notAllowed(tool.name());
+            return AgentObservation.failure(action.tool(), "Not run: "
+                    + com.ownclaw.users.CredentialGrantService.notAllowed(tool.name(), ungranted), 0);
+        }
 
         // A secret the filter removed is no value. The cloud reads a router's configuration with
         // option key '«secret removed»', and a call that writes the section back as it read it
