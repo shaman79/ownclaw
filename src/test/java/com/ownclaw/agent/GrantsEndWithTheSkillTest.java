@@ -84,6 +84,15 @@ class GrantsEndWithTheSkillTest {
         return skills.manager.createSkill(spec, requester, () -> false, () -> {});
     }
 
+    /** What a write answered, or that it threw. */
+    private static String attempt(java.util.function.Supplier<String> write) {
+        try {
+            return write.get();
+        } catch (RuntimeException thrown) {
+            return "thrown: " + thrown;
+        }
+    }
+
     private String code(String name) throws Exception {
         return Files.readString(skills.generated.resolve(name).resolve("skill.py"));
     }
@@ -294,6 +303,39 @@ class GrantsEndWithTheSkillTest {
         assertEquals(List.of(), grantedBy("courier"));
         // Mutation: the grants ended before the new code is checked to load -> a rewrite that does not
         // load, and is undone, has ended the owner's and ann's grants all the same.
+    }
+
+    @Test
+    @DisplayName("a skill is not written again, or made, over grants that could not be ended: the version that was granted is put back whole and is what runs, a new one is set aside, and the task is told")
+    void whatCannotEndTheGrantsIsNotMade() throws Exception {
+        write("kid", "kids_mailer", "v1");
+        everyoneGrants("kids_mailer");
+        grants.grant("owner", "courier", PASS);   // left under a free name
+        // The database refuses to end them, as a full disk does.
+        jdbc.execute("CREATE TRIGGER the_disk_is_full BEFORE DELETE ON credential_grants "
+                + "BEGIN SELECT RAISE(ABORT, 'database or disk is full'); END");
+
+        String rewrite = attempt(() -> write("kid", "kids_mailer", "v2"));
+        String made = attempt(() -> write("kid", "courier", "kid's own"));
+
+        jdbc.execute("DROP TRIGGER the_disk_is_full");
+        // Kid's new code is nowhere a grant that outlived it could reach.
+        assertEquals(List.of("ann", "kid", "owner"), grantedBy("kids_mailer"));
+        assertTrue(code("kids_mailer").contains("'v1'"), "kid's new code stayed, under the owner's grant: " + code("kids_mailer"));
+        assertTrue(GrantsKit.run(skill("kids_mailer"), "owner").success(), "the version that was granted runs on");
+        assertEquals(List.of("owner"), grantedBy("courier"));
+        assertTrue(skills.registry.getDynamic("courier").isEmpty(), "kid's new skill was registered under what was left there");
+        assertFalse(Files.exists(skills.generated.resolve("courier")), "and it is not left for the next start to register");
+        assertTrue(rewrite.startsWith("ERROR: 'kids_mailer' was not changed"), rewrite);
+        assertTrue(made.startsWith("ERROR: 'courier' was not registered"), made);
+
+        // With the database well again, both are made, and the grants end as they should.
+        assertTrue(write("kid", "kids_mailer", "v2").startsWith("Skill 'kids_mailer' updated"));
+        assertTrue(write("kid", "courier", "kid's own").startsWith("Skill 'courier' created"));
+        assertEquals(List.of("kid"), grantedBy("kids_mailer"));
+        assertEquals(List.of(), grantedBy("courier"));
+        // Mutation: the skill registered first and its grants ended after, as before -> the failure
+        // leaves kid's v2 on disk and registered, and the owner's next run hands it the owner's password.
     }
 
     // ───────────────────────── no run between the new code and the ended grants ─────────────────────────

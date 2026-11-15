@@ -373,19 +373,40 @@ public class SkillManager {
             if (skill == null) return "ERROR: Failed to load — check SKILL.yaml format.";
 
             boolean isUpdate = toolRegistry.find(name).isPresent();
-            // Registered over the old one, not after unregistering it: in between, another task's
-            // look-up of the skill found no such tool.
-            dynamicSkillRegistry.register(skill);
-            keepAsWritten(name, asWritten, code, requester);
             // A grant was given to the code that was there. A name no skill held starts with
             // none -- one deleted, retired or set aside may have left its grants behind -- and a
             // skill written again by another account than the owner is everyone else's to grant
             // again: its author could otherwise put any code under the owner's grant.
-            if (!isUpdate) {
-                dynamicSkillRegistry.endGrants(name, null);
-            } else if (requester != null && authService != null && !authService.isOwner(requester)) {
-                dynamicSkillRegistry.endGrants(name, requester);
+            // Ended before the new code is registered, and the write undone when they cannot be
+            // ended: registered first, a database that refused the ending left that code in
+            // place, under the very grants it was to lose.
+            try {
+                if (!isUpdate) {
+                    dynamicSkillRegistry.endGrants(name, null);
+                } else if (requester != null && authService != null && !authService.isOwner(requester)) {
+                    dynamicSkillRegistry.endGrants(name, requester);
+                }
+            } catch (RuntimeException notEnded) {
+                log.error("Skill '{}' not {}: the grants of its name could not be ended: {}", name,
+                        isUpdate ? "changed" : "registered", notEnded.getMessage());
+                if (previousCode != null) {
+                    SkillJail.writeAuthored(codeFile, previousCode);
+                    if (previousYaml != null) SkillJail.writeAuthored(yamlFile, previousYaml);
+                    SkillJail.writeAuthored(reqFile, previousRequirements != null ? previousRequirements : "");
+                } else {
+                    dynamicSkillRegistry.quarantineUnregistered(skillDir,
+                            "Not registered: the credential grants left under its name could not be ended.");
+                }
+                return "ERROR: '" + name + "' was not " + (isUpdate ? "changed" : "registered") + ": the credential "
+                        + "grants " + (isUpdate ? "other accounts gave the version before it" : "left under its name")
+                        + " could not be ended, and new code may not run on them. "
+                        + (isUpdate ? "The previous version was kept." : "Nothing was registered.")
+                        + " Retry with the SAME name.";
             }
+            // Registered over the old one, not after unregistering it: in between, another task's
+            // look-up of the skill found no such tool.
+            dynamicSkillRegistry.register(skill);
+            keepAsWritten(name, asWritten, code, requester);
 
             return "Skill '" + name + "' " + (isUpdate ? "updated" : "created") +
                     " and registered. It is now available as a tool.";
