@@ -16,7 +16,7 @@ Auto-updates are handled by a cron job that polls GitHub for new commits.
 │   ├── generated/       # Skill directories (SKILL.yaml + skill.py)
 │   └── _envs/           # Python virtual environments
 ├── logs/                # Deploy log
-├── backups/             # Last 5 JARs for rollback
+├── backups/             # Last 5 JARs for rollback; the database from before each of the last 5 builds that changed it
 ├── repo/                # Git checkout (build workspace)
 └── deploy/              # (symlink or copy from repo)
 ```
@@ -165,7 +165,56 @@ Avoid running deploy as root (plain `sudo /opt/ownclaw/repo/deploy/deploy.sh`). 
 
 ```bash
 sudo -u ownclaw /opt/ownclaw/repo/deploy/deploy.sh --rollback
+sudo /opt/ownclaw/repo/deploy/deploy.sh --rollback              # on a hardened host: the service user may not restart the service there
 ```
+
+### Put the database back as it was before a build
+
+A build makes its changes to the database at its first start, and rolling the JAR back does not
+undo them. Before a build that changes the database is put in place, `deploy.sh` copies the
+database to `backups/ownclaw-db-<UTC time>.db` (the last 5 such copies are kept) and says so in
+`logs/deploy.log`. A build whose copy cannot be made is not deployed. Nothing puts a copy back by
+itself.
+
+The database and the JAR go back together: started on the older database, the build that made
+the change makes it again. The JAR that goes with a copy is the one that was installed when the
+copy was taken. `logs/deploy.log` names it on the line after the copy's:
+
+```
+Copied the database to ownclaw-db-20261115T101500Z.db (30 MB) before the build that changes it; installed: 1a2b3c4...
+Backed up current JAR to ownclaw-20261115-111501.jar          <- this one
+```
+
+(If that deploy says "staged but never started" instead of "Backed up", it is the newest JAR
+backup from before the copy.) JAR backups rotate with every deploy, five are kept: when it is
+gone, that build has to be made again from the commit named after "installed:".
+
+Only the database goes back -- uploads and skills stay as they are -- and what was written after
+the copy is lost. The lines below are for a host where `backups/` belongs to the service account
+(`--harden`, and the default); where it is root's, read and copy as root and give the database
+back to `ownclaw` afterwards.
+
+```bash
+sudo systemctl stop ownclaw-update.timer ownclaw-update.service   # no update in the middle (where the timer is used)
+sudo systemctl stop ownclaw
+cd /opt/ownclaw
+ls -l backups/        # the copy and the JAR: regular files, the JAR root's on a hardened host
+
+# Set the database of now aside; do not delete it.
+aside=data/set-aside-$(date -u +%Y%m%dT%H%M%SZ)
+sudo -u ownclaw mkdir "$aside"
+sudo -u ownclaw sh -c 'mv data/ownclaw.db* "$1"/' _ "$aside"
+sudo -u ownclaw cp backups/ownclaw-db-<time>.db data/ownclaw.db
+
+# The JAR that goes with the copy. The service is stopped, so it can be copied over.
+sudo cp backups/ownclaw-<time>.jar ownclaw.jar
+sudo systemctl start ownclaw
+sudo systemctl start ownclaw-update.timer
+```
+
+The updater still takes the newer build for the installed one, so it deploys nothing until the
+next push to `main` -- and that push brings the change to the database back, unless it takes it
+out.
 
 ### View application logs
 
