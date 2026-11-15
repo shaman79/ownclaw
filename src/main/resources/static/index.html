@@ -5955,7 +5955,7 @@
         if (sub === 'live') showLive(data.data.live, content);
         else if (sub === 'progress') updateActivity(content);
         else showActivity(content, data.data.category ? data.data : null);
-        if (sub === 'completed' || sub === 'failed' || sub === 'rollback' || sub === 'need_input') doneActivity();
+        if (sub === 'completed' || sub === 'failed' || sub === 'need_input') doneActivity();
     }
 
 
@@ -6503,14 +6503,14 @@
         // A status of a task in another chat marks that chat in the list, and the chat on screen
         // is left alone: tasks of different chats run side by side. One that names no chat is of
         // no chat's task, and shown as it always was.
-        var ending = sub === 'completed' || sub === 'failed' || sub === 'rollback' || sub === 'need_input';
+        var ending = sub === 'completed' || sub === 'failed' || sub === 'need_input';
         if (data.sessionId) markWorking(data.sessionId, !ending);
         if (data.sessionId && data.sessionId !== displayedSessionId) return;
         var detail = data.data && data.data.category ? data.data : null;
         // Claim this window's working state for the first task we hear from. A task
         // that was queued behind the one whose trace is shown starts a trace of its own.
         if (data.taskId && !activeTaskId
-                && sub !== 'completed' && sub !== 'failed' && sub !== 'rollback') {
+                && sub !== 'completed' && sub !== 'failed') {
             if (traceTaskId && traceTaskId !== data.taskId) resetActivity();
             activeTaskId = traceTaskId = data.taskId;
         }
@@ -6520,8 +6520,7 @@
         if (data.data && data.data.totalSteps != null) updateStats(data.data);
         // A message the running task ended without reading: it runs as its own task.
         if (data.data && data.data.requeued) markFate(bubbleOf(data.data.requeued), content);
-        if (sub === 'completed' || sub === 'failed' || sub === 'rollback'
-                || sub === 'need_input') {
+        if (sub === 'completed' || sub === 'failed' || sub === 'need_input') {
             // Only the task we are actually following may end the working state.
             // When either side has no id, behave as before rather than risk a
             // spinner that never stops.

@@ -242,8 +242,8 @@ public class ChatStatusEmitter {
         }
 
         public enum Type {
-            QUEUED, STARTED, STEP, PROGRESS, NEED_INPUT, CREDENTIAL,
-            MENTOR, COMPLETED, FAILED, ROLLBACK, WARNING, DEBUG, SCHEDULED,
+            QUEUED, STEP, PROGRESS, NEED_INPUT,
+            COMPLETED, FAILED, WARNING, DEBUG, SCHEDULED,
             /**
              * The answer itself, from work that finished while nobody was watching.
              * <p>
@@ -276,15 +276,11 @@ public class ChatStatusEmitter {
         public String formatted() {
             return switch (type) {
                 case QUEUED     -> "\uD83D\uDCCB " + text;  // 📋
-                case STARTED    -> "⚙\uFE0F " + text;       // ⚙️
                 case STEP       -> "→ " + text;
                 case PROGRESS   -> "⏳ " + text;
                 case NEED_INPUT -> "❓ " + text;
-                case CREDENTIAL -> "\uD83D\uDD11 " + text;  // 🔑
-                case MENTOR     -> "\uD83E\uDDE0 " + text;  // 🧠
                 case COMPLETED  -> "✅ " + text;
                 case FAILED     -> "❌ " + text;
-                case ROLLBACK   -> "⏪ " + text;
                 case WARNING    -> "⚠\uFE0F " + text;       // ⚠️
                 case DEBUG      -> "\uD83D\uDC1B " + text;  // 🐛
                 case SCHEDULED  -> "\uD83D\uDD54 " + text;  // 🕔
