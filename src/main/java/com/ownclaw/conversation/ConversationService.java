@@ -233,8 +233,6 @@ public class ConversationService {
      * prompt -- /files lists uploaded files by name, and a file's name can carry an account
      * number -- and no part of what is being continued; a {@code progress} row is the owner's
      * view of a task at work ({@code TaskChat}), and its private text a summary only he may read.
-     * Rows an earlier summariser marked {@code compressed} are read like any other; they were
-     * marked, never changed.
      */
     public List<Map<String, Object>> contextOf(String userId, String messageId) {
         return jdbc.queryForList("""

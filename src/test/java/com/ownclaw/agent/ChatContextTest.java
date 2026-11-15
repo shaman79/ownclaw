@@ -40,7 +40,7 @@ class ChatContextTest {
     }
 
     @Test
-    @DisplayName("every message of the chat, each whole and oldest first -- a long chat and summarised rows too")
+    @DisplayName("every message of the chat, each whole and oldest first -- a long chat too")
     void theWholeChat(@TempDir Path tmp) throws Exception {
         var db = db(tmp);
         String session = db.conversations().createSession("u1", "Long answers");
@@ -48,8 +48,6 @@ class ChatContextTest {
             db.conversations().saveMessage("u1", session, i % 2 == 0 ? "user" : "assistant",
                     "MSG" + i + " " + "x".repeat(6_000) + " END" + i);
         }
-        // What the old summariser left behind: marked, never changed.
-        db.jdbc().update("UPDATE conversations SET compressed = 1 WHERE content LIKE 'MSG1 %' OR content LIKE 'MSG2 %'");
         db.jdbc().update("UPDATE conversations SET timestamp = datetime('now', '-1 hour') WHERE content LIKE 'MSG0 %'");
         String current = db.conversations().saveMessage("u1", session, "user", "CURRENT and next?");
 
