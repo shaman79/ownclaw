@@ -493,8 +493,6 @@ public class ConversationService {
                     + "(SELECT id FROM conversations WHERE user_id = ? AND session_id = ?)", userId, sessionId);
             jdbc.update("DELETE FROM conversations WHERE user_id = ? AND session_id = ?",
                     userId, sessionId);
-            jdbc.update("DELETE FROM session_summaries WHERE user_id = ? AND session_id = ?",
-                    userId, sessionId);
             jdbc.update("DELETE FROM chat_sessions WHERE id = ? AND user_id = ?",
                     sessionId, userId);
 
