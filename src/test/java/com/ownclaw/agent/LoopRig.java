@@ -248,7 +248,7 @@ final class LoopRig {
         // The real image store behind the door, as Spring wires it: a pasted image is read from its file.
         var gateway = new CloudGateway(cloud, cloud, config, new EventEgressLedger(events, new ObjectMapper()), null,
                 redactor, files);
-        var router = new LlmRouter(local, gateway, config, null);
+        var router = new LlmRouter(local, gateway, null);
         registry = new ToolRegistry(tools);
         vault = new CredentialVault(jdbc);
         vault.init();

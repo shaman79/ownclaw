@@ -21,7 +21,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /**
  * A file's path is built from the stored_name in its row, and the row is trusted on the way out:
- * by a skill handed the file, by the download endpoint, by delete. A row edited to say
+ * by a skill handed the file, by a read of its text, by delete. A row edited to say
  * {@code ../ownclaw.db} must give no path at all, rather than the database.
  */
 class FileStorageServicePathTest {

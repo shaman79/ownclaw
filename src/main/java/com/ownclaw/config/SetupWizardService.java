@@ -2,7 +2,6 @@ package com.ownclaw.config;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.ownclaw.agent.LlmRouter;
 import okhttp3.OkHttpClient;
 import okhttp3.Request;
 import okhttp3.Response;
@@ -39,7 +38,6 @@ public class SetupWizardService {
     private final OkHttpClient http;
     private final ObjectMapper mapper;
     private final ObjectProvider<com.ownclaw.interfaces.telegram.TelegramBotService> telegramBotProvider;
-    private final ObjectProvider<LlmRouter> llmRouterProvider;
     private final com.ownclaw.llm.LocalModelCheck localModelCheck;
 
     /** Cached diagnostic result, refreshed on demand. */
@@ -55,13 +53,11 @@ public class SetupWizardService {
 
     public SetupWizardService(JdbcTemplate jdbc, OwnClawConfig config, ObjectMapper mapper,
                               ObjectProvider<com.ownclaw.interfaces.telegram.TelegramBotService> telegramBotProvider,
-                              ObjectProvider<LlmRouter> llmRouterProvider,
                               com.ownclaw.llm.LocalModelCheck localModelCheck) {
         this.jdbc = jdbc;
         this.config = config;
         this.mapper = mapper;
         this.telegramBotProvider = telegramBotProvider;
-        this.llmRouterProvider = llmRouterProvider;
         this.localModelCheck = localModelCheck;
         this.http = new OkHttpClient.Builder()
                 .connectTimeout(5, TimeUnit.SECONDS)
@@ -310,11 +306,6 @@ public class SetupWizardService {
         getSetting("mentor_model").ifPresent(model -> config.getMentor().setModel(model));
         getSetting("telegram_bot_token").ifPresent(token -> config.getTelegram().setBotToken(token));
         getSetting("telegram_enabled").ifPresent(v -> config.getTelegram().setEnabled(Boolean.parseBoolean(v)));
-        // Re-resolve cloud provider if LlmRouter is available
-        try {
-            var router = llmRouterProvider.getIfAvailable();
-            if (router != null) router.resolveCloudProvider();
-        } catch (Exception ignored) {}
     }
 
     // ── Wizard state machine (used by ChatWebSocketHandler) ─────────────
@@ -447,11 +438,6 @@ public class SetupWizardService {
                 config.getMentor().setApiKey(key);
             }
         }
-        // Re-resolve cloud provider in the router
-        try {
-            var router = llmRouterProvider.getIfAvailable();
-            if (router != null) router.resolveCloudProvider();
-        } catch (Exception ignored) {}
 
         var sb = new StringBuilder();
         if (!isSkip(input)) {

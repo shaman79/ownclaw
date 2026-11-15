@@ -316,7 +316,7 @@ class ScheduledDeliveryTest {
     }
 
     @Test
-    @DisplayName("a task's runs are all reachable: every run, or a page of them")
+    @DisplayName("the runs are all reachable: every run, or a page of them")
     void runsArePaged(@TempDir Path tmp) throws Exception {
         start(tmp);
         queue.result = AgentResult.completed("ok", new AgentTrajectory(), 1);
@@ -331,10 +331,6 @@ class ScheduledDeliveryTest {
                 new Class<?>[]{HttpServletRequest.class},
                 (p, m, args) -> "getAttribute".equals(m.getName()) && "userId".equals(args[0]) ? USER : null);
 
-        assertEquals(25, runs(controller.getTask(request, id, null, 0).getBody()).size(),
-                "every run, where it used to be the newest 20");
-        assertEquals(10, runs(controller.getTask(request, id, 10L, 10).getBody()).size());
-        assertEquals(5, runs(controller.getTask(request, id, 10L, 20).getBody()).size(), "the last page");
         // Two hundred more, of another task, for the history of all of them.
         for (int i = 0; i < 200; i++) {
             jdbc.update("INSERT INTO scheduled_task_runs (task_id, user_id, description, task_type, status) "

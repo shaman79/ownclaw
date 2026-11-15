@@ -35,26 +35,6 @@ public class ScheduledTaskController {
     }
 
     /**
-     * Get a single task with its execution runs, newest first: every run, or a page of them.
-     * GET /api/scheduled-tasks/{taskId}?limit=20&offset=0 -- without a limit, every run from the
-     * offset on. It used to return the 20 newest and no way to reach the rest.
-     */
-    @GetMapping("/{taskId}")
-    public ResponseEntity<?> getTask(HttpServletRequest request,
-                                     @PathVariable long taskId,
-                                     @RequestParam(required = false) Long limit,
-                                     @RequestParam(defaultValue = "0") long offset) {
-        String userId = (String) request.getAttribute("userId");
-        var task = scheduledTaskService.getTask(userId, taskId);
-        if (task.isEmpty()) {
-            return ResponseEntity.notFound().build();
-        }
-        List<Map<String, Object>> runs = scheduledTaskService.getTaskRuns(userId, taskId,
-                limit == null ? -1 : limit, Math.max(offset, 0));
-        return ResponseEntity.ok(Map.of("task", task.get(), "runs", runs));
-    }
-
-    /**
      * Get execution history for all tasks, newest first: every run, or a page of them.
      * GET /api/scheduled-tasks/runs?limit=50&offset=0 -- without a limit, every run from the
      * offset on. A limit is not lowered: asked for 1,000, it used to answer 200.

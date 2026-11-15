@@ -900,7 +900,6 @@ CREATE TABLE conversations (
     session_id TEXT NOT NULL,
     role TEXT NOT NULL,          -- user | executor | mentor | system | status
     content TEXT NOT NULL,
-    compressed_content TEXT,     -- Executor-generated summary
     tokens_used INTEGER,
     timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
     metadata JSON               -- skill used, plan reference, etc.
@@ -917,8 +916,10 @@ CREATE TABLE session_summaries (
 );
 ```
 
-Nothing writes `compressed_content` or `session_summaries` any more: the summariser is gone (§7.1),
-and the rows it once marked are read like any other.
+The summariser is gone (§7.1), and migration 027 dropped what it left on `conversations`: the
+`compressed` mark on the rows it had summarised, and `compressed_content`, which nothing ever
+wrote. `session_summaries` is empty, and nothing reads or writes it; the table stays for one more
+release, because the release before 027 still deletes a chat's summary with the chat.
 
 ### 7.3 Nothing Is Compressed
 

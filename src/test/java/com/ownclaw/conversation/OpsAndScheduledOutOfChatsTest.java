@@ -163,7 +163,8 @@ class OpsAndScheduledOutOfChatsTest {
         row("r3", "u2", "open-results", "2026-10-01 05:03:41", "assistant", "**Scheduled task: Fetch daily news digest**\n\nDigest.", null);
         jdbc.update("INSERT INTO session_summaries (session_id, user_id, summary) VALUES ('only-results', 'u1', 'a digest')");
 
-        jdbc = MigratedDatabase.at(file);
+        // As far as 026: 027 empties the summaries, whatever this migration left of them.
+        jdbc = MigratedDatabase.before(file, DropUnusedTablesTest.MIGRATION);
 
         assertEquals(0, jdbc.queryForObject("SELECT COUNT(*) FROM chat_sessions WHERE id = 'only-results'", Integer.class));
         assertEquals(0, jdbc.queryForObject("SELECT COUNT(*) FROM session_summaries", Integer.class));

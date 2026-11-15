@@ -6,9 +6,12 @@ import liquibase.database.DatabaseFactory;
 import liquibase.database.jvm.JdbcConnection;
 import liquibase.resource.ClassLoaderResourceAccessor;
 import liquibase.ui.LoggerUIService;
+import org.springframework.boot.env.YamlPropertySourceLoader;
+import org.springframework.core.io.ClassPathResource;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
 
+import java.io.IOException;
 import java.nio.file.Path;
 import java.sql.Connection;
 import java.sql.DriverManager;
@@ -35,8 +38,19 @@ public final class MigratedDatabase {
     private MigratedDatabase() {}
 
     public static JdbcTemplate at(Path file) throws Exception {
-        migrate(file, liquibase -> liquibase.update(""));
-        return new JdbcTemplate(new DriverManagerDataSource("jdbc:sqlite:" + file));
+        return at(file, "");
+    }
+
+    /**
+     * {@link #at(Path)}, migrated and then read on connections opened with these URL parameters --
+     * {@link #productionParameters} for the application's own. SQLite enforces foreign keys only
+     * on a connection that asks for it, and refuses some statements only there: a changeset has
+     * to pass where production runs it.
+     */
+    public static JdbcTemplate at(Path file, String parameters) throws Exception {
+        String url = "jdbc:sqlite:" + file + parameters;
+        migrate(url, liquibase -> liquibase.update(""));
+        return new JdbcTemplate(new DriverManagerDataSource(url));
     }
 
     /**
@@ -46,22 +60,41 @@ public final class MigratedDatabase {
      * @param changelog the file's name, e.g. "023-ops-and-scheduled-out-of-chats.sql"
      */
     public static JdbcTemplate before(Path file, String changelog) throws Exception {
-        migrate(file, liquibase -> {
+        return before(file, changelog, "");
+    }
+
+    /** {@link #before(Path, String)}, on connections opened with these URL parameters, as {@link #at(Path, String)}. */
+    public static JdbcTemplate before(Path file, String changelog, String parameters) throws Exception {
+        String url = "jdbc:sqlite:" + file + parameters;
+        migrate(url, liquibase -> {
             var unrun = liquibase.listUnrunChangeSets(null, null);
             int first = 0;
             while (first < unrun.size() && !unrun.get(first).getFilePath().endsWith(changelog)) first++;
             if (first == unrun.size()) throw new IllegalArgumentException("no changeset of " + changelog);
             liquibase.update(first, "");
         });
-        return new JdbcTemplate(new DriverManagerDataSource("jdbc:sqlite:" + file));
+        return new JdbcTemplate(new DriverManagerDataSource(url));
+    }
+
+    /**
+     * The URL parameters the application opens its database with -- foreign keys enforced among
+     * them -- as the application.yaml it loads gives them: spring.datasource.url from its '?' on.
+     */
+    public static String productionParameters() throws IOException {
+        for (var source : new YamlPropertySourceLoader()
+                .load("application.yaml", new ClassPathResource("application.yaml"))) {
+            String url = String.valueOf(source.getProperty("spring.datasource.url"));
+            if (url.contains("?")) return url.substring(url.indexOf('?'));
+        }
+        throw new IllegalStateException("application.yaml has no spring.datasource.url with parameters");
     }
 
     private interface Run {
         void on(Liquibase liquibase) throws Exception;
     }
 
-    private static void migrate(Path file, Run run) throws Exception {
-        try (Connection c = DriverManager.getConnection("jdbc:sqlite:" + file)) {
+    private static void migrate(String url, Run run) throws Exception {
+        try (Connection c = DriverManager.getConnection(url)) {
             var database = DatabaseFactory.getInstance()
                     .findCorrectDatabaseImplementation(new JdbcConnection(c));
             // Its progress report goes to the logger silenced above, not to the suite's output.

@@ -13,7 +13,7 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * REST controller for chat session management: create, list, switch, rename, delete, search.
+ * REST controller for chat session management: create, list, rename, delete, search.
  * All endpoints require JWT authentication (enforced by JwtAuthFilter).
  */
 @RestController
@@ -64,21 +64,6 @@ public class ChatHistoryController {
     }
 
     /**
-     * Switch to an existing chat session.
-     * PUT /api/chats/{sessionId}/activate
-     */
-    @PutMapping("/{sessionId}/activate")
-    public ResponseEntity<?> switchSession(HttpServletRequest request,
-                                           @PathVariable String sessionId) {
-        String userId = (String) request.getAttribute("userId");
-        // A chat of the caller's: pointed at another account's, Telegram and pages that follow
-        // the open chat filed this account's messages into that one.
-        if (!conversationService.hasChat(userId, sessionId)) return ResponseEntity.notFound().build();
-        conversationService.setActiveSession(userId, sessionId);
-        return ResponseEntity.ok(Map.of("sessionId", sessionId));
-    }
-
-    /**
      * Get messages for a specific session, oldest first: all of them, or a page of them.
      * GET /api/chats/{sessionId}/messages
      * Query params: limit=N for the newest N, before=<message id> for those before that row;
@@ -121,18 +106,6 @@ public class ChatHistoryController {
         }
         conversationService.renameSession(userId, sessionId, title.trim());
         return ResponseEntity.ok(Map.of("sessionId", sessionId, "title", title.trim()));
-    }
-
-    /**
-     * Archive a chat session (soft delete).
-     * PUT /api/chats/{sessionId}/archive
-     */
-    @PutMapping("/{sessionId}/archive")
-    public ResponseEntity<?> archiveSession(HttpServletRequest request,
-                                            @PathVariable String sessionId) {
-        String userId = (String) request.getAttribute("userId");
-        conversationService.archiveSession(userId, sessionId);
-        return ResponseEntity.ok(Map.of("archived", true, "sessionId", sessionId));
     }
 
     /**

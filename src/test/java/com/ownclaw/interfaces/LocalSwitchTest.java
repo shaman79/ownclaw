@@ -40,7 +40,7 @@ class LocalSwitchTest {
     void theSwitch(@TempDir Path tmp) throws Exception {
         var db = MigratedDatabase.at(tmp.resolve("t.db"));
         var config = new OwnClawConfig();
-        var settings = new SetupWizardService(db, config, new ObjectMapper(), null, null, null);
+        var settings = new SetupWizardService(db, config, new ObjectMapper(), null, null);
         var mode = new LocalMode(config, settings);
         var commands = commands(mode, "owner");
 
@@ -53,7 +53,7 @@ class LocalSwitchTest {
         assertEquals(Optional.of("true"), settings.getSetting("local_only"));
 
         var restarted = new OwnClawConfig();
-        new SetupWizardService(db, restarted, new ObjectMapper(), null, null, null).applyOverrides();
+        new SetupWizardService(db, restarted, new ObjectMapper(), null, null).applyOverrides();
         assertTrue(restarted.getMentor().isLocalOnly(), "a restart forgot the switch");
 
         assertTrue(commands.handle("owner", "/local off").orElseThrow().startsWith("Local only is **off**"));
@@ -65,7 +65,7 @@ class LocalSwitchTest {
         mode.setPreferCost(false);
         assertEquals(Optional.of("false"), settings.getSetting("prefer_cost"));
         var again = new OwnClawConfig();
-        new SetupWizardService(db, again, new ObjectMapper(), null, null, null).applyOverrides();
+        new SetupWizardService(db, again, new ObjectMapper(), null, null).applyOverrides();
         assertFalse(again.getMentor().isPreferCost(), "a restart forgot the slider");
         assertTrue(commands.handle("owner", "/help").orElseThrow().contains("`/local [on|off]`"));
     }

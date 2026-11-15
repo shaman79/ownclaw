@@ -939,8 +939,10 @@ public class ScheduledTaskService {
     }
 
     /**
-     * A page of the runs of all of a user's scheduled tasks, newest first; {@code limit} and
-     * {@code offset} as in {@link #getTaskRuns}.
+     * A page of the runs of all of a user's scheduled tasks, newest first.
+     *
+     * @param limit  how many; a negative limit is every run from {@code offset} on
+     * @param offset how many of the newest to skip
      */
     public List<Map<String, Object>> getRunHistory(String userId, long limit, long offset) {
         return jdbc.queryForList("""
@@ -952,21 +954,6 @@ public class ScheduledTaskService {
             ORDER BY r.executed_at DESC
             LIMIT ? OFFSET ?
             """, userId, limit, offset);
-    }
-
-    /**
-     * A page of one task's runs, newest first.
-     *
-     * @param limit  how many; a negative limit is every run from {@code offset} on
-     * @param offset how many of the newest to skip
-     */
-    public List<Map<String, Object>> getTaskRuns(String userId, long taskId, long limit, long offset) {
-        return jdbc.queryForList("""
-            SELECT * FROM scheduled_task_runs
-            WHERE user_id = ? AND task_id = ?
-            ORDER BY executed_at DESC
-            LIMIT ? OFFSET ?
-            """, userId, taskId, limit, offset);
     }
 
     /**

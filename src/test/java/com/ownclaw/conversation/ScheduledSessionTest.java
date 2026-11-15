@@ -88,7 +88,8 @@ class ScheduledSessionTest {
         start(tmp);
         String pinned = conversations.scheduledSession("u1");
 
-        conversations.archiveSession("u1", pinned);
+        // Nothing archives a chat any more; a pinned chat archived before is still passed over.
+        jdbc.update("UPDATE chat_sessions SET archived = 1 WHERE id = ?", pinned);
 
         String next = conversations.scheduledSession("u1");
         assertNotEquals(pinned, next);

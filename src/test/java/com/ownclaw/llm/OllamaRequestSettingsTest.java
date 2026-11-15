@@ -91,7 +91,7 @@ class OllamaRequestSettingsTest {
 
         var answer = new OllamaProvider(config, JSON, check).chat(List.of(LlmMessage.user("hello")), new LlmRequestConfig(null, null, false));
         var probe = new OpsService(config, null, null, null, null, null, null, JSON, check, com.ownclaw.sandbox.JailTestKit.off()).ollama();
-        var welcome = new SetupWizardService(null, config, JSON, null, null, check).processStep(0, null);
+        var welcome = new SetupWizardService(null, config, JSON, null, check).processStep(0, null);
 
         assertEquals(3, chats.size(), "one call each: " + chats);
         for (JsonNode body : chats) {

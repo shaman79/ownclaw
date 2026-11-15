@@ -157,21 +157,6 @@ public class LongRunningTaskManager {
         log.debug("Progress for task {}: {}% - {}", taskId, percent, message);
     }
 
-    /**
-     * Record a heartbeat without a progress message (keeps the task alive).
-     */
-    public void heartbeat(String taskId) {
-        TaskHeartbeat hb = activeHeartbeats.get(taskId);
-        if (hb != null) {
-            hb.lastHeartbeatMs = System.currentTimeMillis();
-        }
-        jdbc.update("""
-            UPDATE long_running_tasks
-            SET heartbeat_at = datetime('now'), status = 'running'
-            WHERE task_id = ? AND status IN ('running', 'stalled')
-            """, taskId);
-    }
-
     // ── Completion ──
 
     /**

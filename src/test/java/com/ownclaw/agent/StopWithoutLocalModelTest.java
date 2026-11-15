@@ -87,7 +87,7 @@ class StopWithoutLocalModelTest {
         try (var wedged = new com.ownclaw.llm.WedgedOllama()) {
             for (LlmProvider local : new LlmProvider[]{new Down(), null, wedged.provider()}) {
                 var loop = new AgentLoop(null, null, null, new ChatStatusEmitter(), config,
-                        new LlmRouter(local, null, config, null), null, null, null, null, null, null,
+                        new LlmRouter(local, null, null), null, null, null, null, null, null,
                         conversations, null, null, null, new EventLogService(jdbc), null, null, files,
                         new com.ownclaw.privacy.Redactor(null));
                 String which = local == null ? "no local model"

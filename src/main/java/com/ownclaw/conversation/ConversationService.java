@@ -233,8 +233,6 @@ public class ConversationService {
      * prompt -- /files lists uploaded files by name, and a file's name can carry an account
      * number -- and no part of what is being continued; a {@code progress} row is the owner's
      * view of a task at work ({@code TaskChat}), and its private text a summary only he may read.
-     * Rows an earlier summariser marked {@code compressed} are read like any other; they were
-     * marked, never changed.
      */
     public List<Map<String, Object>> contextOf(String userId, String messageId) {
         return jdbc.queryForList("""
@@ -465,17 +463,6 @@ public class ConversationService {
     }
 
     /**
-     * Archive (soft-delete) a session.
-     */
-    public void archiveSession(String userId, String sessionId) {
-        jdbc.update("UPDATE chat_sessions SET archived = 1 WHERE id = ? AND user_id = ?",
-                sessionId, userId);
-        // If this was the active session, clear it
-        jdbc.update("DELETE FROM active_session WHERE user_id = ? AND session_id = ?",
-                userId, sessionId);
-    }
-
-    /**
      * Permanently delete a session, its messages and their links to the files sent with them;
      * the files themselves stay, listed by /files. All of it or nothing, in one transaction.
      * If the deleted session was the active one, switches to the most recent remaining
@@ -494,8 +481,6 @@ public class ConversationService {
             jdbc.update("DELETE FROM message_attachments WHERE message_id IN "
                     + "(SELECT id FROM conversations WHERE user_id = ? AND session_id = ?)", userId, sessionId);
             jdbc.update("DELETE FROM conversations WHERE user_id = ? AND session_id = ?",
-                    userId, sessionId);
-            jdbc.update("DELETE FROM session_summaries WHERE user_id = ? AND session_id = ?",
                     userId, sessionId);
             jdbc.update("DELETE FROM chat_sessions WHERE id = ? AND user_id = ?",
                     sessionId, userId);

@@ -106,7 +106,7 @@ class TabChatsTest {
             @Override public Optional<String> validateToken(String token) { return Optional.of(USER); }
             @Override public boolean isOwner(String userId) { return true; }
         };
-        var wizard = new SetupWizardService(null, new OwnClawConfig(), null, null, null, null) {
+        var wizard = new SetupWizardService(null, new OwnClawConfig(), null, null, null) {
             @Override public boolean isSetupNeeded() { return false; }
         };
         var interactions = new SkillInteractionHandler();

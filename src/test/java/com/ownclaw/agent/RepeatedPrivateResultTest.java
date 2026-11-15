@@ -280,14 +280,14 @@ class RepeatedPrivateResultTest {
                 var jdbc = MigratedDatabase.at(tmp.resolve(provider + "-" + stop.length() + ".db"));
                 var emitter = new com.ownclaw.observability.ChatStatusEmitter();
                 var events = new com.ownclaw.observability.EventLogService(jdbc);
-                var router = new LlmRouter(local, gateway, config, null);
+                var router = new LlmRouter(local, gateway, null);
                 var loop = new AgentLoop(new ThinkingEngine(registry, config, router), new CriticAgent(registry),
                         registry, emitter, config, router, null, new SkillCuratorService(jdbc, null, null),
                         new AssistantPartsTest.NoSkills(), new com.ownclaw.observability.DebugSessionService(),
                         new com.ownclaw.core.TaskCancellationService(), null, null,
                         new com.ownclaw.core.LongRunningTaskManager(jdbc, emitter, events, config), null,
                         new com.ownclaw.core.TokenBudgetTracker(jdbc, config, emitter), events, null,
-                        new LocalExecutor(new LlmRouter(local, null, null, null), registry, emitter,
+                        new LocalExecutor(new LlmRouter(local, null, null), registry, emitter,
                                 new DelegationBehaviourTest.Usage()), null, new com.ownclaw.privacy.Redactor(null));
                 var ctx = new AgentContext("u1", "t-partial", "Email me the morning digest.");
                 ctx.setLocalTierReady(false);

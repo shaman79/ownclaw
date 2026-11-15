@@ -255,7 +255,7 @@ public class FileStorageService implements CloudImages {
      * regular file.
      * <p>
      * A link at the name -- left by a skill that ran unjailed, say -- is not followed: the path
-     * is read into a model's context and served for download, and would hand over whatever the
+     * is read into a model's context and handed to skills, and would hand over whatever the
      * link leads to. Nor is a file with a second name, a hard link: {@link #store} writes each
      * upload new, so another name was made later, and to .env or the database it is that file.
      * The count is read where the file system keeps one the JVM can read ({@link SkillJail#nlink}).
@@ -285,8 +285,7 @@ public class FileStorageService implements CloudImages {
      * {@link #store} only ever writes such names, but the row is read back from the database and
      * trusted: a stored_name of {@code ../ownclaw.db} or {@code ../../.env}, put there by an edit
      * of the database, would hand that file to a skill as its attachment -- read-only inside the
-     * jail, but read -- or serve it from the download endpoint. So the name is checked here, on
-     * the way out, where every caller gets it.
+     * jail, but read. So the name is checked here, on the way out, where every caller gets it.
      */
     private Path storedPath(String storedName) {
         // '/' everywhere, and the platform's own separator ('\\' on Windows; on Linux a

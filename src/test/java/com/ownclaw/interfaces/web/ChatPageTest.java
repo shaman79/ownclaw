@@ -300,7 +300,7 @@ class ChatPageTest {
                 "and its trace, left on screen in another chat, goes: " + shown);
         assertTrue(shown.contains("if (data.taskId && data.taskId !== traceTaskId) { if (traceTaskId) resetActivity(); "
                 + "traceTaskId = data.taskId; }"), "a trace of its own: " + shown);
-        assertTrue(shown.contains("if (sub === 'completed' || sub === 'failed' || sub === 'rollback' || sub === 'need_input') "
+        assertTrue(shown.contains("if (sub === 'completed' || sub === 'failed' || sub === 'need_input') "
                 + "doneActivity();"), "its strip ends with it: " + shown);
         for (String state : new String[] {"setThinking(", "activeTaskId", "resetThinkingSafetyTimer(", "stopBtn"}) {
             assertFalse(shown.contains(state), "the working state is not its own (" + state + "): " + shown);
