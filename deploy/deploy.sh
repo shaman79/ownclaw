@@ -752,7 +752,7 @@ do_reset() {
     echo "    CLEAR  — all generated skills and their Python virtualenvs"
     echo ""
     echo "  Preserved:"
-    echo "    KEEP   — .env  (OPENAI_API_KEY, TELEGRAM_BOT_TOKEN, OWNCLAW_EXECUTOR_*, etc.)"
+    echo "    KEEP   — .env  (ANTHROPIC_API_KEY, TELEGRAM_BOT_TOKEN, OWNCLAW_EXECUTOR_*, etc.)"
     echo "    KEEP   — system_settings rows for connection/API config (URL, model, port, token)"
     echo "    BACKUP — database backed up to $DEPLOY_DIR/backups/ before deletion"
     echo ""
@@ -776,7 +776,9 @@ do_reset() {
 
     # ── Step 2: Preserve connection/API settings from system_settings ───────
     # These rows hold wizard-entered config that complements .env.
-    # We preserve any key that looks like a URL, model, port, API key, or token.
+    # We preserve any key that looks like a URL, model, port, API key, or token -- and the
+    # choice of cloud provider: with the key kept and the choice lost, the install came back on
+    # the default provider, whose key it may not have.
     local _saved_settings=""
     if [ -f "$db_path" ] && command -v sqlite3 &>/dev/null; then
         log "Reading connection settings from system_settings..."
@@ -785,7 +787,7 @@ do_reset() {
              key LIKE '%url%'   OR key LIKE '%model%'   OR key LIKE '%port%'  OR \
              key LIKE '%token%' OR key LIKE '%api_key%' OR key LIKE '%executor%' OR \
              key LIKE '%mentor%' OR key LIKE '%telegram%' OR key LIKE '%openai%' OR \
-             key LIKE '%ollama%';" 2>/dev/null || true)
+             key LIKE '%ollama%' OR key LIKE '%provider%';" 2>/dev/null || true)
         if [ -n "$_saved_settings" ]; then
             local _n
             _n=$(echo "$_saved_settings" | grep -c '.' || true)
