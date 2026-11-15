@@ -19,7 +19,7 @@ class SetupWizardSecretTest {
     void keyPastedEarlyIsNotRepeated(@TempDir Path tmp) throws Exception {
         var config = new OwnClawConfig();
         var wizard = new SetupWizardService(MigratedDatabase.at(tmp.resolve("t.db")), config,
-                new ObjectMapper(), null, null, null);
+                new ObjectMapper(), null, null);
         String key = "sk-ant-api03-PastedEarly";
         var reply = wizard.processStep(1, key);
         assertFalse(reply.message().toLowerCase().contains(key.toLowerCase()), reply.message());

@@ -338,7 +338,7 @@ class LocalModeTest {
         ctx.setUnattended(true);
         ctx.setLocalTierReady(true);
         var engine = new ThinkingEngine(new com.ownclaw.agent.tools.ToolRegistry(List.of(NOOP)), rig.config,
-                new LlmRouter(local, null, rig.config, null));
+                new LlmRouter(local, null, null));
 
         var mode = engine.stepMode(ctx, local);
 

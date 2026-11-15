@@ -67,7 +67,7 @@ class ThinkingEffortCallsTest {
                 p -> com.ownclaw.agent.tools.ToolResult.success("nothing to report"));
         var task = DelegationBehaviourTest.task();
         task.setOptions(new TaskOptions(false, true, "low"));
-        new LocalExecutor(new LlmRouter(llm, null, null, null), new ToolRegistry(List.of(noop)),
+        new LocalExecutor(new LlmRouter(llm, null, null), new ToolRegistry(List.of(noop)),
                 new ChatStatusEmitter(), new DelegationBehaviourTest.Usage())
                 .execute(DelegationBehaviourTest.plan("check the network"), task,
                         DelegationBehaviourTest.UNCOUNTED);

@@ -1,7 +1,6 @@
 package com.ownclaw.interfaces;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.ownclaw.agent.LlmRouter;
 import com.ownclaw.config.LocalMode;
 import com.ownclaw.config.OwnClawConfig;
 import com.ownclaw.config.SetupWizardService;
@@ -28,7 +27,7 @@ class ThinkingEffortSettingTest {
     void savedAndKept(@TempDir Path tmp) throws Exception {
         var db = MigratedDatabase.at(tmp.resolve("t.db"));
         var config = new OwnClawConfig();
-        var settings = new SetupWizardService(db, config, new ObjectMapper(), null, null, null);
+        var settings = new SetupWizardService(db, config, new ObjectMapper(), null, null);
         var effort = new ThinkingEffort(config, settings);
         assertEquals("high", effort.level(), "high until the owner sets it");
 
@@ -42,7 +41,7 @@ class ThinkingEffortSettingTest {
         assertEquals(Optional.of("low"), settings.getSetting("thinking_effort"));
 
         var restarted = new OwnClawConfig();
-        new SetupWizardService(db, restarted, new ObjectMapper(), null, null, null).applyOverrides();
+        new SetupWizardService(db, restarted, new ObjectMapper(), null, null).applyOverrides();
         assertEquals("low", restarted.getMentor().getThinkingEffort(), "a restart forgot the level");
     }
 
@@ -52,10 +51,10 @@ class ThinkingEffortSettingTest {
         var db = MigratedDatabase.at(tmp.resolve("t.db"));
         var config = new OwnClawConfig();
         config.getExecutor().setUrl("");   // the local model's status is then read without a network
-        var settings = new SetupWizardService(db, config, new ObjectMapper(), null, null, null) {
+        var settings = new SetupWizardService(db, config, new ObjectMapper(), null, null) {
             @Override public DiagnosticResult runDiagnostics() { return null; }
         };
-        var controller = new SettingsController(settings, config, new LlmRouter(null, null, config, null),
+        var controller = new SettingsController(settings, config,
                 new AuthService(null, null, config) {
                     @Override public boolean isOwner(String userId) { return true; }
                 },

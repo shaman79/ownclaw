@@ -1,6 +1,5 @@
 package com.ownclaw.interfaces.web;
 
-import com.ownclaw.agent.LlmRouter;
 import com.ownclaw.config.OwnClawConfig;
 import com.ownclaw.users.AuthService;
 import com.ownclaw.config.SetupWizardService;
@@ -22,20 +21,18 @@ public class SettingsController {
 
     private final SetupWizardService setupWizard;
     private final OwnClawConfig config;
-    private final LlmRouter llmRouter;
     private final AuthService authService;
     private final com.ownclaw.llm.LocalModelCheck localModelCheck;
     private final com.ownclaw.config.LocalMode localMode;
     private final com.ownclaw.config.ThinkingEffort thinkingEffort;
 
     public SettingsController(SetupWizardService setupWizard, OwnClawConfig config,
-                              LlmRouter llmRouter, AuthService authService,
+                              AuthService authService,
                               com.ownclaw.llm.LocalModelCheck localModelCheck,
                               com.ownclaw.config.LocalMode localMode,
                               com.ownclaw.config.ThinkingEffort thinkingEffort) {
         this.setupWizard = setupWizard;
         this.config = config;
-        this.llmRouter = llmRouter;
         this.authService = authService;
         this.localModelCheck = localModelCheck;
         this.localMode = localMode;
@@ -165,9 +162,6 @@ public class SettingsController {
                 default -> { /* ignore unknown keys */ }
             }
         }
-
-        // Re-resolve cloud provider after any changes
-        llmRouter.resolveCloudProvider();
 
         // Re-run diagnostics
         setupWizard.runDiagnostics();

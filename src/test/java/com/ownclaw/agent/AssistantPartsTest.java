@@ -399,7 +399,7 @@ class AssistantPartsTest {
     static AgentLoop loop(JdbcTemplate jdbc, ToolRegistry registry, CloudGateway gateway, OwnClawConfig config) {
         var emitter = new ChatStatusEmitter();
         var events = new EventLogService(jdbc);
-        var router = new LlmRouter(new StopWithoutLocalModelTest.Down(), gateway, config, null);
+        var router = new LlmRouter(new StopWithoutLocalModelTest.Down(), gateway, null);
         var engine = new ThinkingEngine(registry, config, router);
         return new AgentLoop(engine, new CriticAgent(registry), registry, emitter, config, router,
                 null, new SkillCuratorService(jdbc, null, null), new NoSkills(),

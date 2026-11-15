@@ -40,7 +40,7 @@ class SetupOwnerOnlyTest {
         final List<Integer> steps = new CopyOnWriteArrayList<>();
 
         Wizard() {
-            super(null, new OwnClawConfig(), null, null, null, null);
+            super(null, new OwnClawConfig(), null, null, null);
         }
 
         @Override public boolean isSetupNeeded() { return true; }

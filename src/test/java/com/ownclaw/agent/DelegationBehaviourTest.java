@@ -112,7 +112,7 @@ class DelegationBehaviourTest {
     }
 
     static LocalExecutor executor(LlmProvider llm, Usage usage, Tool... tools) {
-        return new LocalExecutor(new LlmRouter(llm, null, null, null),
+        return new LocalExecutor(new LlmRouter(llm, null, null),
                 new ToolRegistry(List.of(tools)), new ChatStatusEmitter(), usage);
     }
 
@@ -854,7 +854,7 @@ class DelegationBehaviourTest {
         };
         var llm = new Scripted(call("net_scan", Map.of()), done("scanned"));
 
-        new LocalExecutor(new LlmRouter(llm, null, null, null), new ToolRegistry(List.of(scan)), emitter,
+        new LocalExecutor(new LlmRouter(llm, null, null), new ToolRegistry(List.of(scan)), emitter,
                 new Usage()).execute(plan("scan"), ctx, UNCOUNTED);
 
         assertTrue(lines.contains("Delegate: net_scan: Scanning 1/3 (33%)"), lines.toString());
@@ -1054,7 +1054,7 @@ class DelegationBehaviourTest {
         var llm = new Scripted(done("nothing to do"));
         var task = task();
 
-        new LocalExecutor(new LlmRouter(llm, null, null, null), new ToolRegistry(List.of()), emitter,
+        new LocalExecutor(new LlmRouter(llm, null, null), new ToolRegistry(List.of()), emitter,
                 new Usage()).execute(plan(goal), task, UNCOUNTED);
 
         var step = lines.stream().filter(m -> m.type() == ChatStatusEmitter.StatusMessage.Type.STEP).toList();

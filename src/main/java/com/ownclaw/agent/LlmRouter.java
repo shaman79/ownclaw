@@ -1,6 +1,5 @@
 package com.ownclaw.agent;
 
-import com.ownclaw.config.OwnClawConfig;
 import com.ownclaw.llm.CloudGateway;
 import com.ownclaw.llm.LlmProvider;
 import com.ownclaw.llm.LocalModelCheck;
@@ -8,8 +7,6 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Component;
-
-import jakarta.annotation.PostConstruct;
 
 /**
  * Routes LLM requests to the appropriate provider based on context.
@@ -27,8 +24,8 @@ import jakarta.annotation.PostConstruct;
  * it writes, the analysis of the skill library.
  *
  * <p>Cloud provider is selected based on {@code ownclaw.mentor.provider}:
- * openai (default) or anthropic. The active cloud provider is resolved at startup
- * and whenever the config changes (e.g. via /setup wizard).
+ * openai (default) or anthropic. The gateway reads it on every call, so a change of it
+ * (e.g. via /setup wizard) takes effect at once.
  */
 @Component
 public class LlmRouter {
@@ -42,38 +39,16 @@ public class LlmRouter {
      * take effect without this class holding a stale reference.
      */
     private final CloudGateway cloudProvider;
-    private final OwnClawConfig config;
     private final LocalModelCheck localModelCheck;
 
     public LlmRouter(
             @Qualifier("ollamaProvider") LlmProvider localProvider,
             CloudGateway cloud,
-            OwnClawConfig config,
             LocalModelCheck localModelCheck
     ) {
         this.localProvider = localProvider;
         this.cloudProvider = cloud;
-        this.config = config;
         this.localModelCheck = localModelCheck;
-    }
-
-    @PostConstruct
-    void init() {
-        resolveCloudProvider();
-    }
-
-    /**
-     * Say which cloud provider is configured. It used to swap a field; the gateway now reads the
-     * configuration on every call, so the callers that still invoke this after the wizard or the
-     * settings page change the provider get the log line and nothing else needs to happen.
-     */
-    public void resolveCloudProvider() {
-        String provider = config.getMentor().getProvider();
-        if ("anthropic".equalsIgnoreCase(provider)) {
-            log.info("Cloud LLM provider: Anthropic (model: {})", config.getMentor().getAnthropicModel());
-        } else {
-            log.info("Cloud LLM provider: OpenAI (model: {})", config.getMentor().getModel());
-        }
     }
 
     /**
