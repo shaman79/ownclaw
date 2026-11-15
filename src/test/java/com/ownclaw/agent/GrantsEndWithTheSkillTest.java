@@ -35,6 +35,10 @@ import static org.junit.jupiter.api.Assumptions.assumeFalse;
  * update by the owner, or by maintenance, ends nothing, and bringing a retired skill back is no
  * new skill.
  * <p>
+ * It ends before a byte of the new skill is written, not once the skill is in place: whatever stops
+ * the write after that leaves the code that was there without the others' grants, never new code
+ * with them.
+ * <p>
  * Through the real skill manager and registry over a sandbox that starts nothing, the real vault
  * and grants, the migrated database with foreign keys on, and the real AuthService to say who
  * the owner is.
@@ -264,12 +268,11 @@ class GrantsEndWithTheSkillTest {
     }
 
     @Test
-    @DisplayName("a creation that fails ends nothing: a name refused, code that does not compile or does not load, a credential that is no name, requirements that are none -- the skill stays as it was, granted as it was")
-    void aCreationThatFailsEndsNothing() throws Exception {
+    @DisplayName("a creation refused before anything is written ends nothing: a name refused, code that does not compile, a credential that is no name, requirements that are none -- the skill stays as it was, granted as it was")
+    void aCreationThatIsRefusedEndsNothing() throws Exception {
         write("kid", "kids_mailer", "v1");
         everyoneGrants("kids_mailer");
         grants.grant("owner", "kids_mailer_v2", PASS);   // left under a name the gate of variants refuses
-        grants.grant("owner", "courier", PASS);          // left under a free name
         var ok = skills.launches.answer;
 
         // A variant's name: refused before anything else.
@@ -285,30 +288,73 @@ class GrantsEndWithTheSkillTest {
         Map<String, Object> badRequirements = GrantsKit.Skills.spec("kids_mailer", PASS);
         badRequirements.put("requirements", "-r /etc/passwd");
         assertTrue(skills.manager.createSkill(badRequirements, "kid", () -> false, () -> {}).startsWith("ERROR: the requirements"));
-        // Code that compiles and does not load: the version before it is put back, whole.
-        skills.launches.answer = launch -> launch.script().getFileName().toString().startsWith("_load_check_")
-                ? new SandboxResult(1, "", "ModuleNotFoundError: No module named 'nowhere'", 1, false) : ok.apply(launch);
-        assertTrue(write("kid", "kids_mailer", "does not load").startsWith("ERROR: the new code for 'kids_mailer' does not load"));
-        // A new skill that does not load is set aside, and the name stays free.
-        assertTrue(write("kid", "courier", "does not load either").startsWith("ERROR: 'courier' was written but does not load"));
-        skills.launches.answer = ok;
 
-        assertEquals(List.of("ann", "kid", "owner"), grantedBy("kids_mailer"), "a failed rewrite ended grants");
+        assertEquals(List.of("ann", "kid", "owner"), grantedBy("kids_mailer"), "a refused rewrite ended grants");
         assertTrue(code("kids_mailer").contains("'v1'"), code("kids_mailer"));
         assertTrue(GrantsKit.run(skill("kids_mailer"), "owner").success(), "the version that was granted still runs");
         assertEquals(Map.of("SMTP_PASS", OWNERS), skills.launches.runs().getLast().credentials());
         assertEquals(List.of("owner"), grantedBy("kids_mailer_v2"), "nothing was made under it");
-        assertEquals(List.of("owner"), grantedBy("courier"), "nothing was registered under it");
-
-        // And once a skill is made under the free name, what was left there ends.
-        assertTrue(write("kid", "courier", "loads").startsWith("Skill 'courier' created"));
-        assertEquals(List.of(), grantedBy("courier"));
-        // Mutation: the grants ended before the new code is checked to load -> a rewrite that does not
-        // load, and is undone, has ended the owner's and ann's grants all the same.
+        // Mutation: the grants ended before the skill's name, code and declarations are checked -> a
+        // rewrite that is refused outright has ended the owner's and ann's grants all the same.
     }
 
     @Test
-    @DisplayName("a skill is not written again, or made, over grants that could not be ended: the version that was granted is put back whole and is what runs, a new one is set aside, and the task is told")
+    @DisplayName("the grants end before the new code is written: another account's rewrite that does not load is undone, and the others' grants are gone all the same -- at no moment was its code on disk with them there")
+    void theGrantsEndBeforeTheCodeIsWritten() throws Exception {
+        write("kid", "kids_mailer", "v1");
+        write("owner", "owners_mailer", "v1");
+        everyoneGrants("kids_mailer");
+        everyoneGrants("owners_mailer");
+        grants.grant("owner", "courier", PASS);          // left under a free name
+        var ok = skills.launches.answer;
+        // What the load check finds when it runs: the code on disk and who has granted the skill then.
+        var atTheCheck = new java.util.ArrayList<String>();
+        skills.launches.answer = launch -> {
+            String script = launch.script().getFileName().toString();
+            if (!script.startsWith("_load_check_")) return ok.apply(launch);
+            for (String name : List.of("kids_mailer", "owners_mailer", "courier")) {
+                Path written = skills.generated.resolve(name).resolve("skill.py");
+                try {
+                    if (Files.exists(written) && Files.readString(written).contains("does not load")) {
+                        atTheCheck.add(name + " " + grantedBy(name));
+                    }
+                } catch (java.io.IOException e) {
+                    throw new java.io.UncheckedIOException(e);
+                }
+            }
+            return new SandboxResult(1, "", "ModuleNotFoundError: No module named 'nowhere'", 1, false);
+        };
+
+        // Another account's rewrite: the version before it is put back whole.
+        assertTrue(write("kid", "kids_mailer", "does not load").startsWith("ERROR: the new code for 'kids_mailer' does not load"));
+        // The owner's: nothing of it ends, whether it loads or not.
+        assertTrue(write("owner", "owners_mailer", "does not load").startsWith("ERROR: the new code for 'owners_mailer' does not load"));
+        // A new skill: set aside, and the name stays free.
+        assertTrue(write("kid", "courier", "does not load").startsWith("ERROR: 'courier' was written but does not load"));
+        skills.launches.answer = ok;
+
+        assertEquals(List.of("kids_mailer [kid]", "owners_mailer [ann, kid, owner]", "courier []"), atTheCheck,
+                "new code was on disk while a grant that was to end was still there");
+        assertTrue(code("kids_mailer").contains("'v1'"), code("kids_mailer"));
+        assertEquals(List.of("kid"), grantedBy("kids_mailer"), "taken away before the write, and not handed back by its undoing");
+        assertRefused("kids_mailer", "owner");
+        assertTrue(GrantsKit.run(skill("kids_mailer"), "kid").success(), "its author's own grant stays, for the version that was kept");
+        assertEquals(List.of("ann", "kid", "owner"), grantedBy("owners_mailer"));
+        assertTrue(GrantsKit.run(skill("owners_mailer"), "ann").success());
+        assertEquals(List.of(), grantedBy("courier"));
+        assertTrue(skills.registry.getDynamic("courier").isEmpty());
+
+        // The owner grants the version that was kept again, and it runs for the owner as before.
+        grants.grant("owner", "kids_mailer", PASS);
+        assertTrue(GrantsKit.run(skill("kids_mailer"), "owner").success());
+        assertEquals(Map.of("SMTP_PASS", OWNERS), skills.launches.runs().getLast().credentials());
+        // Mutation: the grants ended once the skill has loaded, or once it is registered -> the load
+        // check finds kid's new code on disk with the owner's and ann's grants there: what a start
+        // after the service died at that point registers, and what stays when the ending then fails.
+    }
+
+    @Test
+    @DisplayName("a skill is not written again, made or deleted over grants that could not be ended: nothing of it is written, the version that was granted is what runs, and the task is told")
     void whatCannotEndTheGrantsIsNotMade() throws Exception {
         write("kid", "kids_mailer", "v1");
         everyoneGrants("kids_mailer");
@@ -319,6 +365,7 @@ class GrantsEndWithTheSkillTest {
 
         String rewrite = attempt(() -> write("kid", "kids_mailer", "v2"));
         String made = attempt(() -> write("kid", "courier", "kid's own"));
+        String deleted = attempt(() -> skills.manager.deleteSkill("kids_mailer", "kid", () -> false, () -> {}));
 
         jdbc.execute("DROP TRIGGER the_disk_is_full");
         // Kid's new code is nowhere a grant that outlived it could reach.
@@ -330,18 +377,24 @@ class GrantsEndWithTheSkillTest {
         assertFalse(Files.exists(skills.generated.resolve("courier")), "and it is not left for the next start to register");
         assertTrue(rewrite.startsWith("ERROR: 'kids_mailer' was not changed"), rewrite);
         assertTrue(made.startsWith("ERROR: 'courier' was not registered"), made);
+        // Nor is it deleted by halves: unregistered here, and back at the next start with every grant.
+        assertTrue(deleted.startsWith("ERROR: Skill 'kids_mailer' was not deleted"), deleted);
+        assertTrue(skills.registry.getDynamic("kids_mailer").isPresent(), "a delete that could not end the grants unregistered the skill");
+        assertTrue(Files.exists(skills.generated.resolve("kids_mailer/skill.py")));
 
         // With the database well again, both are made, and the grants end as they should.
         assertTrue(write("kid", "kids_mailer", "v2").startsWith("Skill 'kids_mailer' updated"));
         assertTrue(write("kid", "courier", "kid's own").startsWith("Skill 'courier' created"));
         assertEquals(List.of("kid"), grantedBy("kids_mailer"));
         assertEquals(List.of(), grantedBy("courier"));
-        // Mutation: the skill registered first and its grants ended after, as before -> the failure
-        // leaves kid's v2 on disk and registered, and the owner's next run hands it the owner's password.
+        // Mutations: the skill registered first and its grants ended after, as at first -> the failure
+        // leaves kid's v2 on disk and registered, and the owner's next run hands it the owner's
+        // password; a delete that unregisters before it ends the grants -> the skill is gone from
+        // the tools and its files and grants are all there.
     }
 
     @Test
-    @DisplayName("a rewrite that fails while its files are written leaves the code that was granted: the code is written last, so a failure before it puts no new code under the grants of the old")
+    @DisplayName("a rewrite that fails while its files are written leaves the code there was: the code is written last, so a failure before it leaves the skill the code it is registered as -- and the others' grants ended before the first file")
     void aWriteThatFailsLeavesTheCodeThatWasGranted() throws Exception {
         write("kid", "kids_mailer", "v1");
         everyoneGrants("kids_mailer");
@@ -358,17 +411,18 @@ class GrantsEndWithTheSkillTest {
         }
 
         assertTrue(said.startsWith("ERROR: Failed to write skill files"), said);
-        assertTrue(code("kids_mailer").contains("'v1'"), "kid's new code is on disk, under the owner's grant: " + code("kids_mailer"));
-        assertEquals(List.of("ann", "kid", "owner"), grantedBy("kids_mailer"), "nothing was made, so nothing ended");
-        assertTrue(GrantsKit.run(skill("kids_mailer"), "owner").success(), "the version that was granted runs on");
-        // Mutation: the code written before the requirements, as before -> the failed rewrite leaves
-        // kid's v2 as the skill's code, registered and granted as v1 was.
+        assertTrue(code("kids_mailer").contains("'v1'"), "kid's new code is the skill's, registered as v1 was: " + code("kids_mailer"));
+        assertEquals(List.of("kid"), grantedBy("kids_mailer"), "the others' grants ended before anything was written");
+        assertRefused("kids_mailer", "owner");
+        assertTrue(GrantsKit.run(skill("kids_mailer"), "kid").success(), "the version that was there runs on for its author");
+        // Mutation: the code written before the requirements, as at first -> the failed rewrite leaves
+        // kid's v2 as the skill's code, registered as v1 was and run on kid's own grant.
     }
 
-    // ───────────────────────── no run between the new code and the ended grants ─────────────────────────
+    // ───────────────────────── no run while a skill is written ─────────────────────────
 
     @Test
-    @DisplayName("a run cannot slip between the new code and the ended grants: asked while the skill is being written again, it waits for the write, and after it is not started")
+    @DisplayName("a run cannot slip into a rewrite: asked while the skill is being written again, it waits for the write, and after it is not started")
     void aRunWaitsForTheRewriteAndIsRefusedAfterIt() throws Exception {
         write("kid", "kids_mailer", "v1");
         everyoneGrants("kids_mailer");
@@ -395,8 +449,8 @@ class GrantsEndWithTheSkillTest {
         try {
             Future<String> rewrite = tasks.submit(() -> write("kid", "kids_mailer", "v2"));
             assertTrue(checking.await(30, TimeUnit.SECONDS), "the rewrite is at its load check");
-            assertTrue(code("kids_mailer").contains("'v2'"), "the premise: the new code is on disk, the grants not yet ended");
-            assertEquals(List.of("ann", "kid", "owner"), grantedBy("kids_mailer"));
+            assertTrue(code("kids_mailer").contains("'v2'"), "the premise: the new code is on disk, the skill not yet registered again");
+            assertEquals(List.of("kid"), grantedBy("kids_mailer"), "the others' grants ended before it was written");
 
             Future<ToolResult> run = tasks.submit(() -> GrantsKit.run(found, "owner"));
             assertThrows(TimeoutException.class, () -> run.get(1_500, TimeUnit.MILLISECONDS),
@@ -415,7 +469,8 @@ class GrantsEndWithTheSkillTest {
         assertEquals(List.of(), skills.launches.runs(), "the run that waited was started after all");
         assertEquals(List.of(), vault.decrypted, "the owner's password was read for kid's new code");
         assertEquals(List.of("kid"), grantedBy("kids_mailer"));
-        // Mutation: a run that does not take the skill's lock -> it starts kid's new code, already on
-        // disk, with the owner's password, while the rewrite is still at its load check.
+        // Mutation: a run that does not take the skill's lock -> it is answered while the skill is
+        // being written: half a skill is read, and with the grants ended after the write (as at
+        // first) kid's new code, already on disk, was started with the owner's password.
     }
 }

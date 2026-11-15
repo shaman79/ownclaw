@@ -65,6 +65,7 @@ public class AgentContext {
 
     /** Credential keys available in the vault for this user (loaded once at task start). */
     private List<String> credentialKeys = List.of();
+    private boolean credentialKeysRead;
 
     /** See {@link #setPersonalSources}. */
     private List<String> personalSources = com.ownclaw.config.OwnClawConfig.Privacy.DEFAULT_PERSONAL_SOURCES;
@@ -607,12 +608,19 @@ public class AgentContext {
 
     public List<String> credentialKeys() { return credentialKeys; }
     /**
+     * {@link #credentialKeys()}, or null when this task was never told what the vault holds -- its
+     * start could not read it. No names is then not "the vault holds none": a skill that was
+     * refused would be told that every credential it declares has yet to be stored.
+     */
+    public List<String> credentialKeysIfRead() { return credentialKeysRead ? credentialKeys : null; }
+    /**
      * The names the vault holds, as the prompts name them -- those made of letters, digits, '_',
      * '.' and '-'. One stored before /cred set checked names can be a value typed where the name
      * goes, "SMTP_PASS=HUNTER2", "P@SSW0RD!", and every prompt carried it to the cloud model. A
      * name of an older spelling that is only a name -- "ROUTER-PASS" -- stays: a skill reads it.
      */
     public void setCredentialKeys(List<String> keys) {
+        this.credentialKeysRead = keys != null;
         this.credentialKeys = keys == null ? List.of()
                 : keys.stream().filter(k -> k.matches("[A-Za-z][A-Za-z0-9_.-]*")).toList();
     }

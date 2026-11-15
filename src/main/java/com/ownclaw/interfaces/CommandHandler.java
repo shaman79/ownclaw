@@ -367,8 +367,9 @@ public class CommandHandler {
             return true;
         }
         // Letters and symbols that are drawn as a blank: the Hangul fillers, the Braille blank,
-        // the Khmer inherent vowels.
-        return c == 0x115F || c == 0x1160 || c == 0x3164 || c == 0xFFA0 || c == 0x2800 || c == 0x17B4 || c == 0x17B5;
+        // the Khmer inherent vowels, the place an object would stand in, the note with no head.
+        return c == 0x115F || c == 0x1160 || c == 0x3164 || c == 0xFFA0 || c == 0x2800 || c == 0x17B4 || c == 0x17B5
+                || c == 0xFFFC || c == 0x1D159;
     }
 
     /** Whether the text, {@link #unblanked}, is a slash command's: what each chat routes by. */

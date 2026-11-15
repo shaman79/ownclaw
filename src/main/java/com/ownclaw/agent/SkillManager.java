@@ -308,6 +308,35 @@ public class SkillManager {
             // does not take it over. A new skill is its requester's.
             String existingAuthor = authorOf(skillDir.resolve("SKILL.yaml"));
             String author = existingAuthor != null ? existingAuthor : requester;
+
+            // A grant was given to the code that was there. A name no skill holds starts with
+            // none -- one deleted, retired or set aside may have left its grants behind -- and a
+            // skill written again by another account than the owner is everyone else's to grant
+            // again: its author could otherwise put any code under the owner's grant.
+            //
+            // Ended before a byte of the new skill is written, not once it is in place. Whatever
+            // stops the write from here on -- a load check that fails, a disk that fills, the
+            // service dying half way -- leaves at worst the code that was there without the
+            // others' grants, for them to give again. Ended after, each of those left new code
+            // where the old grants reached it: on disk for the next start to register, or
+            // registered already when the database refused the ending and the undoing of the
+            // write failed for the same full disk. And when they cannot be ended, nothing is written.
+            boolean isUpdate = toolRegistry.find(name).isPresent();
+            try {
+                if (!isUpdate) {
+                    dynamicSkillRegistry.endGrants(name, null);
+                } else if (requester != null && authService != null && !authService.isOwner(requester)) {
+                    dynamicSkillRegistry.endGrants(name, requester);
+                }
+            } catch (RuntimeException notEnded) {
+                log.error("Skill '{}' not {}: the grants of its name could not be ended: {}", name,
+                        isUpdate ? "changed" : "registered", notEnded.getMessage());
+                return "ERROR: '" + name + "' was not " + (isUpdate ? "changed" : "registered") + ": the credential "
+                        + "grants " + (isUpdate ? "other accounts gave the version before it" : "left under its name")
+                        + " could not be ended, and new code may not run on them. "
+                        + (isUpdate ? "The previous version was kept." : "Nothing was registered.")
+                        + " Retry with the SAME name.";
+            }
             Files.createDirectories(skillDir);
 
             // Snapshot EVERY authored file before touching any of them.
@@ -375,37 +404,6 @@ public class SkillManager {
             DynamicSkill skill = dynamicSkillRegistry.loadSkill(skillDir);
             if (skill == null) return "ERROR: Failed to load — check SKILL.yaml format.";
 
-            boolean isUpdate = toolRegistry.find(name).isPresent();
-            // A grant was given to the code that was there. A name no skill held starts with
-            // none -- one deleted, retired or set aside may have left its grants behind -- and a
-            // skill written again by another account than the owner is everyone else's to grant
-            // again: its author could otherwise put any code under the owner's grant.
-            // Ended before the new code is registered, and the write undone when they cannot be
-            // ended: registered first, a database that refused the ending left that code in
-            // place, under the very grants it was to lose.
-            try {
-                if (!isUpdate) {
-                    dynamicSkillRegistry.endGrants(name, null);
-                } else if (requester != null && authService != null && !authService.isOwner(requester)) {
-                    dynamicSkillRegistry.endGrants(name, requester);
-                }
-            } catch (RuntimeException notEnded) {
-                log.error("Skill '{}' not {}: the grants of its name could not be ended: {}", name,
-                        isUpdate ? "changed" : "registered", notEnded.getMessage());
-                if (previousCode != null) {
-                    SkillJail.writeAuthored(codeFile, previousCode);
-                    if (previousYaml != null) SkillJail.writeAuthored(yamlFile, previousYaml);
-                    SkillJail.writeAuthored(reqFile, previousRequirements != null ? previousRequirements : "");
-                } else {
-                    dynamicSkillRegistry.quarantineUnregistered(skillDir,
-                            "Not registered: the credential grants left under its name could not be ended.");
-                }
-                return "ERROR: '" + name + "' was not " + (isUpdate ? "changed" : "registered") + ": the credential "
-                        + "grants " + (isUpdate ? "other accounts gave the version before it" : "left under its name")
-                        + " could not be ended, and new code may not run on them. "
-                        + (isUpdate ? "The previous version was kept." : "Nothing was registered.")
-                        + " Retry with the SAME name.";
-            }
             // Registered over the old one, not after unregistering it: in between, another task's
             // look-up of the skill found no such tool.
             dynamicSkillRegistry.register(skill);
@@ -653,9 +651,17 @@ public class SkillManager {
         // No run of it is going on: the write lock this holds waited for them, and a run takes
         // the read lock to start. (Nor could one turn the delete on anything outside the
         // directory: deleting never follows a link below it -- see SkillJail.deleteTree.)
+        // Its grants go with it, and first: a skill made under this name later is another skill,
+        // and one that could not lose them is not taken half away -- unregistered here, back at
+        // the next start with every grant.
+        try {
+            dynamicSkillRegistry.endGrants(name, null);
+        } catch (RuntimeException notEnded) {
+            log.error("Skill '{}' not deleted: its grants could not be ended: {}", name, notEnded.getMessage());
+            return "ERROR: Skill '" + name + "' was not deleted: the credential grants given to it could not be "
+                    + "ended. It is as it was. Retry.";
+        }
         dynamicSkillRegistry.unregister(name);
-        // Its grants go with it: a skill made under this name later is another skill.
-        dynamicSkillRegistry.endGrants(name, null);
 
         boolean dirGone = SkillJail.deleteTree(skill.skillDir());
         keepAsWritten(name, null, null, null);

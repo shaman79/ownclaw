@@ -58,6 +58,8 @@ class ChoiceReadsAsCommandTest {
         NOTHING.put(0x2800, "the Braille blank");
         NOTHING.put(0x17B4, "the Khmer inherent vowel AQ");
         NOTHING.put(0x17B5, "the Khmer inherent vowel AA");
+        NOTHING.put(0xFFFC, "the object replacement character");
+        NOTHING.put(0x1D159, "the musical null notehead, a symbol beyond the basic plane");
     }
 
     private static String of(int codePoint) {

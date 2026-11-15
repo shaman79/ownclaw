@@ -420,6 +420,30 @@ class GrantRefusedCallTest {
     }
 
     @Test
+    @DisplayName("a task whose start could not read the vault does not take it for an empty one: the refusal names the grant alone, and the ending's line reads the vault as it is then")
+    void aVaultThatCouldNotBeReadIsNotAnEmptyOne(@TempDir Path tmp) throws Exception {
+        run = new Run(tmp, null);
+        run.disk.create("mail_digest", List.of("SMTP_PASS", "IMAP_PASS"));   // the vault holds the first alone
+        // The vault cannot be read when the task starts, and can again by its first call.
+        run.rig.jdbc.execute("ALTER TABLE credential_vault RENAME TO credential_vault_away");
+        run.rig.cloud.think.add(config -> {
+            run.rig.jdbc.execute("ALTER TABLE credential_vault_away RENAME TO credential_vault");
+            return call("mail_digest", Map.of()).answer(config);
+        });
+        run.rig.cloud.think.add(respond("It waits for you."));
+
+        AgentResult r = run.rig.turn(run.session(), "digest my mail", ChatOptions.NONE);
+
+        assertTrue(run.sent(1).contains("Not run: 'mail_digest'"), run.sent(1));
+        String refusal = run.sent(1).substring(run.sent(1).indexOf("Not run: 'mail_digest'"));
+        assertTrue(refusal.startsWith("Not run: 'mail_digest' has not been allowed to read SMTP_PASS, IMAP_PASS from the vault."), refusal);
+        assertFalse(refusal.contains("Not in the vault yet"), "SMTP_PASS is stored, and the task never learned what is: " + refusal);
+        assertTrue(r.response().contains(ASKED_AND_MISSING), "the ending reads the vault itself: " + r.response());
+        // Mutation: the refusal given the names the task holds -- none -- as what the vault holds ->
+        // it names SMTP_PASS, which is stored, as one the user has yet to store.
+    }
+
+    @Test
     @DisplayName("a delegated call is told the same: the cloud for a call it wrote, the local model for one it made")
     void aDelegatedCallIsToldWhatIsMissing(@TempDir Path tmp) throws Exception {
         var local = new DelegationFitTest.Local();

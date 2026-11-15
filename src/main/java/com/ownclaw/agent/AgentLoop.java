@@ -1979,7 +1979,7 @@ public class AgentLoop {
             context.notAllowed(tool.name());
             return AgentObservation.failure(action.tool(), "Not run: "
                     + com.ownclaw.users.CredentialGrantService.notAllowed(tool.name(), ungranted,
-                            context.credentialKeys()), 0);
+                            context.credentialKeysIfRead()), 0);
         }
 
         // A secret the filter removed is no value. The cloud reads a router's configuration with
