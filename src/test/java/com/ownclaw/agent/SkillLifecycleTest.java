@@ -126,6 +126,24 @@ class SkillLifecycleTest {
     }
 
     @Test
+    @DisplayName("force is skill_create's word to the duplicate gate, no part of a skill: left among the parameters, it is neither refused nor written")
+    void forceIsNoPartOfASkill() throws IOException {
+        Map<String, Object> p = new LinkedHashMap<>();
+        p.put("name", "greet_user");
+        p.put("description", "Return a greeting for a name.");
+        p.put("parameters", PARAMS);
+        p.put("code", WORKING_CODE);
+        p.put("force", true);
+        String result = manager.createSkill(p);
+        assertFalse(result.startsWith("ERROR"), result);
+        assertTrue(registry.find("greet_user").isPresent());
+        for (String file : List.of("SKILL.yaml", "skill.py", "requirements.txt")) {
+            String written = Files.readString(generated.resolve("greet_user").resolve(file));
+            assertFalse(written.contains("force"), file + ": " + written);
+        }
+    }
+
+    @Test
     @DisplayName("a skill's authored files are all of what it is: a change of its SKILL.yaml or requirements is a change")
     void authoredFilesAreTheSkill() {
         create("greet_user", "Return a greeting for a name.", WORKING_CODE);

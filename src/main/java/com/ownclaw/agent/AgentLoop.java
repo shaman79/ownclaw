@@ -2908,7 +2908,11 @@ public class AgentLoop {
         long startMs = System.currentTimeMillis();
         String result = skillManager.nameRefusal(str(action.params(), "name"));
         if (result == null) {
-            Codegen code = generateSkillCode(action.params(), context);
+            // Without 'force': the duplicate gate has read it (CriticAgent), and it is no part of
+            // the skill -- not of what its code is written from, nor of what SkillManager is handed.
+            Map<String, Object> spec = new HashMap<>(action.params());
+            spec.remove(CriticAgent.FORCE);
+            Codegen code = generateSkillCode(spec, context);
             result = code.error() != null ? code.error()
                     : skillManager.createSkill(code.params(), code.asWritten(), context.userId(), context::isCancelled,
                             () -> waitingForSkill(context, str(action.params(), "name")));

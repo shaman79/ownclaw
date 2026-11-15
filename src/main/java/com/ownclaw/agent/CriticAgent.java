@@ -45,6 +45,14 @@ public class CriticAgent {
      */
     private static final double NAME_OVERLAP_BLOCK = 0.6;
 
+    /**
+     * skill_create's parameter that overrides the duplicate check ({@link #evaluateSkillCreate}):
+     * true creates the skill although an existing one looks similar. It was read here and
+     * declared nowhere, so no model had ever been told of it. It is the gate's alone: no part of
+     * the skill, and the loop hands it to nothing that makes one (AgentLoop#createSkill).
+     */
+    static final String FORCE = "force";
+
     private final ToolRegistry toolRegistry;
 
     public CriticAgent(ToolRegistry toolRegistry) {
@@ -205,7 +213,7 @@ public class CriticAgent {
         Object rawName = params == null ? null : params.get("name");
         String proposed = rawName == null ? "" : rawName.toString().trim().toLowerCase();
 
-        Object force = params == null ? null : params.get("force");
+        Object force = params == null ? null : params.get(FORCE);
         boolean forced = force != null && Boolean.parseBoolean(force.toString());
 
         // Re-creating the same name is a repair/overwrite, which is the behaviour we actually

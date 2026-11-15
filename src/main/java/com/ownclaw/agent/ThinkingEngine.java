@@ -976,6 +976,8 @@ public class ThinkingEngine {
         sb.append("  name*: lowercase id | description*: behavior spec + edge cases + output format\n");
         sb.append("  parameters*: JSON {key: {type, description, required}} | requirements: pip pkgs (one/line)\n");
         sb.append("  requires_network | has_side_effects | timeout: max secs (default 30)\n");
+        sb.append("  " + CriticAgent.FORCE + ": true creates it although an existing skill looks similar; "
+                + "say in the description how it differs.\n");
         sb.append("  credentials: comma-separated vault keys, auto-injected as env vars. NEVER pass values directly.\n");
         sb.append("  system_packages: space-separated apt pkg names \u2192 auto-installed in a container. Use for ANY needed OS binary or library.\n");
         sb.append("  container_image: Docker base image. Optional \u2014 system picks a sensible default and auto-recovers if unavailable.\n\n");
