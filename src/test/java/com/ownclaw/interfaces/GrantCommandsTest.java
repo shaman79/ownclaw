@@ -186,6 +186,7 @@ class GrantCommandsTest {
         assertFalse(GrantsKit.run(signer, "ann").success(), "and a skill that declares it is still not run");
         assertEquals(List.of(), skills.launches.runs());
         assertEquals(List.of(), vault.decrypted);
+        assertFalse(say("ann", "/grants").contains("`/grant signer"), "/grants offers a line /grant refuses: " + say("ann", "/grants"));
         // Mutation: /grant without its forSkills test -> GUARDIAN_LINK_SECRET is granted.
     }
 

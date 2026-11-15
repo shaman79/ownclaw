@@ -8,6 +8,7 @@ import com.ownclaw.core.ResultDelivery;
 import com.ownclaw.interfaces.CommandHandler;
 import com.ownclaw.llm.LlmProvider;
 import com.ownclaw.sandbox.SandboxResult;
+import com.ownclaw.users.CredentialVault;
 import com.ownclaw.users.GrantsKit;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.DisplayName;
@@ -470,5 +471,27 @@ class GrantRefusedCallTest {
         assertEquals(List.of(COMMAND), r.choices(), "the one command offered is the one code wrote");
         // The answer is saved as the assistant's: only a message the owner sends is read for commands.
         assertEquals("assistant", run.rig.chat.getSessionMessages("u1", session, null, null).messages().getLast().get("role"));
+    }
+
+    // ───────────────────────── what cannot be granted is not asked for ─────────────────────────
+
+    @Test
+    @DisplayName("a skill that declares the link-signing secret is not asked a grant for it, which nobody can make: its call fails as the skill's own, saying to take the credential out, and no command is offered")
+    void theLinkSecretIsNotAskedFor(@TempDir Path tmp) throws Exception {
+        run = new Run(tmp, null);
+        run.rig.vault.storeCredential("u1", CredentialVault.LINK_SECRET, "loop-canary-link-34");
+        run.disk.create("signer", List.of(CredentialVault.LINK_SECRET));
+        run.rig.cloud.think.add(call("signer", Map.of()));
+        run.rig.cloud.think.add(respond("It cannot sign."));
+
+        AgentResult r = run.rig.turn(run.session(), "sign a link for me", ChatOptions.NONE);
+
+        assertTrue(run.sent(1).contains(CredentialVault.LINK_SECRET + " is never handed to a skill"), run.sent(1));
+        assertTrue(run.sent(1).contains("Remove it from this skill's credentials"), run.sent(1));
+        assertEquals("It cannot sign.", r.response(), "a command that /grant always refuses was offered");
+        assertEquals(List.of(), r.choices());
+        assertEquals(List.of(), run.disk.launches.runs());
+        // Mutation: the skill asked a grant for every name it declares -> the model is told to have the
+        // owner send `/grant signer GUARDIAN_LINK_SECRET`, and the ending offers it.
     }
 }

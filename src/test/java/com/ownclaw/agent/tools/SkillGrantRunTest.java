@@ -290,6 +290,8 @@ class SkillGrantRunTest {
         assertTrue(refused.output().contains(CredentialVault.LINK_SECRET + " is never handed to a skill"), refused.output());
         assertEquals(List.of(), skills.launches.runs());
         assertEquals(List.of(), vault.decrypted);
+        jdbc.update("DELETE FROM credential_grants WHERE credential = ?", CredentialVault.LINK_SECRET);
+        assertEquals(List.of(), signer.ungranted("ann"), "whoever calls it is not told to ask for a grant nobody can make");
         // Mutation: run() without its own refusal of the link secret -> with the row, it is handed over.
     }
 
