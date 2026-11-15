@@ -71,4 +71,12 @@ public interface Tool {
      * Empty list means no credentials needed.
      */
     default List<String> requiredCredentials() { return List.of(); }
+
+    /**
+     * Those of {@link #requiredCredentials} this user has not allowed this tool to read. With any,
+     * a call of it for them is not run: asked before the call by whoever makes it, and decided
+     * again where the credentials are read (CredentialVault#forSkill). None for a tool that reads
+     * no credential.
+     */
+    default List<String> ungranted(String userId) { return List.of(); }
 }

@@ -3235,11 +3235,15 @@
      */
     function drawRow(m, before) {
         if (m.role === 'progress') { addProgress(m.content, m.progress, before, m.timestamp); return; }
-        // A question saved with the answers it offered is drawn as a question, with them.
-        var asked = m.choices && m.choices.length;
+        // A question saved with the answers it offered is drawn as a question, with them. An
+        // answer can offer something to click too -- the command that lets a skill read a
+        // credential (/grant), which OwnClaw adds itself -- and stays an answer: only an offer
+        // that is no command makes a row a question.
+        var offered = m.choices && m.choices.length ? m.choices : [];
+        var asked = offered.some(function(c) { return String(c).trim().charAt(0) !== '/'; });
         var type = m.role === 'user' || m.role === 'system' ? m.role : asked ? 'input_request' : 'response';
         var drawn = addMsg(type, m.content, m.task_id, before, m.timestamp);
-        if (asked && type === 'input_request') addChoices(drawn, m.choices);
+        if (offered.length && (type === 'input_request' || type === 'response')) addChoices(drawn, offered);
         // Named by its row, as a bubble drawn live is once its fate comes: a task still
         // running marks it read, or handed on, after a reload or a switch back too.
         if (type === 'user') drawn.dataset.messageId = m.id;
@@ -6479,6 +6483,9 @@
                         doneActivity();
                     }
                     var drawnMsg = addMsg(type, content, data.taskId, null, data.timestamp);
+                    // An answer that offers something to click: the command that lets a skill
+                    // read a credential, written by OwnClaw at the task's end.
+                    if (type === 'response') addChoices(drawnMsg, data.choices);
                     // The server's echo of a slash text this page sent: "/queue ..." is a message,
                     // and what became of it is said under this bubble.
                     if (type === 'user' && data.clientId) sentBubbles[data.clientId] = drawnMsg;
@@ -6811,22 +6818,33 @@
      * A question's answers, as buttons under it: a click sends one as the owner's reply, as if it
      * had been typed. Drawn for a saved question as well; done once the reply is on screen
      * (settleChoices) -- shown still, the one picked marked, but no longer sent.
+     * <p>
+     * A command among them is no answer: OwnClaw offers it itself -- the one that lets a skill
+     * read a credential -- and it holds for as long as the skill waits, whatever the owner says
+     * next. Commands are a group of their own, which is never done.
      */
     function addChoices(row, choices) {
         if (!row || !choices || !choices.length) return;
-        var group = node('div', 'msg-choices');
-        group.setAttribute('role', 'group');
-        group.setAttribute('aria-label', 'Answers to pick from');
+        var answers = [], commands = [];
         choices.forEach(function(choice) {
-            var b = node('button', 'choice-btn', choice);
-            b.type = 'button';
-            b.addEventListener('click', function() {
-                if (!group.classList.contains('retired')) send(false, choice);
-            });
-            group.appendChild(b);
+            (String(choice).trim().charAt(0) === '/' ? commands : answers).push(choice);
         });
         var main = row.querySelector('.msg-main');
-        main.insertBefore(group, main.querySelector('.msg-meta'));
+        [answers, commands].forEach(function(offered) {
+            if (!offered.length) return;
+            var group = node('div', offered === commands ? 'msg-choices commands' : 'msg-choices');
+            group.setAttribute('role', 'group');
+            group.setAttribute('aria-label', offered === commands ? 'Commands to send' : 'Answers to pick from');
+            offered.forEach(function(choice) {
+                var b = node('button', 'choice-btn', choice);
+                b.type = 'button';
+                b.addEventListener('click', function() {
+                    if (!group.classList.contains('retired')) send(false, choice);
+                });
+                group.appendChild(b);
+            });
+            main.insertBefore(group, main.querySelector('.msg-meta'));
+        });
         scrollBottom(false);
     }
 
@@ -6838,7 +6856,7 @@
      * below its own.
      */
     function settleChoices() {
-        messagesEl.querySelectorAll('.msg-choices:not(.retired)').forEach(function(group) {
+        messagesEl.querySelectorAll('.msg-choices:not(.retired):not(.commands)').forEach(function(group) {
             for (var n = group.closest('.msg').nextElementSibling; n; n = n.nextElementSibling) {
                 if (!n.classList.contains('user')) continue;
                 var said = n.dataset.said || '';

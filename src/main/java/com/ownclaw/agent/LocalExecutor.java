@@ -1219,6 +1219,16 @@ public class LocalExecutor {
                     + References.available(mine);
         }
 
+        // A skill its user has not allowed a credential it declares is not run, by whoever calls
+        // it: only they can allow it, and the task's ending asks them (AgentLoop#grantsAsked).
+        List<String> ungranted = target.ungranted(parentContext.userId());
+        if (!ungranted.isEmpty()) {
+            log.warn("Delegation step {}: '{}' not run — user {} has not granted it {}.", mine.size() + 1,
+                    action.tool, parentContext.userId(), ungranted);
+            parentContext.notAllowed(target.name());
+            return "Not run: " + com.ownclaw.users.CredentialGrantService.notAllowed(target.name(), ungranted);
+        }
+
         // A change is attempted once per delegation, and made once per task. The cloud path
         // has CriticAgent, which blocks an identical action after three tries; delegation
         // never reaches it, so nothing else bounds a retry here -- and an SMTP timeout can

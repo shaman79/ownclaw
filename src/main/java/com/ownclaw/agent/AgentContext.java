@@ -109,6 +109,9 @@ public class AgentContext {
 
     /** Every result this task has produced, numbered {{1}}, {{2}} ... — the bytes live here only. */
     private final List<Artifact> artifacts = new java.util.ArrayList<>();
+    /** The skills a call of which was not run because their user has not granted them a credential. */
+    private final java.util.Set<String> notAllowed =
+            java.util.Collections.synchronizedSet(new java.util.LinkedHashSet<>());
     /** The canary index over every PRIVATE artifact's bytes. */
     private final com.ownclaw.privacy.PrivateIndex privateIndex = new com.ownclaw.privacy.PrivateIndex();
     /** Decrypted secret vault values, by key — decrypted once at task start, scrubbed at the door (see {@link #secretValues}). */
@@ -1208,6 +1211,18 @@ public class AgentContext {
      * Every artifact so far, in handle order — a read-only VIEW, not a copy, so a delegation
      * that records results sees them in the same list it resolves references against.
      */
+    /** A call of this skill was not run: its user has not granted it a credential it declares. */
+    public void notAllowed(String skill) {
+        notAllowed.add(skill);
+    }
+
+    /** The skills {@link #notAllowed(String)} named, in the order they were first refused. */
+    public List<String> notAllowed() {
+        synchronized (notAllowed) {
+            return List.copyOf(notAllowed);
+        }
+    }
+
     public List<Artifact> artifacts() {
         return java.util.Collections.unmodifiableList(artifacts);
     }

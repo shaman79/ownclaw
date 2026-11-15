@@ -109,10 +109,11 @@ Each call is recorded with the number of secrets removed and identifiers replace
 ### Credential isolation
 
 - User credentials (API keys, passwords, tokens) are stored in an **AES-256-GCM encrypted vault** backed by SQLite.
-- Credentials are **never passed through LLM prompts**. A skill gets the credentials it declares on its input when it starts — never on a command line — and the runner puts them in its environment.
+- Credentials are **never passed through LLM prompts**. A skill gets its credentials on its input when it starts — never on a command line — and the runner puts them in its environment.
+- **A skill reads only the credentials you granted it.** A skill declares what it wants; the vault hands it a credential only after you allowed that skill that credential (`/grant <skill>`, or a click on the command a task's answer offers). A credential it was not granted is not decrypted, and the skill is not run. `/revoke <skill>` takes it back and `/grants` lists what each skill may read. No model can make a grant.
 - Vault values are removed from logs and traces as well as from cloud requests.
 - Each user's credentials are isolated: no command, page or API gives one account another's vault, and with the skill jail on, no skill can read the database they are kept in.
-- The agent can ask the user for a credential in the chat, store it securely, and hand it to skills that declare it.
+- The agent can ask the user for a credential in the chat. The user stores it with a command (`/cred set`), and it is handed to the skills they granted it to.
 - The secret that signs chat links is never handed to any skill, and with the skill jail on, no skill can read it from the database.
 
 ### Execution sandbox

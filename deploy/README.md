@@ -16,7 +16,7 @@ Auto-updates are handled by a cron job that polls GitHub for new commits.
 │   ├── generated/       # Skill directories (SKILL.yaml + skill.py)
 │   └── _envs/           # Python virtual environments
 ├── logs/                # Deploy log
-├── backups/             # Last 5 JARs for rollback
+├── backups/             # Last 5 JARs for rollback; the database from before each of the last 5 builds that changed it
 ├── repo/                # Git checkout (build workspace)
 └── deploy/              # (symlink or copy from repo)
 ```
@@ -170,6 +170,40 @@ Avoid running deploy as root (plain `sudo /opt/ownclaw/repo/deploy/deploy.sh`). 
 ```bash
 sudo -u ownclaw /opt/ownclaw/repo/deploy/deploy.sh --rollback
 ```
+
+### Put the database back as it was before a build
+
+A build makes its changes to the database at its first start, and rolling the JAR back does not
+undo them. Before a build that changes the database is put in place, `deploy.sh` copies the
+database to `backups/ownclaw-db-<UTC time>.db` (the last 5 such copies are kept) and says so in
+`logs/deploy.log`, with the commit that was installed then. A build whose copy cannot be made is
+not deployed. Nothing puts a copy back by itself.
+
+The database and the JAR go back together: started on the older database, the build that made
+the change makes it again. Only the database goes back -- uploads and skills stay as they are --
+and what was written after the copy is lost.
+
+```bash
+sudo systemctl stop ownclaw-update.timer       # no update in the middle (where the timer is used)
+sudo systemctl stop ownclaw
+cd /opt/ownclaw
+ls -lt backups/                                 # the copy, and the JARs around it
+
+# Set the database of now aside; do not delete it.
+sudo -u ownclaw mkdir -p data/set-aside
+sudo -u ownclaw sh -c 'mv data/ownclaw.db* data/set-aside/'
+sudo -u ownclaw cp backups/ownclaw-db-<time>.db data/ownclaw.db
+
+# The JAR that was installed when the copy was taken: the newest backups/ownclaw-<time>.jar
+# from before the copy. The service is stopped, so it can be copied over.
+sudo cp backups/ownclaw-<time>.jar ownclaw.jar
+sudo systemctl start ownclaw
+```
+
+If that JAR is no longer in `backups/` (the last 5 are kept, and they rotate with every
+deploy), it has to be built again from the commit the log line names. Leave the update timer
+stopped until `main` holds a fix: started earlier, it deploys the same build, which changes the
+database again.
 
 ### View application logs
 

@@ -47,6 +47,7 @@ public class CredentialVault {
     private static final int PBKDF2_ITERATIONS = 100_000;
 
     private final JdbcTemplate jdbc;
+    private final CredentialGrantService grants;
     private final SecureRandom secureRandom = new SecureRandom();
 
     /** System-level master key, loaded on startup. */
@@ -103,8 +104,52 @@ public class CredentialVault {
         return null;
     }
 
+    /** A vault with grants of its own, read from the same database: where no other is at hand. */
     public CredentialVault(JdbcTemplate jdbc) {
+        this(jdbc, new CredentialGrantService(jdbc));
+    }
+
+    @org.springframework.beans.factory.annotation.Autowired
+    public CredentialVault(JdbcTemplate jdbc, CredentialGrantService grants) {
         this.jdbc = jdbc;
+        this.grants = grants;
+    }
+
+    /** What each user granted each skill: asked by {@link #forSkill}, and by who shows or changes it. */
+    public CredentialGrantService grants() {
+        return grants;
+    }
+
+    /**
+     * What a skill's run is handed of its user's vault: the values, when the user granted the skill
+     * every credential it declares and the vault holds them all; else the names it was not granted
+     * and the names the vault does not hold, and no value at all.
+     */
+    public record Handover(Map<String, String> values, List<String> ungranted, List<String> missing) {
+        public Handover {
+            values = Map.copyOf(values);
+            ungranted = List.copyOf(ungranted);
+            missing = List.copyOf(missing);
+        }
+    }
+
+    /**
+     * The credentials {@code skill} declares, for a run of it for {@code userId}: the one place a
+     * skill's credentials are read. A skill is handed a value only when its user granted that
+     * skill that credential ({@link CredentialGrantService}) -- one it was not granted is not
+     * decrypted, and with one refused none is handed over: a skill does not run on half of what it
+     * declares.
+     */
+    public Handover forSkill(String userId, String skill, List<String> keys) {
+        List<String> ungranted = grants.ungranted(userId, skill, keys);
+        if (!ungranted.isEmpty()) {
+            Set<String> stored = new HashSet<>(listCredentialKeys(userId));
+            return new Handover(Map.of(), ungranted,
+                    keys.stream().filter(k -> !stored.contains(CredentialGrantService.key(k))).toList());
+        }
+        Map<String, String> found = getCredentials(userId, keys);
+        List<String> missing = keys.stream().filter(k -> !found.containsKey(k)).toList();
+        return new Handover(missing.isEmpty() ? found : Map.of(), List.of(), missing);
     }
 
     /**
