@@ -54,7 +54,6 @@ server:
 
 ownclaw:
   executor:
-    provider: ollama
     url: ${OWNCLAW_EXECUTOR_URL:http://localhost:11434}
     model: ${OWNCLAW_EXECUTOR_MODEL:qwen2.5:14b}
     # How the local model chooses each next piece of a reply, sent with every local call: for a
@@ -84,7 +83,10 @@ ownclaw:
     capture-facts: ${OWNCLAW_EXECUTOR_CAPTURE_FACTS:true}
 
   mentor:
-    provider: ${OWNCLAW_MENTOR_PROVIDER:openai}
+    # The cloud provider: anthropic, or openai as the alternative; anything else is read as
+    # anthropic. The settings page and /setup change it too (saved, so it survives a restart).
+    # model and api-key are OpenAI's.
+    provider: ${OWNCLAW_MENTOR_PROVIDER:anthropic}
     model: gpt-5.2
     api-key: ${OPENAI_API_KEY:}
     anthropic-api-key: ${ANTHROPIC_API_KEY:}
@@ -147,27 +149,17 @@ ownclaw:
     # only the local model reads it. Any other result goes to the cloud through the filter.
     personal-sources: [IMAP_, POP3_]
 
-  budgets:
-    daily-cloud-tokens: 0
-    per-task-cloud-tokens: 0
-    warning-threshold: 0.8
-
   queue:
     # How many tasks run at once: one at a time per chat, tasks of different chats side by side,
     # scheduled and /bg work beside them but never on the last worker. The local model still
     # works on one task at a time (the agent loop's local lane). 1 runs every task after the one
     # before it, as all of them ran until there was more than one worker.
     max-concurrent-tasks: 5
-    ollama-concurrency: 1
-    cloud-concurrency: 3
-    sandbox-concurrency: 3
     max-queued-tasks: 50
 
   tasks:
     # No wall-clock timeout — tasks run until done.
     # Stalled tasks (no progress for stall-timeout) are killed instead.
-    step-timeout: 600
-    long-running-threshold: 120
     stall-timeout: 600
     heartbeat-interval: 30
     scheduler-poll-interval: 30
@@ -175,9 +167,6 @@ ownclaw:
   telegram:
     enabled: ${OWNCLAW_TELEGRAM_ENABLED:false}
     bot-token: ${TELEGRAM_BOT_TOKEN:}
-
-  webui:
-    enabled: true
 
   auth:
     # Only the owner can create accounts (/user add). The owner is the oldest account;
@@ -255,17 +244,6 @@ ownclaw:
 
   database:
     path: ./data/ownclaw.db
-
-  confidence:
-    mentor-threshold: 0.3
-    cache-skip-threshold: 0.7
-
-  observability:
-    chat-status-messages: true
-    status-verbosity: concise
-
-  feedback:
-    max-rounds: 3
 
   self-repair:
     # When unattended work (a scheduled run, /bg) shows that a skill did not do its whole job --

@@ -11,7 +11,7 @@ import com.ownclaw.conversation.FileStorageService;
 import com.ownclaw.conversation.MigratedDatabase;
 import com.ownclaw.core.LongRunningTaskManager;
 import com.ownclaw.core.TaskCancellationService;
-import com.ownclaw.core.TokenBudgetTracker;
+import com.ownclaw.core.TokenUsageTracker;
 import com.ownclaw.llm.CloudGateway;
 import com.ownclaw.llm.LlmMessage;
 import com.ownclaw.llm.LlmProvider;
@@ -260,7 +260,7 @@ final class LoopRig {
                 curator, skills, debug,
                 cancellation, vault, chat, new LongRunningTaskManager(jdbc, emitter, events, config),
                 resolver.apply(registry),
-                new TokenBudgetTracker(jdbc, config, emitter), events, null,
+                new TokenUsageTracker(jdbc), events, null,
                 new LocalExecutor(router, registry, emitter, curator), files, redactor);
         queue = new com.ownclaw.core.TaskQueue(loop, events, emitter, config, cancellation);
     }

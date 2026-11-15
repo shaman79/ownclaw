@@ -4605,7 +4605,7 @@
         view.appendChild(header);
 
         // Determine statuses
-        var provider = data.cloud_provider || 'openai';
+        var provider = data.cloud_provider || 'anthropic';
         var openaiKeySet = !!(data.openai_api_key && data.openai_api_key !== '(not set)');
         var anthropicKeySet = !!(data.anthropic_api_key && data.anthropic_api_key !== '(not set)');
 
@@ -4641,8 +4641,8 @@
             '<div class="settings-field">' +
                 '<label>Active Provider</label>' +
                 '<select id="settings-provider">' +
-                    '<option value="openai"' + (provider === 'openai' ? ' selected' : '') + '>OpenAI</option>' +
                     '<option value="anthropic"' + (provider === 'anthropic' ? ' selected' : '') + '>Anthropic (Claude)</option>' +
+                    '<option value="openai"' + (provider === 'openai' ? ' selected' : '') + '>OpenAI</option>' +
                 '</select>' +
             '</div>';
         view.appendChild(cloudSection);
@@ -4669,7 +4669,6 @@
                 '<input type="text" id="settings-openai-model" value="' + escapeHtml(data.openai_model || '') + '" placeholder="gpt-4o">' +
                 '<div class="field-hint">e.g. gpt-4o, gpt-4o-mini, o3-mini</div>' +
             '</div>';
-        view.appendChild(openaiSection);
 
         // ── Anthropic section ──
         var anthropicSection = document.createElement('div');
@@ -4691,9 +4690,11 @@
             '<div class="settings-field">' +
                 '<label>Model</label>' +
                 '<input type="text" id="settings-anthropic-model" value="' + escapeHtml(data.anthropic_model || '') + '" placeholder="claude-opus-5-5">' +
-                '<div class="field-hint">e.g. claude-opus-5-5, claude-sonnet-4-5</div>' +
+                '<div class="field-hint">e.g. claude-opus-5-5, claude-sonnet-5-5</div>' +
             '</div>';
+        // Anthropic's section first: it is the default provider, OpenAI the alternative.
         view.appendChild(anthropicSection);
+        view.appendChild(openaiSection);
 
         // ── Ollama section ──
         var ollamaSection = document.createElement('div');
@@ -6535,8 +6536,9 @@
         } else if (sub === 'scheduled' || sub === 'warning') {
             // Notices, not evidence that work is in flight. The scheduler emits
             // SCHEDULED "Recurring task #N completed. Next run: 07:00" AFTER the run
-            // has already delivered its result, and budget warnings arrive whenever a
-            // threshold is crossed. Both fell into the catch-all below, which calls
+            // has already delivered its result, and a warning tells of something that
+            // went wrong -- a call that failed, a task being stopped -- not that work
+            // goes on. Both fell into the catch-all below, which calls
             // setThinking(true) -- so the spinner restarted with nothing left to stop
             // it, for the full 15-minute safety timeout, after every single recurring
             // task.

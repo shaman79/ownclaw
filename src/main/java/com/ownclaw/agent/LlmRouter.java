@@ -24,7 +24,7 @@ import org.springframework.stereotype.Component;
  * it writes, the analysis of the skill library.
  *
  * <p>Cloud provider is selected based on {@code ownclaw.mentor.provider}:
- * openai (default) or anthropic. The gateway reads it on every call, so a change of it
+ * anthropic (default) or openai. The gateway reads it on every call, so a change of it
  * (e.g. via /setup wizard) takes effect at once.
  */
 @Component

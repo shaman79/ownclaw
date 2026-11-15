@@ -743,8 +743,8 @@ public class AgentContext {
 
     /**
      * Every cloud token billed, the four kinds together: what the task's records, its ending and
-     * the budget count. A cache read costs a tenth of a new input token, so this is no measure of
-     * cost: {@link #cloudUse} is.
+     * the day's usage count. A cache read costs a tenth of a new input token, so this is no measure
+     * of cost: {@link #cloudUse} is.
      */
     public synchronized int cloudTokens() {
         return cloudInputTokens + cloudOutputTokens + cloudCacheReadTokens + cloudCacheWriteTokens;

@@ -20,20 +20,14 @@ public class OwnClawConfig {
     private Telegram telegram = new Telegram();
     private Auth auth = new Auth();
     private Ops ops = new Ops();
-    private Webui webui = new Webui();
     private Sandbox sandbox = new Sandbox();
     private Skills skills = new Skills();
     private Database database = new Database();
-    private Confidence confidence = new Confidence();
-    private Observability observability = new Observability();
-    private Budgets budgets = new Budgets();
-    private Feedback feedback = new Feedback();
     private SelfRepair selfRepair = new SelfRepair();
 
     // --- Nested classes ---
 
     public static class Executor {
-        private String provider = "ollama";
         private String url = "http://localhost:11434";
         private String model = "qwen2.5:14b";
 
@@ -69,8 +63,6 @@ public class OwnClawConfig {
          */
         private boolean captureFacts = true;
 
-        public String getProvider() { return provider; }
-        public void setProvider(String provider) { this.provider = provider; }
         public String getUrl() { return url; }
         public void setUrl(String url) { this.url = url; }
         public String getModel() { return model; }
@@ -128,7 +120,11 @@ public class OwnClawConfig {
     }
 
     public static class Mentor {
-        private String provider = "openai";
+        /**
+         * The cloud provider: "anthropic", or "openai" as the alternative, whose model and key
+         * are {@code model} and {@code apiKey}. Always one of the two names ({@link #setProvider}).
+         */
+        private String provider = "anthropic";
         private String model = "gpt-4o";
         private String apiKey;
         private String anthropicApiKey;
@@ -195,7 +191,18 @@ public class OwnClawConfig {
         public void setNativeTools(boolean v) { this.nativeTools = v; }
 
         public String getProvider() { return provider; }
-        public void setProvider(String provider) { this.provider = provider; }
+
+        /**
+         * "openai", in any case, chooses OpenAI. Anything else is Anthropic, the default: its own
+         * name, and a setting left blank or mistyped. What is kept is always one of the two names,
+         * so every reader -- the gateway, the wizard, the settings page -- agrees on the provider
+         * in use; kept as written, a name that was neither chose OpenAI, which is not the default.
+         */
+        public void setProvider(String provider) {
+            this.provider = provider != null && "openai".equalsIgnoreCase(provider.strip())
+                    ? "openai" : "anthropic";
+        }
+
         public String getModel() { return model; }
         public void setModel(String model) { this.model = model; }
         public String getApiKey() { return apiKey; }
@@ -210,37 +217,19 @@ public class OwnClawConfig {
 
     public static class Queue {
         private int maxConcurrentTasks = 5;
-        private int ollamaConcurrency = 1;
-        private int cloudConcurrency = 3;
-        private int sandboxConcurrency = 3;
         private int maxQueuedTasks = 50;
 
         public int getMaxConcurrentTasks() { return maxConcurrentTasks; }
         public void setMaxConcurrentTasks(int v) { this.maxConcurrentTasks = v; }
-        public int getOllamaConcurrency() { return ollamaConcurrency; }
-        public void setOllamaConcurrency(int v) { this.ollamaConcurrency = v; }
-        public int getCloudConcurrency() { return cloudConcurrency; }
-        public void setCloudConcurrency(int v) { this.cloudConcurrency = v; }
-        public int getSandboxConcurrency() { return sandboxConcurrency; }
-        public void setSandboxConcurrency(int v) { this.sandboxConcurrency = v; }
         public int getMaxQueuedTasks() { return maxQueuedTasks; }
         public void setMaxQueuedTasks(int v) { this.maxQueuedTasks = v; }
     }
 
     public static class Tasks {
-        private int defaultTimeout = 300;
-        private int stepTimeout = 60;
-        private int longRunningThreshold = 120;
         private int stallTimeout = 1200;
         private int heartbeatInterval = 30;
         private int schedulerPollInterval = 30;
 
-        public int getDefaultTimeout() { return defaultTimeout; }
-        public void setDefaultTimeout(int v) { this.defaultTimeout = v; }
-        public int getStepTimeout() { return stepTimeout; }
-        public void setStepTimeout(int v) { this.stepTimeout = v; }
-        public int getLongRunningThreshold() { return longRunningThreshold; }
-        public void setLongRunningThreshold(int v) { this.longRunningThreshold = v; }
         public int getStallTimeout() { return stallTimeout; }
         public void setStallTimeout(int v) { this.stallTimeout = v; }
         public int getHeartbeatInterval() { return heartbeatInterval; }
@@ -304,13 +293,6 @@ public class OwnClawConfig {
         public void setToken(String token) { this.token = token; }
     }
 
-    public static class Webui {
-        private boolean enabled = true;
-
-        public boolean isEnabled() { return enabled; }
-        public void setEnabled(boolean enabled) { this.enabled = enabled; }
-    }
-
     public static class Sandbox {
         /** auto, required or off -- see SkillJail. */
         private String isolation = "auto";
@@ -366,39 +348,6 @@ public class OwnClawConfig {
         public void setPath(String path) { this.path = path; }
     }
 
-    public static class Confidence {
-        private double mentorThreshold = 0.3;
-        private double cacheSkipThreshold = 0.7;
-
-        public double getMentorThreshold() { return mentorThreshold; }
-        public void setMentorThreshold(double v) { this.mentorThreshold = v; }
-        public double getCacheSkipThreshold() { return cacheSkipThreshold; }
-        public void setCacheSkipThreshold(double v) { this.cacheSkipThreshold = v; }
-    }
-
-    public static class Observability {
-        private boolean chatStatusMessages = true;
-        private String statusVerbosity = "concise";
-
-        public boolean isChatStatusMessages() { return chatStatusMessages; }
-        public void setChatStatusMessages(boolean v) { this.chatStatusMessages = v; }
-        public String getStatusVerbosity() { return statusVerbosity; }
-        public void setStatusVerbosity(String v) { this.statusVerbosity = v; }
-    }
-
-    public static class Budgets {
-        private long dailyCloudTokens = 0;
-        private int perTaskCloudTokens = 0;
-        private double warningThreshold = 0.8;
-
-        public long getDailyCloudTokens() { return dailyCloudTokens; }
-        public void setDailyCloudTokens(long v) { this.dailyCloudTokens = v; }
-        public int getPerTaskCloudTokens() { return perTaskCloudTokens; }
-        public void setPerTaskCloudTokens(int v) { this.perTaskCloudTokens = v; }
-        public double getWarningThreshold() { return warningThreshold; }
-        public void setWarningThreshold(double v) { this.warningThreshold = v; }
-    }
-
     /**
      * Self-repair ({@code com.ownclaw.agent.SkillSelfRepair}): when unattended work -- a scheduled
      * run, /bg -- shows that a skill did not do its whole job, a background task repairs the skill
@@ -409,13 +358,6 @@ public class OwnClawConfig {
 
         public boolean isEnabled() { return enabled; }
         public void setEnabled(boolean enabled) { this.enabled = enabled; }
-    }
-
-    public static class Feedback {
-        private int maxRounds = 3;
-
-        public int getMaxRounds() { return maxRounds; }
-        public void setMaxRounds(int v) { this.maxRounds = v; }
     }
 
     // --- Root getters/setters ---
@@ -434,22 +376,12 @@ public class OwnClawConfig {
     public void setAuth(Auth auth) { this.auth = auth; }
     public Ops getOps() { return ops; }
     public void setOps(Ops ops) { this.ops = ops; }
-    public Webui getWebui() { return webui; }
-    public void setWebui(Webui v) { this.webui = v; }
     public Sandbox getSandbox() { return sandbox; }
     public void setSandbox(Sandbox v) { this.sandbox = v; }
     public Skills getSkills() { return skills; }
     public void setSkills(Skills v) { this.skills = v; }
     public Database getDatabase() { return database; }
     public void setDatabase(Database v) { this.database = v; }
-    public Confidence getConfidence() { return confidence; }
-    public void setConfidence(Confidence v) { this.confidence = v; }
-    public Observability getObservability() { return observability; }
-    public void setObservability(Observability v) { this.observability = v; }
-    public Budgets getBudgets() { return budgets; }
-    public void setBudgets(Budgets v) { this.budgets = v; }
-    public Feedback getFeedback() { return feedback; }
-    public void setFeedback(Feedback v) { this.feedback = v; }
     public SelfRepair getSelfRepair() { return selfRepair; }
     public void setSelfRepair(SelfRepair v) { this.selfRepair = v; }
 }

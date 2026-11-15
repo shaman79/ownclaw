@@ -7,7 +7,7 @@ import java.util.Map;
  * What a cloud call actually costs.
  * <p>
  * Every call site recorded {@code 0.0}, so {@code token_usage.cost_usd} was a column of zeros,
- * the budget ceilings in {@code application.yaml} guarded nothing, and no claim about token
+ * the budget ceilings {@code application.yaml} then had guarded nothing, and no claim about token
  * savings — the first thing this system was built to deliver — could be checked against
  * anything. This is the instrument; it has to exist before any routing decision can be judged.
  * <p>

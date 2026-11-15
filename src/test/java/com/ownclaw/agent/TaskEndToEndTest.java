@@ -296,7 +296,7 @@ class TaskEndToEndTest {
     }
 
     @Test
-    @DisplayName("a reply stopped part-way is counted: the tokens its stream reported reach the ending, the budget and the ledger")
+    @DisplayName("a reply stopped part-way is counted: the tokens its stream reported reach the ending, the day's usage and the ledger")
     void aStoppedReplyIsCounted(@TempDir Path tmp) throws Exception {
         var rig = new LoopRig(tmp, List.of(NOOP));
         var api = com.ownclaw.llm.ScriptedAnthropic.answering(120_000, 80_000, 900, "The routers ", "are ", "fine.");
@@ -310,7 +310,7 @@ class TaskEndToEndTest {
         assertTrue(r.response().contains("200,001 cloud tokens"), r.response());
         assertEquals(billed, rig.jdbc.queryForObject(
                 "SELECT COALESCE(SUM(tokens_used), 0) FROM token_usage WHERE user_id = 'u1'", Long.class),
-                "the day's budget");
+                "the day's usage");
         String completed = rig.jdbc.queryForObject(
                 "SELECT details FROM events WHERE event_type = 'task_completed'", String.class);
         assertTrue(completed.contains("\"cloudTokens\":" + billed), completed);
@@ -318,8 +318,8 @@ class TaskEndToEndTest {
         assertTrue(egress.contains("\"decision\":\"ERROR\"") && egress.contains("\"promptTokens\":120000")
                 && egress.contains("\"cacheReadTokens\":80000"), egress);
         assertFalse(egress.contains("\"costUsd\":0.0,"), "priced: " + egress);
-        // Mutation: the loop does not count what the hook is told -> 0 cloud tokens, and an
-        // empty budget, though the ledger has them.
+        // Mutation: the loop does not count what the hook is told -> 0 cloud tokens, and no
+        // usage for the day, though the ledger has them.
     }
 
     /** The task's hook, with the owner pressing Stop as the {@code n}-th event of the reply arrives. */

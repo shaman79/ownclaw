@@ -165,7 +165,7 @@ class TokenAccountingTest {
         assertEquals(300, cloud.get("completionTokens"));
         assertEquals(24_600, cloud.get("cacheReadTokens"));
         assertEquals(1_200, cloud.get("cacheWriteTokens"));
-        assertEquals(cost, (double) cloud.get("costUsd"), 1e-12, "what the budget was charged");
+        assertEquals(cost, (double) cloud.get("costUsd"), 1e-12, "what the day's usage was charged");
         assertEquals(700 + 300 + 24_600 + 1_200, done.data().get("cloudTokens"), "their sum, for Telegram");
         assertTrue(done.text().endsWith(String.format(java.util.Locale.ROOT, " · $%.2f cloud", cost)),
                 "the last line of the trace says what the cloud cost: " + done.text());

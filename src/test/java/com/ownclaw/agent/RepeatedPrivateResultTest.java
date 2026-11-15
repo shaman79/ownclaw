@@ -286,7 +286,7 @@ class RepeatedPrivateResultTest {
                         new AssistantPartsTest.NoSkills(), new com.ownclaw.observability.DebugSessionService(),
                         new com.ownclaw.core.TaskCancellationService(), null, null,
                         new com.ownclaw.core.LongRunningTaskManager(jdbc, emitter, events, config), null,
-                        new com.ownclaw.core.TokenBudgetTracker(jdbc, config, emitter), events, null,
+                        new com.ownclaw.core.TokenUsageTracker(jdbc), events, null,
                         new LocalExecutor(new LlmRouter(local, null, null), registry, emitter,
                                 new DelegationBehaviourTest.Usage()), null, new com.ownclaw.privacy.Redactor(null));
                 var ctx = new AgentContext("u1", "t-partial", "Email me the morning digest.");

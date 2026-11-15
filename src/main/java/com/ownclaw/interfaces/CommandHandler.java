@@ -6,7 +6,7 @@ import com.ownclaw.config.LocalMode;
 import com.ownclaw.conversation.ConversationService;
 import com.ownclaw.core.ScheduledTaskService;
 import com.ownclaw.core.TaskQueue;
-import com.ownclaw.core.TokenBudgetTracker;
+import com.ownclaw.core.TokenUsageTracker;
 import com.ownclaw.observability.EventLogService;
 import com.ownclaw.sandbox.SkillJail;
 import com.ownclaw.skillrunner.SkillInteractionHandler;
@@ -43,7 +43,7 @@ public class CommandHandler {
     private final ToolRegistry toolRegistry;
     private final ConversationService conversationService;
     private final EventLogService eventLog;
-    private final TokenBudgetTracker budgetTracker;
+    private final TokenUsageTracker usageTracker;
     private final CredentialVault credentialVault;
     private final CredentialGrantService credentialGrants;
     private final TaskQueue taskQueue;
@@ -58,7 +58,7 @@ public class CommandHandler {
     private final SkillJail jail;
 
     public CommandHandler(ToolRegistry toolRegistry, ConversationService conversationService,
-                          EventLogService eventLog, TokenBudgetTracker budgetTracker,
+                          EventLogService eventLog, TokenUsageTracker usageTracker,
                           CredentialVault credentialVault,
                           CredentialGrantService credentialGrants, TaskQueue taskQueue,
                           ScheduledTaskService scheduledTaskService,
@@ -71,7 +71,7 @@ public class CommandHandler {
         this.toolRegistry = toolRegistry;
         this.conversationService = conversationService;
         this.eventLog = eventLog;
-        this.budgetTracker = budgetTracker;
+        this.usageTracker = usageTracker;
         this.credentialVault = credentialVault;
         this.credentialGrants = credentialGrants;
         this.taskQueue = taskQueue;
@@ -163,11 +163,11 @@ public class CommandHandler {
             }
             case "/status" -> Optional.of(statusText());
             case "/tokens" -> {
-                String budget = budgetTracker.getUsageSummary(userId);
+                String usage = usageTracker.getUsageSummary(userId);
                 Map<String, Object> detail = eventLog.tokenUsageDetailToday(userId);
                 long cloud = ((Number) detail.get("cloud_tokens")).longValue();
                 long local = ((Number) detail.get("local_tokens")).longValue();
-                yield Optional.of(String.format("%s\nCloud: %,d  |  Local: %,d", budget, cloud, local));
+                yield Optional.of(String.format("%s\nCloud: %,d  |  Local: %,d", usage, cloud, local));
             }
             case "/history" -> Optional.of(handleHistory(userId));
             // A /queue with a message is no command here: the chat queues the message (queued).
@@ -654,7 +654,7 @@ public class CommandHandler {
                 - `/log [count|all] [page N]` — Recent events, newest first (10 unless a count is given)
                 - `/log errors [count|all] [page N]` — Recent errors, the same way
                 - `/log tokens` — Token usage today
-                - `/tokens` — Token budget summary
+                - `/tokens` — Tokens used today
                 - `/skills` — List available tools
                 - `/bg <task>` — Run it in the background; the result comes back when ready
                 - `/queue <message>` — Run it as a task of its own after the running one, instead of sending it to that task (the web chat's Queue button)
@@ -884,13 +884,12 @@ public class CommandHandler {
     private String handleLog(String userId, String args) {
         if (args.equals("tokens")) {
             Map<String, Object> detail = eventLog.tokenUsageDetailToday(userId);
-            String budget = budgetTracker.getUsageSummary(userId);
             long cloud = ((Number) detail.get("cloud_tokens")).longValue();
             long local = ((Number) detail.get("local_tokens")).longValue();
             long total = ((Number) detail.get("total_tokens")).longValue();
             long tasks = ((Number) detail.get("task_count")).longValue();
-            return String.format("Token usage today:\n  Cloud: %,d  |  Local: %,d  |  Total: %,d\n  Tasks: %d\n  Budget: %s",
-                    cloud, local, total, tasks, budget);
+            return String.format("Token usage today:\n  Cloud: %,d  |  Local: %,d  |  Total: %,d\n  Tasks: %d",
+                    cloud, local, total, tasks);
         }
         String[] words = args.isEmpty() ? new String[0] : args.split("\\s+");
         int i = 0;

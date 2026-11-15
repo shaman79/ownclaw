@@ -88,7 +88,7 @@ OwnClaw started as a fork of the [OpenClaw](https://github.com/BionicClick/OpenC
 | **Credential handling** | Config files or hardcoded | Encrypted vault with per-user isolation; values removed from everything a cloud model is sent |
 | **Privacy** | Everything goes to the cloud | Secrets removed and identifiers replaced before any cloud call; uploaded files and mail read only by the local model |
 | **Sandbox** | Basic process execution | A bubblewrap jail for every skill, a hardened systemd service, stall detection |
-| **Cost control** | None — every action hits the cloud API | Time-vs-cost setting, local delegation, on-demand tool lookup, prompt caching, rate-limit back-off, optional token budgets |
+| **Cost control** | None — every action hits the cloud API | Time-vs-cost setting, local delegation, on-demand tool lookup, prompt caching, rate-limit back-off |
 | **UI** | CLI / basic web | Chat UI with live model calls, per-chat cost and effort, task pages, debug mode, settings panel; Telegram bot |
 
 The fundamental architectural difference: OpenClaw's plan-first model cannot handle tasks that require observing intermediate results before deciding what to do next (which is most real-world tasks). OwnClaw's reactive loop solves this — the agent sees every tool result and adapts its strategy accordingly.
@@ -148,7 +148,6 @@ Each call is recorded with the number of secrets removed and identifiers replace
 ### Cloud API security
 
 - Cloud LLM API keys come from the environment (`.env`) or, when entered on the settings page, are kept in the database — never in code or in files checked into source control.
-- Token budgets can cap daily and per-task cloud spending.
 - Prompt caching (Anthropic) reduces redundant token usage across multi-turn conversations.
 
 ## Running
@@ -194,7 +193,7 @@ All settings are in `src/main/resources/application.yaml` and can be overridden 
 |---|---|---|
 | `ANTHROPIC_API_KEY` | — | Anthropic API key for cloud LLM |
 | `OPENAI_API_KEY` | — | OpenAI API key (alternative provider) |
-| `OWNCLAW_MENTOR_PROVIDER` | `openai` | Cloud provider: `openai` or `anthropic` |
+| `OWNCLAW_MENTOR_PROVIDER` | `anthropic` | Cloud provider: `anthropic` or `openai` |
 | `OWNCLAW_ANTHROPIC_MODEL` | `claude-opus-5-5` | Anthropic model name |
 | `OWNCLAW_EXECUTOR_URL` | `http://localhost:11434` | Ollama API endpoint |
 | `OWNCLAW_EXECUTOR_MODEL` | `qwen2.5:14b` | Local LLM model name |
