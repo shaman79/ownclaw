@@ -4,20 +4,15 @@ import com.ownclaw.conversation.FileStorageService;
 import jakarta.servlet.http.HttpServletRequest;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.core.io.FileSystemResource;
-import org.springframework.core.io.Resource;
-import org.springframework.http.HttpHeaders;
-import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
 
-import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
 
 /**
- * REST controller for file upload/download/list/delete.
+ * REST controller for file upload/delete.
  * All endpoints require JWT authentication (enforced by JwtAuthFilter).
  */
 @RestController
@@ -104,45 +99,6 @@ public class FileUploadController {
             }
         }
         return ResponseEntity.ok(Map.of("files", results));
-    }
-
-    /**
-     * Download a file by ID.
-     * GET /api/files/{fileId}
-     */
-    @GetMapping("/{fileId}")
-    public ResponseEntity<Resource> download(HttpServletRequest request,
-                                             @PathVariable String fileId) {
-        String userId = (String) request.getAttribute("userId");
-        Map<String, Object> info = fileStorage.getFileInfo(fileId);
-
-        if (info == null || !userId.equals(info.get("user_id"))) {
-            return ResponseEntity.notFound().build();
-        }
-
-        Path path = fileStorage.getFilePath(fileId);
-        if (path == null || !path.toFile().exists()) {
-            return ResponseEntity.notFound().build();
-        }
-
-        String contentType = (String) info.get("content_type");
-        String originalName = (String) info.get("original_name");
-
-        return ResponseEntity.ok()
-                .contentType(MediaType.parseMediaType(contentType))
-                .header(HttpHeaders.CONTENT_DISPOSITION,
-                        "attachment; filename=\"" + originalName.replace("\"", "_") + "\"")
-                .body(new FileSystemResource(path));
-    }
-
-    /**
-     * List all files for the current user.
-     * GET /api/files
-     */
-    @GetMapping
-    public ResponseEntity<?> listFiles(HttpServletRequest request) {
-        String userId = (String) request.getAttribute("userId");
-        return ResponseEntity.ok(Map.of("files", fileStorage.listUserFiles(userId)));
     }
 
     /**

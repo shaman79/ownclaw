@@ -17,7 +17,8 @@ class SearchSessionsTest {
     @Test
     @DisplayName("a chat with many matches does not hide the others: every matching chat, once, and no archived one")
     void everyMatchingChatOnce(@TempDir Path tmp) throws Exception {
-        var conversations = new ConversationService(MigratedDatabase.at(tmp.resolve("t.db")));
+        var jdbc = MigratedDatabase.at(tmp.resolve("t.db"));
+        var conversations = new ConversationService(jdbc);
         String busy = conversations.createSession("u1", "Busy");
         String quiet = conversations.createSession("u1", "Quiet");
         String elsewhere = conversations.createSession("u2", "Someone else's");
@@ -32,7 +33,8 @@ class SearchSessionsTest {
         conversations.saveMessage("u2", elsewhere, "user", "router router router");
         String archived = conversations.createSession("u1", "Archived");
         conversations.saveMessage("u1", archived, "user", "router router router router");
-        conversations.archiveSession("u1", archived);
+        // Nothing archives a chat any more; one archived before stays out of the search.
+        jdbc.update("UPDATE chat_sessions SET archived = 1 WHERE id = ?", archived);
 
         var results = conversations.searchMessages("u1", "router");
 

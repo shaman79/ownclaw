@@ -463,17 +463,6 @@ public class ConversationService {
     }
 
     /**
-     * Archive (soft-delete) a session.
-     */
-    public void archiveSession(String userId, String sessionId) {
-        jdbc.update("UPDATE chat_sessions SET archived = 1 WHERE id = ? AND user_id = ?",
-                sessionId, userId);
-        // If this was the active session, clear it
-        jdbc.update("DELETE FROM active_session WHERE user_id = ? AND session_id = ?",
-                userId, sessionId);
-    }
-
-    /**
      * Permanently delete a session, its messages and their links to the files sent with them;
      * the files themselves stay, listed by /files. All of it or nothing, in one transaction.
      * If the deleted session was the active one, switches to the most recent remaining
