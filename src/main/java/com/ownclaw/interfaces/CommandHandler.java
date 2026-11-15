@@ -1225,7 +1225,7 @@ public class CommandHandler {
                 .sorted(java.util.Comparator.comparing(com.ownclaw.agent.tools.Tool::name)).toList()) {
             List<String> ungranted = tool.ungranted(userId);
             if (!ungranted.isEmpty()) {
-                waiting.append("  \u2022 `").append(CredentialGrantService.command(tool.name(), ungranted)).append("`\n");
+                waiting.append("  \u2022 `").append(CredentialGrantService.grantCommand(tool.name(), ungranted)).append("`\n");
             }
         }
         if (!waiting.isEmpty()) {
