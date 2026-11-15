@@ -192,6 +192,10 @@ public class CriticAgent {
      * and {@code force: true} overrides it — "capable of anything I ask" means a genuinely new
      * capability must stay reachable, and a gate with no escape hatch is a worse failure than the
      * bloat it prevents. A forced creation is recorded as a warning rather than passing silently.
+     * <p>
+     * A creation is never refused for having been asked for before, however often: a skill that
+     * failed is fixed under its own name, and a refusal left the model no way to fix it
+     * (AgentLoop, where skill_create is run). Counting its attempts is a limit on them.
      */
     private Verdict evaluateSkillCreate(AgentAction action, AgentContext context,
                                         List<String> warnings) {
@@ -245,13 +249,6 @@ public class CriticAgent {
         if (forced) {
             warnings.add("skill_create forced past the duplicate check for '" + proposed + "'");
             log.warn("skill_create for '{}' forced past the duplicate check", proposed);
-        }
-
-        // Repeating an identical creation is a loop whatever it is called.
-        int identical = countIdenticalTrailingActions(context.trajectory(), action);
-        if (identical >= MAX_IDENTICAL_CONSECUTIVE) {
-            return Verdict.block("You have tried to create '" + proposed + "' with identical "
-                    + "parameters " + identical + " times. Change the approach or ask the user.");
         }
         return Verdict.allow(warnings);
     }
