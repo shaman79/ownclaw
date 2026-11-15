@@ -34,11 +34,6 @@ public record ToolSpec(String name, String description, Map<String, Object> inpu
         return new ToolSpec(name, description, inputSchema, true, authored);
     }
 
-    /** This spec as the code's own text: see {@link #authored}. */
-    public ToolSpec asAuthored() {
-        return new ToolSpec(name, description, inputSchema, deferred, true);
-    }
-
     /**
      * What a provider without deferred loading offers: the tools that are not deferred, in their
      * order, then the deferred ones in the order the conversation's {@link LlmMessage.Role#TOOLS}

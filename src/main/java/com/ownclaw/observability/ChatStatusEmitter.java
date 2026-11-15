@@ -139,12 +139,6 @@ public class ChatStatusEmitter {
         if (forUser.isEmpty()) listeners.remove(userId);
     }
 
-    /** True when at least one interface is listening — i.e. somebody is watching. */
-    public boolean hasListener(String userId) {
-        Map<Object, Consumer<StatusMessage>> forUser = listeners.get(userId);
-        return forUser != null && !forUser.isEmpty();
-    }
-
     /**
      * Emit a status message to every attached interface for this user.
      * <p>
