@@ -18,7 +18,7 @@ import static org.junit.jupiter.api.Assertions.*;
  * The skill the loop makes at a task's first step when the capability resolver sees a gap, through
  * the real loop and the real resolver -- with no container runtime, as production has none, so its
  * pure-Python variants. No model chose that step: it passes the gate a model's skill_create passes
- * all the same.
+ * all the same, and it is not work the task's model has done.
  */
 class CapabilityResolverStepTest {
 
@@ -78,5 +78,32 @@ class CapabilityResolverStepTest {
         assertEquals("network_scanner", made.get(0).get("name"));
         assertEquals("codegen", bare.cloud.calls.get(0).purpose(), "the first call was the code's, not a step's");
         // Mutation: make the resolver's skill without asking the critic, as before -> a second scanner.
+    }
+
+    @Test
+    @DisplayName("on unattended local-first work the skill the loop made for the resolver is nothing the model ran: an answer straight after it is refused, as one before any work is")
+    void theResolversStepIsNoWorkOfTheModels(@TempDir Path tmp) throws Exception {
+        var rig = rig(tmp, true, tool("smtp_send_email", List.of(), p -> "sent"));
+        // The skill made is one of the registry's from then on, as a real one is.
+        rig.skills.create = p -> {
+            rig.registry.register(tool(String.valueOf(p.get("name")), List.of(), q -> "four devices"));
+            return "Skill '" + p.get("name") + "' created and registered. It is now available as a tool.";
+        };
+        rig.cloud.codegen.add(SkillCodegenTest.finished(SkillCodegenTest.module("")));
+        rig.cloud.think.add(respond("I made a scanner and will run it."));
+        rig.cloud.think.add(call(AgentAction.DELEGATE, Map.of("calls",
+                List.of(Map.of("tool", "network_scanner", "params", Map.of())))));
+        rig.cloud.think.add(respond("Four devices answer."));
+
+        AgentResult r = rig.loop.executeFull("u1", ASKS, true);
+
+        assertTrue(rig.registry.find("network_scanner").isPresent(), "the premise: the skill was made at step 1");
+        var thinks = rig.cloud.calls("think");
+        assertTrue(ChatOptionsTaskTest.orchestratesOnly(thinks.get(0)), "the premise: the task is local-first");
+        assertEquals(AgentResult.TerminationReason.COMPLETED, r.terminationReason(), r.response());
+        assertEquals("Four devices answer.", r.response(), "the first answer ended the task with nothing run");
+        assertTrue(SkillCreateGateTest.shown(thinks.get(1)).contains("You described what you were going to do instead "
+                + "of doing it, and nothing has run yet."), SkillCreateGateTest.shown(thinks.get(1)));
+        // Mutation: count the resolver's step as one that ran -> "I made a scanner and will run it." is delivered.
     }
 }

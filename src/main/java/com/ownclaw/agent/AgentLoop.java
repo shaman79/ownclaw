@@ -1061,6 +1061,10 @@ public class AgentLoop {
                 }
 
                 AgentObservation obs = createSkill(action, context);
+                // Recorded as the loop's own step: unattended work whose model has run nothing may
+                // not answer yet, and a skill made before its first reply is nothing it ran.
+                obs = new AgentObservation(obs.tool(), obs.success(), obs.output(),
+                        Map.of(BY_THE_RESOLVER, true), obs.durationMs());
                 recordAndEmitObservation(context, action, obs, step + 1);
                 context.markProgress();
                 if (debug) {
@@ -1690,6 +1694,12 @@ public class AgentLoop {
                 : action.isSkillManage() || action.isFindTools() || !action.isSpecialAction();
         return judged ? criticAgent.evaluate(action, context) : CriticAgent.Verdict.allow(List.of());
     }
+
+    /**
+     * Marks the skill_create the loop ran at a task's first step for the capability resolver: no
+     * model chose it, so it is not work the task's model has done (ThinkingEngine#nothingRanYet).
+     */
+    static final String BY_THE_RESOLVER = "byTheResolver";
 
     /** The steps in a row that ran nothing, as {@link #stepRanNothing} counts them. */
     private static final class RunOfNothing {
