@@ -161,7 +161,7 @@ public class CredentialGrantService {
     }
 
     /** The command that grants this skill these credentials: what its user sends, or clicks. */
-    public static String command(String skill, Collection<String> keys) {
+    public static String grantCommand(String skill, Collection<String> keys) {
         return "/grant " + skill + " " + String.join(" ", keys);
     }
 
@@ -171,7 +171,7 @@ public class CredentialGrantService {
      */
     public static String notAllowed(String skill, List<String> keys) {
         return "'" + skill + "' has not been allowed to read " + String.join(", ", keys) + " from the vault. "
-                + "Only the user can allow it, by sending `" + command(skill, keys) + "` in the chat: the task's "
+                + "Only the user can allow it, by sending `" + grantCommand(skill, keys) + "` in the chat: the task's "
                 + "answer shows them that command. Nothing you can call allows it. Go on with what does not need "
                 + "this skill, and say that it waits for them.";
     }
@@ -179,6 +179,6 @@ public class CredentialGrantService {
     /** The line a task's answer gets for a skill that was not run, for its user. */
     public static String asked(String skill, List<String> keys) {
         return "_🔑 " + skill + " was not run: you have not allowed it to read " + String.join(", ", keys)
-                + " from your vault. To allow it, send:_ `" + command(skill, keys) + "`";
+                + " from your vault. To allow it, send:_ `" + grantCommand(skill, keys) + "`";
     }
 }

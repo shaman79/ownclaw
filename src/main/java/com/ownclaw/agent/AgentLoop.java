@@ -560,7 +560,7 @@ public class AgentLoop {
                         .map(tool -> tool.ungranted(context.userId())).orElse(List.of());
                 if (still.isEmpty()) continue;
                 lines.add(com.ownclaw.users.CredentialGrantService.asked(skill, still));
-                choices.add(com.ownclaw.users.CredentialGrantService.command(skill, still));
+                choices.add(com.ownclaw.users.CredentialGrantService.grantCommand(skill, still));
             }
             if (lines.isEmpty()) return ended;
             String said = "\n\n" + String.join("\n\n", lines);

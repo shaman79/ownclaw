@@ -276,6 +276,25 @@ class ChatDeliveryTest {
     }
 
     @Test
+    @DisplayName("a finished answer that offers a command -- the one its ending wrote for a skill that waits for a grant -- reaches the page with it, and the saved row keeps it for a reload")
+    void aFinishedAnswersChoiceReachesThePage(@TempDir Path tmp) throws Exception {
+        connect(tmp);
+        type("mail me the report");
+        String asked = conversations.getCurrentSession(USER);
+        queue.futures.getLast().complete(AgentResult.completed("It waits for you.\n\n_mailer was not run: you have not "
+                + "allowed it to read SMTP_PASS from your vault. To allow it, send:_ `/grant mailer SMTP_PASS`",
+                new com.ownclaw.agent.AgentTrajectory(), 1).withChoices(List.of("/grant mailer SMTP_PASS")));
+
+        var answer = frames("response").getLast();
+        assertEquals(List.of("/grant mailer SMTP_PASS"),
+                mapper.convertValue(answer.path("choices"), new com.fasterxml.jackson.core.type.TypeReference<List<String>>() {}),
+                "an answer, not a question, and still with what it offers to click: " + answer);
+        var saved = conversations.getSessionMessages(USER, asked, null, null).messages().getLast();
+        assertEquals("[\"/grant mailer SMTP_PASS\"]", String.valueOf(saved.get("choices")), "drawn again after a reload");
+        // Mutation: choices sent with a question alone -> the answer's frame has none.
+    }
+
+    @Test
     @DisplayName("an answer whose sending breaks with an Error is kept once, and nothing says the task failed")
     void anErrorWhileSendingAddsNoFailure(@TempDir Path tmp) throws Exception {
         connect(tmp);

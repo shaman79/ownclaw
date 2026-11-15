@@ -7,6 +7,7 @@ import com.ownclaw.agent.tools.ToolResult;
 import com.ownclaw.config.OwnClawConfig;
 import com.ownclaw.skills.PythonEnvironmentService;
 import com.ownclaw.users.CredentialVault;
+import com.ownclaw.users.GrantsKit;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -53,7 +54,8 @@ class CredentialHandoverTest {
         return "'" + s.replace("\\", "\\\\").replace("'", "\\'").replace("\n", "\\n").replace("\t", "\\t") + "'";
     }
 
-    static final CredentialVault VAULT = new CredentialVault(null) {
+    /** Holding the key, whoever asks, granted to every skill: how it travels is what is tested here. */
+    static final CredentialVault VAULT = new CredentialVault(null, GrantsKit.everythingGranted()) {
         @Override public Map<String, String> getCredentials(String userId, List<String> keys) {
             return Map.of("SSH_PRIVATE_KEY", SECRET);
         }

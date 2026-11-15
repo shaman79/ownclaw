@@ -229,7 +229,7 @@ class ContainerRunCommandTest {
                     return {'output': json.dumps({'token': os.environ.get('SKILL_TOKEN'), 'child': child.stdout,
                                                   'params': sorted(params)})}
                 """);
-        var vault = new com.ownclaw.users.CredentialVault(null) {
+        var vault = new com.ownclaw.users.CredentialVault(null, com.ownclaw.users.GrantsKit.everythingGranted()) {
             @Override
             public Map<String, String> getCredentials(String userId, List<String> keys) {
                 return Map.of("SKILL_TOKEN", "cred-canary-4c1");

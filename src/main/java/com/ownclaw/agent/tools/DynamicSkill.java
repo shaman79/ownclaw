@@ -163,7 +163,10 @@ public class DynamicSkill implements Tool {
     @Override
     public List<String> ungranted(String userId) {
         if (requiredCredentials.isEmpty() || credentialVault == null || userId == null) return List.of();
-        return credentialVault.grants().ungranted(userId, name, requiredCredentials);
+        // Not a credential that is never handed to a skill: nobody can grant it, so nobody is asked
+        // to -- a run of a skill that declares one fails by itself, saying to take it out (run).
+        return credentialVault.grants().ungranted(userId, name,
+                requiredCredentials.stream().filter(CredentialVault::forSkills).toList());
     }
 
     /** The directory containing this skill's files. */

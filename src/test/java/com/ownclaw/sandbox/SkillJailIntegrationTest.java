@@ -388,7 +388,7 @@ class SkillJailIntegrationTest {
         cfg.getSandbox().setPythonPath("python3");
         var env = new PythonEnvironmentService(cfg, jail);
         env.init();
-        var vault = new com.ownclaw.users.CredentialVault(null) {
+        var vault = new com.ownclaw.users.CredentialVault(null, com.ownclaw.users.GrantsKit.everythingGranted()) {
             @Override
             public Map<String, String> getCredentials(String userId, List<String> keys) {
                 return Map.of("SKILL_TOKEN", "cred-canary-9d2", "LD_PRELOAD", lib.toString());
