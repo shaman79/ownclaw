@@ -10,7 +10,7 @@
 
 OwnClaw is an autonomous, self-learning AI agent system built around a **dual-LLM architecture**:
 
-- **Cloud LLM (Orchestrator)** — a large cloud LLM (OpenAI or Anthropic, configurable) that **always** drives the main agent loop: reasoning, planning, deciding which tools to call, and evaluating results. The cloud LLM is the "brain" — it sees every message, makes every decision, and owns the Think→Act→Observe loop.
+- **Cloud LLM (Orchestrator)** — a large cloud LLM (Anthropic by default, or OpenAI) that **always** drives the main agent loop: reasoning, planning, deciding which tools to call, and evaluating results. The cloud LLM is the "brain" — it sees every message, makes every decision, and owns the Think→Act→Observe loop.
 - **Local LLM (Executor)** — a small local LLM (7-14B via Ollama, e.g. qwen2.5:14b) that executes **delegated multi-step plans**. The cloud LLM can issue a `delegate` action with a structured plan (goal, ordered steps, checkpoints), and the local LLM executes it autonomously in a mini agent loop, returning consolidated results.
 - **SkillRunner** — the execution engine that runs Python skill scripts in sandboxed environments (a bubblewrap jail on Linux once bubblewrap is installed, docker for skills with system packages, a plain child process on Windows).
 
@@ -72,7 +72,7 @@ scenario breaks the system's ability to handle all others.
 | **LocalExecutor** | Delegation executor | Receives structured `DelegationPlan` from cloud, runs a mini Think→Act→Observe loop using local LLM to execute the steps | Java + Ollama |
 | **ToolRegistry** | Tool dispatcher | Registers all available tools (skills, shell, file ops, etc.), dispatches tool calls from the agent | Java |
 | **SkillRunner** | Skill execution engine | Runs Python skill scripts in a bubblewrap jail (SkillJail), or docker for system packages; manages I/O | Java + Python |
-| **Cloud LLM** | Orchestrator | Reasons about tasks, decides actions, creates delegation plans, evaluates results | Cloud API (OpenAI, Anthropic) |
+| **Cloud LLM** | Orchestrator | Reasons about tasks, decides actions, creates delegation plans, evaluates results | Cloud API (Anthropic, or OpenAI) |
 | **Local LLM** | Executor | Executes delegated multi-step plans autonomously, returns consolidated results | Ollama (qwen2.5:14b) |
 
 **Key architectural rule**: The cloud LLM orchestrates the main loop. The local LLM is used when the cloud issues a `delegate` action with a structured plan, or runs the loop itself as a degraded fallback (§4.7).
@@ -1247,7 +1247,7 @@ Severity mapping: user-impacting failures → `ERROR`, transient retries → `WA
 
 | Component | Technology | Rationale |
 |-----------|-----------|-----------|
-| Cloud LLM (Orchestrator) | Direct API calls (OpenAI, Anthropic) | Cloud always drives main agent loop; provider configurable via settings |
+| Cloud LLM (Orchestrator) | Direct API calls (Anthropic by default, or OpenAI) | Cloud always drives main agent loop; provider configurable via settings |
 | Local LLM (Executor) | Ollama (qwen2.5:14b) | Executes delegated plans via LocalExecutor mini-loop |
 | Unified interface | Internal adapter pattern (`LlmProvider`) | Java interfaces per provider (OpenAI, Anthropic, Ollama) |
 | Provider routing | `LlmRouter` — always cloud, local fallback | Simplified from old confidence-based routing |
@@ -1431,8 +1431,10 @@ ownclaw:
 
   # Cloud LLM (Orchestrator — always drives main agent loop)
   mentor:
-    provider: openai              # openai | anthropic
-    model: gpt-4.1
+    provider: anthropic           # anthropic | openai
+    anthropic_model: claude-opus-5-5
+    anthropic_api_key: ${ANTHROPIC_API_KEY}
+    model: gpt-4.1                # OpenAI's model and key, used when provider is openai
     api_key: ${OPENAI_API_KEY}
     temperature: 0.4
 

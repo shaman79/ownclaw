@@ -35,7 +35,7 @@ sudo ./deploy.sh --setup
 
 The setup wizard will interactively prompt you for:
 1. **GitHub token** — fine-grained PAT with Contents: Read-only ([create one here](https://github.com/settings/tokens?type=beta))
-2. **OpenAI API key** — for the Mentor LLM
+2. **Anthropic API key** — for the cloud LLM (Claude); OpenAI is the alternative, and with no key every task runs on the local model
 3. **Telegram bot token** — optional
 
 All secrets are saved to `/opt/ownclaw/.env` (chmod 600) and loaded automatically
@@ -73,7 +73,9 @@ sudo nano /opt/ownclaw/.env
 | Variable | Required | Description |
 |---|---|---|
 | `GITHUB_TOKEN` | **Yes** | Fine-grained PAT with Contents:read. Generate at [github.com/settings/tokens](https://github.com/settings/tokens?type=beta) |
-| `OPENAI_API_KEY` | **Yes** | OpenAI API key for the Mentor LLM (GPT-4o). Get one at [platform.openai.com/api-keys](https://platform.openai.com/api-keys) |
+| `ANTHROPIC_API_KEY` | Recommended | Anthropic API key for the cloud LLM (Claude), the default provider. Get one at [console.anthropic.com/settings/keys](https://console.anthropic.com/settings/keys). With no cloud key, every task runs on the local model |
+| `OPENAI_API_KEY` | No | OpenAI API key, for the alternative provider: set `OWNCLAW_MENTOR_PROVIDER=openai` with it. Get one at [platform.openai.com/api-keys](https://platform.openai.com/api-keys) |
+| `OWNCLAW_MENTOR_PROVIDER` | No | Cloud provider: `anthropic` (default) or `openai`. The settings page sets it too, and that setting is kept across restarts |
 | `TELEGRAM_BOT_TOKEN` | No | Telegram bot token from @BotFather. Set `OWNCLAW_TELEGRAM_ENABLED=true` to activate |
 | `OWNCLAW_SERVER_PORT` | No | HTTP port (default: `8080`) |
 | `OWNCLAW_EXECUTOR_URL` | No | Ollama URL (default: `http://localhost:11434`) |
@@ -81,6 +83,8 @@ sudo nano /opt/ownclaw/.env
 | `OWNCLAW_LOCAL_ONLY` | No | `true`: call no cloud model; every task runs on the local model, best effort. The settings page and `/local on\|off` set it too, and that setting is kept across restarts |
 | `JAVA_OPTS` | No | JVM tuning, e.g. `-Xmx512m` |
 | `BRAVE_SEARCH_API_KEY` | No | Brave Search API key for the MCP `brave-search` server. Get one at [brave.com/search/api](https://brave.com/search/api/) |
+
+**Upgrading an install that uses OpenAI.** The default provider used to be OpenAI and is now Anthropic. If `.env` holds only `OPENAI_API_KEY` and the provider was never chosen on the settings page or in `/setup`, add `OWNCLAW_MENTOR_PROVIDER=openai` to `.env`; without it OwnClaw starts with no cloud model and runs every task on the local one.
 
 **With no internet**, OwnClaw keeps working on the local model: a task whose cloud model cannot be reached goes on there by itself, and says so in the chat. The page needs nothing from the internet, so open it on the LAN at `http://<server>:8080` (the server's own address and `OWNCLAW_SERVER_PORT`) when the public name does not resolve. Telegram, web pages and package installs need the internet and fail until it is back.
 
