@@ -292,7 +292,10 @@ public class CapabilityResolver {
         // 2. Check if an existing skill already covers this capability
         String existingSkill = findMatchingSkill(matched);
         if (existingSkill != null) {
-            log.debug("Capability '{}' covered by existing skill '{}' — no hint needed",
+            // At INFO: how often a request sets a pattern off, and which skill is taken to cover
+            // it, is the only record of what this component would do with a smaller library.
+            // The category and the skill's name only, never the message.
+            log.info("Capability '{}' asked for; the existing skill '{}' is taken to cover it — nothing is made",
                     matched.category, existingSkill);
             return null;
         }
@@ -508,11 +511,10 @@ public class CapabilityResolver {
             this(category, triggerPatterns, suggestedName, description, systemPackages, pipPackages,
                     parameters, timeout, matchKeywords, List.of());
         }
-        /** Compiled patterns — lazily cached per instance. */
         boolean matches(String normalizedInput) {
             for (String trigger : triggerPatterns) {
                 try {
-                    if (Pattern.compile(trigger, Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE)
+                    if (Pattern.compile(asWords(trigger), Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE)
                             .matcher(normalizedInput).find()) {
                         return true;
                     }
@@ -525,5 +527,29 @@ public class CapabilityResolver {
             }
             return false;
         }
+    }
+
+    /** Where a word begins: not after a letter, a digit or the underscore of a skill's name. */
+    private static final String WORD_START = "(?<![\\p{L}\\p{N}_])";
+
+    /** What may lie between two words of a trigger: the rest of one sentence, a dot inside a word included. */
+    private static final String SAME_SENTENCE = "(?:(?![.!?](?:\\s|$))[^\\n])*?";
+
+    /**
+     * A trigger as it is matched: each of its words where a word begins, and all of them in one
+     * sentence. Written as "open.*ports?", a trigger was searched for as a plain regex, so its
+     * words were found inside other words and anywhere in the message: "open the file and send me
+     * a report" asked for a port scan ("port" in "report"), and a scheduled task that names its
+     * skills -- "run daily_news_digest, then smtp_send_email" -- asked for a mailbox reader ("new"
+     * in "news", "mail" in "email"), which was then made at step 1 unless a skill happened to
+     * cover it. A trigger's words are still stems: "summ" is "summary" and "summarise".
+     */
+    static String asWords(String trigger) {
+        var out = new StringBuilder();
+        for (String word : trigger.split("\\.\\*", -1)) {
+            if (!out.isEmpty()) out.append(SAME_SENTENCE);
+            out.append(word.startsWith("\\b") ? "" : WORD_START).append(word);
+        }
+        return out.toString();
     }
 }
