@@ -1428,7 +1428,6 @@ ownclaw:
 
   # Local LLM (Executor — runs delegated plans via LocalExecutor)
   executor:
-    provider: ollama
     url: http://localhost:11434
     model: qwen2.5:14b
     temperature: 0.3
@@ -1450,16 +1449,8 @@ ownclaw:
   # Task queue
   queue:
     max_concurrent_tasks: 5          # Total tasks running simultaneously
-    cloud_concurrency: 3             # Parallel cloud LLM requests
-    sandbox_concurrency: 3           # Parallel sandbox executions
     max_queued_tasks: 50             # Reject if queue exceeds this
     priority_preemption: false       # P0 does not preempt running P1+ tasks (v1)
-
-  # Task execution
-  tasks:
-    default_timeout: 300             # seconds, for whole task (not per step)
-    step_timeout: 60                 # seconds, per plan step
-    long_running_threshold: 120      # seconds; tasks exceeding this become "long-running"
 
   # Telegram
   telegram:
@@ -1469,10 +1460,6 @@ ownclaw:
   # Accounts: only the owner can create them (see 6.4)
   auth:
     owner: ${OWNCLAW_OWNER:}     # username; blank = the oldest account
-
-  # WebUI
-  webui:
-    enabled: true
 
   # Sandbox
   sandbox:
@@ -1496,25 +1483,6 @@ ownclaw:
   database:
     path: ./data/ownclaw.db
     # Schema migrations managed by Liquibase (changelogs in resources/db/changelog/)
-
-  # Feedback loop
-  feedback:
-    max_rounds: 3
-    auto_review: true
-    auto_review_threshold: medium
-    distillation_interval_days: 7     # Periodic teaching log cleanup
-
-  # Observability
-  observability:
-    chat_status_messages: true       # Send status messages to user chat
-    status_verbosity: concise        # concise | verbose
-    log_level: INFO                  # DEBUG | INFO | WARN | ERROR
-
-  # Confidence threshold (no longer used — cloud always orchestrates)
-  # Retained for reference; was used in v0.2 Executor-routes-to-Mentor model
-  # confidence:
-  #   mentor_threshold: 0.3
-  #   cache_skip_threshold: 0.7
 ```
 
 ---
@@ -1547,8 +1515,6 @@ During task execution, the system sends concise status messages to the user's ch
 **Rules**:
 - Status messages are excluded from LLM context (they don't consume tokens)
 - Status messages use the `status` role in conversation storage
-- In verbose mode (`status_verbosity: verbose`), additional detail is shown
-- In concise mode (default), only key transitions are shown
 
 ### 13.3 Event Log
 

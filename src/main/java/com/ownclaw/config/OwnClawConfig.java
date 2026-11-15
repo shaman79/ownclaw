@@ -20,20 +20,15 @@ public class OwnClawConfig {
     private Telegram telegram = new Telegram();
     private Auth auth = new Auth();
     private Ops ops = new Ops();
-    private Webui webui = new Webui();
     private Sandbox sandbox = new Sandbox();
     private Skills skills = new Skills();
     private Database database = new Database();
-    private Confidence confidence = new Confidence();
-    private Observability observability = new Observability();
     private Budgets budgets = new Budgets();
-    private Feedback feedback = new Feedback();
     private SelfRepair selfRepair = new SelfRepair();
 
     // --- Nested classes ---
 
     public static class Executor {
-        private String provider = "ollama";
         private String url = "http://localhost:11434";
         private String model = "qwen2.5:14b";
 
@@ -69,8 +64,6 @@ public class OwnClawConfig {
          */
         private boolean captureFacts = true;
 
-        public String getProvider() { return provider; }
-        public void setProvider(String provider) { this.provider = provider; }
         public String getUrl() { return url; }
         public void setUrl(String url) { this.url = url; }
         public String getModel() { return model; }
@@ -210,37 +203,19 @@ public class OwnClawConfig {
 
     public static class Queue {
         private int maxConcurrentTasks = 5;
-        private int ollamaConcurrency = 1;
-        private int cloudConcurrency = 3;
-        private int sandboxConcurrency = 3;
         private int maxQueuedTasks = 50;
 
         public int getMaxConcurrentTasks() { return maxConcurrentTasks; }
         public void setMaxConcurrentTasks(int v) { this.maxConcurrentTasks = v; }
-        public int getOllamaConcurrency() { return ollamaConcurrency; }
-        public void setOllamaConcurrency(int v) { this.ollamaConcurrency = v; }
-        public int getCloudConcurrency() { return cloudConcurrency; }
-        public void setCloudConcurrency(int v) { this.cloudConcurrency = v; }
-        public int getSandboxConcurrency() { return sandboxConcurrency; }
-        public void setSandboxConcurrency(int v) { this.sandboxConcurrency = v; }
         public int getMaxQueuedTasks() { return maxQueuedTasks; }
         public void setMaxQueuedTasks(int v) { this.maxQueuedTasks = v; }
     }
 
     public static class Tasks {
-        private int defaultTimeout = 300;
-        private int stepTimeout = 60;
-        private int longRunningThreshold = 120;
         private int stallTimeout = 1200;
         private int heartbeatInterval = 30;
         private int schedulerPollInterval = 30;
 
-        public int getDefaultTimeout() { return defaultTimeout; }
-        public void setDefaultTimeout(int v) { this.defaultTimeout = v; }
-        public int getStepTimeout() { return stepTimeout; }
-        public void setStepTimeout(int v) { this.stepTimeout = v; }
-        public int getLongRunningThreshold() { return longRunningThreshold; }
-        public void setLongRunningThreshold(int v) { this.longRunningThreshold = v; }
         public int getStallTimeout() { return stallTimeout; }
         public void setStallTimeout(int v) { this.stallTimeout = v; }
         public int getHeartbeatInterval() { return heartbeatInterval; }
@@ -304,13 +279,6 @@ public class OwnClawConfig {
         public void setToken(String token) { this.token = token; }
     }
 
-    public static class Webui {
-        private boolean enabled = true;
-
-        public boolean isEnabled() { return enabled; }
-        public void setEnabled(boolean enabled) { this.enabled = enabled; }
-    }
-
     public static class Sandbox {
         /** auto, required or off -- see SkillJail. */
         private String isolation = "auto";
@@ -366,26 +334,6 @@ public class OwnClawConfig {
         public void setPath(String path) { this.path = path; }
     }
 
-    public static class Confidence {
-        private double mentorThreshold = 0.3;
-        private double cacheSkipThreshold = 0.7;
-
-        public double getMentorThreshold() { return mentorThreshold; }
-        public void setMentorThreshold(double v) { this.mentorThreshold = v; }
-        public double getCacheSkipThreshold() { return cacheSkipThreshold; }
-        public void setCacheSkipThreshold(double v) { this.cacheSkipThreshold = v; }
-    }
-
-    public static class Observability {
-        private boolean chatStatusMessages = true;
-        private String statusVerbosity = "concise";
-
-        public boolean isChatStatusMessages() { return chatStatusMessages; }
-        public void setChatStatusMessages(boolean v) { this.chatStatusMessages = v; }
-        public String getStatusVerbosity() { return statusVerbosity; }
-        public void setStatusVerbosity(String v) { this.statusVerbosity = v; }
-    }
-
     public static class Budgets {
         private long dailyCloudTokens = 0;
         private int perTaskCloudTokens = 0;
@@ -411,13 +359,6 @@ public class OwnClawConfig {
         public void setEnabled(boolean enabled) { this.enabled = enabled; }
     }
 
-    public static class Feedback {
-        private int maxRounds = 3;
-
-        public int getMaxRounds() { return maxRounds; }
-        public void setMaxRounds(int v) { this.maxRounds = v; }
-    }
-
     // --- Root getters/setters ---
 
     public Executor getExecutor() { return executor; }
@@ -434,22 +375,14 @@ public class OwnClawConfig {
     public void setAuth(Auth auth) { this.auth = auth; }
     public Ops getOps() { return ops; }
     public void setOps(Ops ops) { this.ops = ops; }
-    public Webui getWebui() { return webui; }
-    public void setWebui(Webui v) { this.webui = v; }
     public Sandbox getSandbox() { return sandbox; }
     public void setSandbox(Sandbox v) { this.sandbox = v; }
     public Skills getSkills() { return skills; }
     public void setSkills(Skills v) { this.skills = v; }
     public Database getDatabase() { return database; }
     public void setDatabase(Database v) { this.database = v; }
-    public Confidence getConfidence() { return confidence; }
-    public void setConfidence(Confidence v) { this.confidence = v; }
-    public Observability getObservability() { return observability; }
-    public void setObservability(Observability v) { this.observability = v; }
     public Budgets getBudgets() { return budgets; }
     public void setBudgets(Budgets v) { this.budgets = v; }
-    public Feedback getFeedback() { return feedback; }
-    public void setFeedback(Feedback v) { this.feedback = v; }
     public SelfRepair getSelfRepair() { return selfRepair; }
     public void setSelfRepair(SelfRepair v) { this.selfRepair = v; }
 }
