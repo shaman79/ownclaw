@@ -292,6 +292,41 @@ class CredentialGrantsTest {
         // Mutation: granted() reads every row whatever its grant_type -> a 'declined' row hands the password over.
     }
 
+    // ───────────────────────── what a refusal says ─────────────────────────
+
+    @Test
+    @DisplayName("a refusal names what the vault does not hold either, when what it holds is known -- compared as the vault names it; not known, it says what it always said")
+    void aRefusalNamesWhatIsNotStored() {
+        List<String> keys = List.of("SMTP_PASS", "IMAP_PASS", "IMAP_USER");
+        String model = "'mailer' has not been allowed to read SMTP_PASS, IMAP_PASS, IMAP_USER from the vault. Only the user "
+                + "can allow it, by sending `/grant mailer SMTP_PASS IMAP_PASS IMAP_USER` in the chat: the task's answer shows "
+                + "them that command. Nothing you can call allows it. Go on with what does not need this skill, and say "
+                + "that it waits for them.";
+        String line = "_\uD83D\uDD11 mailer was not run: you have not allowed it to read SMTP_PASS, IMAP_PASS, IMAP_USER from "
+                + "your vault. To allow it, send:_ `/grant mailer SMTP_PASS IMAP_PASS IMAP_USER`";
+
+        // What the vault holds is not known: exactly the text of before.
+        assertEquals(model, CredentialGrantService.notAllowed("mailer", keys));
+        assertEquals(model, CredentialGrantService.notAllowed("mailer", keys, null));
+        assertEquals(line, CredentialGrantService.asked("mailer", keys));
+        assertEquals(line, CredentialGrantService.asked("mailer", keys, null));
+        // It holds them all, however the names are written: nothing is added.
+        assertEquals(model, CredentialGrantService.notAllowed("mailer", keys, List.of("imap_user", " IMAP_PASS ", "SMTP_PASS", "OTHER")));
+        assertEquals(line, CredentialGrantService.asked("mailer", keys, List.of("imap_user", " IMAP_PASS ", "SMTP_PASS", "OTHER")));
+
+        // It holds one: the other two are named, in the order declared, with how to store them.
+        assertEquals(model + " Not in the vault yet either: IMAP_PASS, IMAP_USER -- they store each by typing /cred set KEY "
+                + "value; do not ask them to paste the value to you.",
+                CredentialGrantService.notAllowed("mailer", keys, List.of("smtp_pass")));
+        assertEquals(line + "\n_Not in your vault yet: IMAP_PASS, IMAP_USER. Store each with_ `/cred set <KEY> <VALUE>`",
+                CredentialGrantService.asked("mailer", keys, List.of("SMTP_PASS")));
+        // It holds none.
+        assertTrue(CredentialGrantService.asked("mailer", keys, List.of())
+                .endsWith("\n_Not in your vault yet: SMTP_PASS, IMAP_PASS, IMAP_USER. Store each with_ `/cred set <KEY> <VALUE>`"));
+        // Mutations: the names compared as written -> ' IMAP_PASS ' and 'imap_user' are said to be missing;
+        // what is not known taken for nothing held -> the text of before names all three as missing.
+    }
+
     @Test
     @DisplayName("the link-signing secret is no credential of a skill, however its name is written")
     void theLinkSecretIsNeverASkills() {

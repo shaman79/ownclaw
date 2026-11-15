@@ -364,6 +364,86 @@ class GrantRefusedCallTest {
         assertTrue(said.contains("`/grant mail_digest IMAP_USER IMAP_PASS`") && said.endsWith(ASKED), said);
     }
 
+    // ───────────────────────── a credential that is not in the vault either ─────────────────────────
+
+    /** How the model is told what the vault does not hold. */
+    static final String STORE_TOO = " Not in the vault yet either: IMAP_PASS -- they store each by typing /cred set KEY "
+            + "value; do not ask them to paste the value to you.";
+    /** How the ending's line for mail_digest ends when its IMAP password is not stored. */
+    static final String ASKED_AND_MISSING = "mail_digest was not run: you have not allowed it to read SMTP_PASS, IMAP_PASS "
+            + "from your vault. To allow it, send:_ `/grant mail_digest SMTP_PASS IMAP_PASS`\n"
+            + "_Not in your vault yet: IMAP_PASS. Store each with_ `/cred set <KEY> <VALUE>`";
+
+    @Test
+    @DisplayName("a refused skill whose credential is not in the vault either is told both at once: the model reads which to have stored, the ending's line names it under the command, and only the grant is a button")
+    void whatIsNotInTheVaultIsSaidAtOnce(@TempDir Path tmp) throws Exception {
+        run = new Run(tmp, null);
+        run.disk.create("mail_digest", List.of("SMTP_PASS", "IMAP_PASS"));   // the vault holds the first alone
+        run.rig.cloud.think.add(call("mail_digest", Map.of()));
+        run.rig.cloud.think.add(call("mailer", mail()));
+        run.rig.cloud.think.add(respond("Neither could run."));
+
+        AgentResult r = run.rig.turn(run.session(), "digest my mail and send it", ChatOptions.NONE);
+
+        String digest = run.sent(1);
+        assertTrue(digest.contains("Not run: 'mail_digest' has not been allowed to read SMTP_PASS, IMAP_PASS from the vault."), digest);
+        assertTrue(digest.contains("say that it waits for them." + STORE_TOO), "the one the vault does not hold, and not the one it does: " + digest);
+        String mailer = run.sent(2).substring(run.sent(2).indexOf("Not run: 'mailer'"));
+        assertFalse(mailer.contains("Not in the vault yet"), "everything mailer declares is stored: " + mailer);
+
+        assertTrue(r.response().contains(ASKED_AND_MISSING + "\n\n"), r.response());
+        assertTrue(r.response().endsWith(ASKED), "mailer's line is as it was: " + r.response());
+        assertEquals(List.of("/grant mail_digest SMTP_PASS IMAP_PASS", COMMAND), r.choices(),
+                "storing a credential is typed, never offered to click");
+        // Mutations: the refusal not told what the vault holds -> the model reads nothing of IMAP_PASS;
+        // the ending's line not told -> it ends at the command.
+    }
+
+    @Test
+    @DisplayName("a credential stored while the task went on is not named in the ending: its line reads the vault as it is then")
+    void storedMeanwhileIsNotNamed(@TempDir Path tmp) throws Exception {
+        run = new Run(tmp, null);
+        run.disk.create("mail_digest", List.of("SMTP_PASS", "IMAP_PASS"));
+        run.rig.cloud.think.add(call("mail_digest", Map.of()));
+        run.rig.cloud.think.add(config -> {
+            // The owner sends /cred set in another chat while the task goes on.
+            run.rig.vault.storeCredential("u1", "IMAP_PASS", "loop-canary-imap-34");
+            return respond("It waits for you.").answer(config);
+        });
+
+        AgentResult r = run.rig.turn(run.session(), "digest my mail", ChatOptions.NONE);
+
+        assertTrue(run.sent(1).contains(STORE_TOO), "the premise: at the call, it was not stored: " + run.sent(1));
+        assertTrue(r.response().endsWith("To allow it, send:_ `/grant mail_digest SMTP_PASS IMAP_PASS`"), r.response());
+        assertFalse(r.response().contains("Not in your vault yet"), r.response());
+        // Mutation: the ending told what the vault held when the task began -> IMAP_PASS is named as missing.
+    }
+
+    @Test
+    @DisplayName("a delegated call is told the same: the cloud for a call it wrote, the local model for one it made")
+    void aDelegatedCallIsToldWhatIsMissing(@TempDir Path tmp) throws Exception {
+        var local = new DelegationFitTest.Local();
+        local.says(DelegationBehaviourTest.call("mail_digest", Map.of()));
+        local.says(DelegationBehaviourTest.done("The digest waits for the owner."));
+        run = new Run(tmp, local);
+        run.disk.create("mail_digest", List.of("SMTP_PASS", "IMAP_PASS"));
+        run.rig.cloud.think.add(delegateCalls("mail_digest"));
+        run.rig.cloud.think.add(call(AgentAction.DELEGATE, Map.of("goal", "Digest the owner's mail with mail_digest.",
+                "tools", "mail_digest")));
+        run.rig.cloud.think.add(respond("It waits for you."));
+
+        AgentResult r = run.rig.turn(run.session(), "digest my mail");
+
+        assertTrue(run.sent(1).contains("call 1 (mail_digest) was not run. Not run: 'mail_digest' has not been allowed"), run.sent(1));
+        assertTrue(run.sent(1).contains(STORE_TOO), run.sent(1));
+        String told = local.asked.get(1).get(local.asked.get(1).size() - 1).content();
+        assertTrue(told.contains("Not run: 'mail_digest' has not been allowed") && told.contains(STORE_TOO),
+                "what the local model was told: " + told);
+        assertTrue(r.response().endsWith(ASKED_AND_MISSING), r.response());
+        assertEquals(List.of(), run.disk.launches.runs());
+        // Mutation: the delegation not told what the vault holds -> neither model reads anything of IMAP_PASS.
+    }
+
     @Test
     @DisplayName("the owner's own text of the answer gets the line too, when there is one")
     void theOwnersTextSaysItToo(@TempDir Path tmp) throws Exception {
