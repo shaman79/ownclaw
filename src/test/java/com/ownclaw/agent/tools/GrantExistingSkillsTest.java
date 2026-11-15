@@ -1,5 +1,9 @@
 package com.ownclaw.agent.tools;
 
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import com.ownclaw.conversation.MigratedDatabase;
 import com.ownclaw.users.CredentialVault;
 import com.ownclaw.users.GrantsKit;
@@ -8,15 +12,18 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.slf4j.LoggerFactory;
 import org.springframework.dao.DataAccessException;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.PosixFilePermissions;
 import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assumptions.assumeFalse;
 
 /**
  * What works today goes on working, once: the first start of the release that checks grants
@@ -294,24 +301,90 @@ class GrantExistingSkillsTest {
     @DisplayName("a start that fails half way leaves the row pending, and is not swallowed: the next start grants the rest")
     void aFailedStartIsFinishedByTheNext() throws Exception {
         skills.onDisk("mailer", "[SMTP_USER, SMTP_PASS]");
-        // A vault row of an account that is no row of users: written with foreign keys off, as a
-        // database from before they were on could hold one. Granting it is refused by the database.
-        MigratedDatabase.at(tmp.resolve("t.db")).update("INSERT INTO credential_vault (user_id, credential_key, "
-                + "encrypted_value, iv) VALUES ('ghost', 'SMTP_PASS', 'x', 'y')");
+        // The database refuses the second grant, as a full disk does. Until the reviews of the
+        // release the failure here was a vault row of an account that is gone, refused on the
+        // grant's foreign key: that row fails no start any more (aVaultRowOfAnAccountThatIsGone).
+        jdbc.execute("CREATE TRIGGER the_disk_is_full BEFORE INSERT ON credential_grants "
+                + "WHEN NEW.credential = 'SMTP_PASS' BEGIN SELECT RAISE(ABORT, 'database or disk is full'); END");
 
         assertThrows(DataAccessException.class, this::restart, "a start that could not grant must not go on as if it had");
 
         assertEquals("pending", GrantsKit.existing(jdbc), "written last: what was not finished is asked again");
         assertEquals(List.of("ann mailer SMTP_USER permanent"), GrantsKit.rows(jdbc), "the half it reached");
 
-        jdbc.update("DELETE FROM credential_vault WHERE user_id = 'ghost'");
+        jdbc.execute("DROP TRIGGER the_disk_is_full");
         restart();
 
         assertEquals(List.of("ann mailer SMTP_PASS permanent", "ann mailer SMTP_USER permanent",
                 "bob mailer SMTP_PASS permanent"), GrantsKit.rows(jdbc));
         assertTrue(done(GrantsKit.existing(jdbc)));
-        // Mutation: the row written before the grants -> the failed start is recorded as done,
-        // and the next grants nothing.
+        // Mutations: the row written before the grants -> the failed start is recorded as done,
+        // and the next grants nothing; the failure caught at the start -> nothing is thrown.
+    }
+
+    @Test
+    @DisplayName("a vault row whose account is gone fails no start: it is passed over, every account there is gets its grants, and the row says done")
+    void aVaultRowOfAnAccountThatIsGone() throws Exception {
+        skills.onDisk("mailer", "[SMTP_USER, SMTP_PASS]");
+        // Written with foreign keys off, as a database from before they were on can hold one. A
+        // grant for it is refused by the database -- and OR IGNORE does not pass over that -- so
+        // it used to fail the statement, the start, and every start after it.
+        MigratedDatabase.at(tmp.resolve("t.db")).update("INSERT INTO credential_vault (user_id, credential_key, "
+                + "encrypted_value, iv) VALUES ('ghost', 'SMTP_PASS', 'x', 'y')");
+
+        DynamicSkillRegistry registry = restart();
+
+        assertEquals(List.of("ann mailer SMTP_PASS permanent", "ann mailer SMTP_USER permanent",
+                "bob mailer SMTP_PASS permanent"), GrantsKit.rows(jdbc), "everyone there is, and nobody who is not");
+        assertTrue(done(GrantsKit.existing(jdbc)), GrantsKit.existing(jdbc));
+        assertTrue(GrantsKit.run(registry.getDynamic("mailer").orElseThrow(), "ann").success());
+        // Mutation: granted to the account of every vault row, as before -> the database refuses
+        // the ghost's grant on its foreign key, and the start fails.
+    }
+
+    // ───────────────────────── a directory that cannot be read ─────────────────────────
+
+    @Test
+    @DisplayName("a skills directory that is there and cannot be read leaves the one-time grant asked for: nothing is granted for no skill, and the next start that reads it grants -- once")
+    void aDirectoryThatCannotBeReadLeavesItAsked() throws Exception {
+        skills.onDisk("mailer", "[SMTP_PASS]");
+        var readable = Files.getPosixFilePermissions(skills.generated);
+        var logged = new ListAppender<ILoggingEvent>();
+        logged.start();
+        var registryLog = (Logger) LoggerFactory.getLogger(DynamicSkillRegistry.class);
+        registryLog.addAppender(logged);
+        Files.setPosixFilePermissions(skills.generated, PosixFilePermissions.fromString("---------"));
+        try {
+            assumeFalse(Files.isReadable(skills.generated), "run as root, every directory can be listed");
+            assertTrue(Files.isDirectory(skills.generated), "the premise: it is there, as a missing one is not");
+
+            DynamicSkillRegistry blind = restart();
+
+            assertEquals("pending", GrantsKit.existing(jdbc), "marked done for no skill, the grant would be used up");
+            assertEquals(List.of(), GrantsKit.rows(jdbc));
+            assertTrue(blind.allDynamic().isEmpty(), "nothing was read");
+            assertTrue(logged.list.stream().anyMatch(event -> event.getLevel() == Level.ERROR
+                            && event.getFormattedMessage().contains("could not be read")
+                            && event.getFormattedMessage().contains("not granted at this start")),
+                    "an error says why every skill that holds a credential is refused until the next start: " + logged.list);
+        } finally {
+            Files.setPosixFilePermissions(skills.generated, readable);
+            registryLog.detachAppender(logged);
+        }
+
+        restart();
+
+        assertEquals(List.of("ann mailer SMTP_PASS permanent", "bob mailer SMTP_PASS permanent"), GrantsKit.rows(jdbc),
+                "the start that reads the skills grants what they were being handed");
+        assertTrue(done(GrantsKit.existing(jdbc)), GrantsKit.existing(jdbc));
+
+        // And once: what is made after that start is granted by none.
+        skills.create("postman", List.of("SMTP_PASS"));
+        restart();
+        assertEquals(2, GrantsKit.rows(jdbc).size(), GrantsKit.rows(jdbc).toString());
+        // Mutations: asked whatever the reading of the directory came to, as before -> the blind
+        // start marks it done, and the one that reads mailer grants nothing; the error not logged
+        // -> nothing says why.
     }
 
     @Test
