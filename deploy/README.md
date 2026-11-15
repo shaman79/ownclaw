@@ -220,6 +220,11 @@ The updater still takes the newer build for the installed one, so it deploys not
 next push to `main` -- and that push brings the change to the database back, unless it takes it
 out.
 
+A copy from before credential grants were checked has no grants in it. The first start of a build
+that checks them makes the one-time grant again: every skill on disk then is granted the
+credentials it declares, for each account that holds them -- the skills made since the copy
+included. `/grants` shows the result, and `/revoke` takes back what should not be there.
+
 ### View application logs
 
 ```bash
