@@ -80,48 +80,53 @@ class SetupWizardProviderTest {
     void anOpenAiInstallThatNeverChoseKeepsOpenAi(@TempDir Path tmp) throws Exception {
         assertEquals("openai", providerOf(tmp.resolve("a.db"), "sk-test-openai", null, null, null));
         assertEquals("openai", providerOf(tmp.resolve("b.db"), "sk-test-openai", "  ", null, " "), "blank is not set");
-        // Mutation: applyOverrides without keepOpenAiWhereItWasTheDefault -> anthropic, with no key.
+        // Mutation: applyOverrides without providerWhereNoneWasChosen -> anthropic, with no key.
     }
 
     @Test
-    @DisplayName("what is decided for such an install is stored, as a choice is: an Anthropic key added later does not move it to Anthropic at the next start")
-    void whatIsDecidedIsKept(@TempDir Path tmp) throws Exception {
+    @DisplayName("it is worked out at each start from the keys there are and never stored: a start that does not see the Anthropic key does not leave the install on OpenAI, and the environment's choice stands after it")
+    void whatIsWorkedOutIsNotStored(@TempDir Path tmp) throws Exception {
         Path db = tmp.resolve("a.db");
+        // A start that sees only the OpenAI key: an .env that could not be read, a key being replaced.
         assertEquals("openai", providerOf(db, "sk-test-openai", null, null, null));
-        assertEquals("openai", wizard(db, new OwnClawConfig()).getSetting("cloud_provider").orElse(null), "stored");
+        assertTrue(wizard(db, new OwnClawConfig()).getSetting("cloud_provider").isEmpty(), "stored, it is a choice nobody made");
 
-        // The next start, with an Anthropic key added in the meantime.
-        var config = new OwnClawConfig();
-        config.getMentor().setApiKey("sk-test-openai");
-        config.getMentor().setAnthropicApiKey("sk-ant-test");
-        assertEquals("anthropic", config.getMentor().getProvider(), "the premise: the default");
-        var wizard = wizard(db, config);
-        wizard.environment = name -> null;
-        wizard.applyOverrides();
-
-        assertEquals("openai", config.getMentor().getProvider(), "moved to Anthropic with nobody choosing");
-        // Mutation: the rule not storing what it decides -> the second start has both keys and takes the default.
+        // The next start sees both keys again: the default.
+        assertEquals("anthropic", providerOf(db, "sk-test-openai", "sk-ant-test", null, null));
+        // And one with the environment's choice has that, whatever a start before it worked out.
+        assertEquals("anthropic", providerOf(db, "sk-test-openai", null, null, "anthropic"));
+        assertEquals("openai", providerOf(db, "sk-test-openai", "sk-ant-test", null, "openai"));
+        assertTrue(wizard(db, new OwnClawConfig()).getSetting("cloud_provider").isEmpty());
+        // Mutation: what is worked out stored as the provider chosen -> the second start is on
+        // OpenAI with both keys, and the third over the environment's choice.
     }
 
     @Test
-    @DisplayName("a key saved in the settings counts at once: the only key, OpenAI's, on an install that never chose -> OpenAI from then, not from the next start; with both keys, or a choice, nothing moves")
+    @DisplayName("a key saved in the settings counts at once, and in whatever order: the only key, OpenAI's, on an install that never chose -> OpenAI from then; with Anthropic's saved too -> Anthropic; a choice stands")
     void aKeySavedInTheSettingsCountsAtOnce(@TempDir Path tmp) throws Exception {
-        var neverChose = new Settings(tmp.resolve("a.db"));
-        neverChose.save(java.util.Map.of("openai_api_key", "sk-test-openai"));
-        assertEquals("openai", neverChose.config.getMentor().getProvider());
-        assertEquals("openai", neverChose.wizard.getSetting("cloud_provider").orElse(null));
+        var openAiFirst = new Settings(tmp.resolve("a.db"));
+        openAiFirst.save(java.util.Map.of("openai_api_key", "sk-test-openai"));
+        assertEquals("openai", openAiFirst.config.getMentor().getProvider(), "not from the next start");
+        openAiFirst.save(java.util.Map.of("anthropic_api_key", "sk-ant-test"));
+        assertEquals("anthropic", openAiFirst.config.getMentor().getProvider(), "both keys: the default, as the other order gives");
+        assertTrue(openAiFirst.wizard.getSetting("cloud_provider").isEmpty(), "nothing was chosen");
 
-        var bothKeys = new Settings(tmp.resolve("b.db"));
-        bothKeys.save(java.util.Map.of("anthropic_api_key", "sk-ant-test"));
-        bothKeys.save(java.util.Map.of("openai_api_key", "sk-test-openai"));
-        assertEquals("anthropic", bothKeys.config.getMentor().getProvider());
-        assertTrue(bothKeys.wizard.getSetting("cloud_provider").isEmpty(), "nothing was decided");
+        var anthropicFirst = new Settings(tmp.resolve("b.db"));
+        anthropicFirst.save(java.util.Map.of("anthropic_api_key", "sk-ant-test"));
+        anthropicFirst.save(java.util.Map.of("openai_api_key", "sk-test-openai"));
+        assertEquals("anthropic", anthropicFirst.config.getMentor().getProvider());
 
         var chose = new Settings(tmp.resolve("c.db"));
-        chose.save(java.util.Map.of("cloud_provider", "anthropic"));
-        chose.save(java.util.Map.of("openai_api_key", "sk-test-openai"));
-        assertEquals("anthropic", chose.config.getMentor().getProvider(), "a choice stands, whatever the keys");
-        // Mutation: the settings not asking the rule -> the first stays on anthropic, with no key, until a restart.
+        chose.save(java.util.Map.of("cloud_provider", "openai"));
+        chose.save(java.util.Map.of("anthropic_api_key", "sk-ant-test"));
+        assertEquals("openai", chose.config.getMentor().getProvider(), "a choice stands, whatever the keys");
+        var choseAnthropic = new Settings(tmp.resolve("d.db"));
+        choseAnthropic.save(java.util.Map.of("cloud_provider", "anthropic"));
+        choseAnthropic.save(java.util.Map.of("openai_api_key", "sk-test-openai"));
+        assertEquals("anthropic", choseAnthropic.config.getMentor().getProvider());
+        // Mutations: the settings not asking -> the first stays on anthropic, with no key, until a
+        // restart; the rule only ever moving to OpenAI -> the first stays on OpenAI with both keys
+        // until a restart, and the order the keys were saved in decides.
     }
 
     /** The settings page's controller over a fresh install, as its owner saves into it. */

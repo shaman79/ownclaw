@@ -1255,16 +1255,18 @@ public class CommandHandler {
         if (parts.length == 0) return "Usage: `/revoke <skill> [KEY ...]` — with no key, everything it was granted.";
         List<String> keys = java.util.Arrays.asList(parts).subList(1, parts.length);
         // By the name as it is registered. What a skill that is gone was granted can still be
-        // taken back: by its name as typed -- one from before names were lower case kept its
-        // capitals -- and then as names are written now.
-        var registered = toolRegistry.find(parts[0]).or(() -> toolRegistry.find(parts[0].toLowerCase(Locale.ROOT)))
-                .map(com.ownclaw.agent.tools.Tool::name);
-        String skill = registered.orElse(parts[0]);
+        // taken back: by the name it is listed under (/grants), typed in any case -- one from
+        // before names were lower case kept its capitals.
+        String typed = parts[0];
+        String skill = toolRegistry.find(typed).or(() -> toolRegistry.find(typed.toLowerCase(Locale.ROOT)))
+                .map(com.ownclaw.agent.tools.Tool::name)
+                .orElseGet(() -> {
+                    var granted = credentialGrants.all(userId).keySet();
+                    return granted.contains(typed) ? typed
+                            : granted.stream().filter(name -> name.equalsIgnoreCase(typed)).findFirst()
+                                    .orElse(typed.toLowerCase(Locale.ROOT));
+                });
         List<String> revoked = credentialGrants.revoke(userId, skill, keys);
-        if (revoked.isEmpty() && registered.isEmpty() && !skill.equals(skill.toLowerCase(Locale.ROOT))) {
-            skill = skill.toLowerCase(Locale.ROOT);
-            revoked = credentialGrants.revoke(userId, skill, keys);
-        }
         if (revoked.isEmpty()) {
             return "'" + skill + "' had been granted " + (keys.isEmpty() ? "nothing." : "none of those.");
         }

@@ -64,6 +64,14 @@ public class CapabilityResolver {
     // ─────────────── Capability Pattern Definitions ───────────────
 
     /**
+     * The word for mail in a trigger: mail, e-mail, email, gmail, webmail, and what they are stems
+     * of ("emails", "e-maily"). Not the same letters inside an address or a host's name --
+     * "someone@gmail.com", "https://webmail.example.org", "mail.example.org": a task that sends
+     * something to an address asks for no mailbox to be read.
+     */
+    private static final String MAIL = "(?<![@./:])(?:e-?|g|web)?mail(?!\\.[\\p{L}\\p{N}])";
+
+    /**
      * Known capability categories. Each maps user-intent patterns to the
      * system packages and skill shape needed to fulfill them.
      *
@@ -228,13 +236,13 @@ public class CapabilityResolver {
             new CapabilityPattern(
                     "email_imap",
                     List.of(
-                            "check.*(?:e-?|g|web)?mail", "(?:e-?|g|web)?mail.*check", "read.*(?:e-?|g|web)?mail", "(?:e-?|g|web)?mail.*read",
-                            "fetch.*(?:e-?|g|web)?mail", "(?:e-?|g|web)?mail.*fetch", "inbox", "\\bimap\\b",
-                            "unread.*(?:e-?|g|web)?mail", "(?:e-?|g|web)?mail.*unread", "\\bnew\\b.*(?:e-?|g|web)?mail", "(?:e-?|g|web)?mail.*\\bnew\\b",
-                            "(?:e-?|g|web)?mail.*summ", "summ.*(?:e-?|g|web)?mail",
-                            "zkontroluj.*(?:e-?|g|web)?mail", "přečti.*(?:e-?|g|web)?mail", "\\bpošt",  // Czech
-                            "nepřečten.*(?:e-?|g|web)?mail", "(?:e-?|g|web)?mail.*nepřečten",
-                            "stáhni.*(?:e-?|g|web)?mail", "(?:e-?|g|web)?mail.*stáhn"
+                            "check.*" + MAIL, MAIL + ".*check", "read.*" + MAIL, MAIL + ".*read",
+                            "fetch.*" + MAIL, MAIL + ".*fetch", "inbox", "\\bimap\\b",
+                            "unread.*" + MAIL, MAIL + ".*unread", "\\bnew\\b.*" + MAIL, MAIL + ".*\\bnew\\b",
+                            MAIL + ".*summ", "summ.*" + MAIL,
+                            "zkontroluj.*" + MAIL, "přečti.*" + MAIL, "\\bpošt",  // Czech
+                            "nepřečten.*" + MAIL, MAIL + ".*nepřečten",
+                            "stáhni.*" + MAIL, MAIL + ".*stáhn"
                     ),
                     "check_email",
                     "Connect to an IMAP server and fetch emails. "
@@ -533,16 +541,20 @@ public class CapabilityResolver {
     private static final String WORD_START = "(?<![\\p{L}\\p{N}_])";
 
     /**
-     * What is written with a dot and ends no sentence: titles before a name, and the short forms
-     * of "for example", "that is", "about" -- English and Czech. "Check Mr. Smith's email" and
-     * "Zkontroluj např. e-maily od Petra" are each one request.
+     * Short forms that are written with a dot and end no sentence: "for example", "that is",
+     * "about", in English and Czech. "Fetch approx. 10 emails" and "Zkontroluj např. e-maily"
+     * are each one request. Only forms that are no word of their own: "doc.", "no.", "st." end
+     * sentences as often as not.
      */
     private static final java.util.Set<String> ABBREVIATIONS = java.util.Set.of(
-            "mr", "mrs", "ms", "dr", "prof", "st", "jr", "sr", "vs", "cf", "ca", "approx", "incl", "excl", "eg", "ie",
-            "např", "tj", "tzn", "tzv", "resp", "popř", "příp", "cca", "mj", "pí", "sl", "ing", "mgr", "bc", "doc");
+            "approx", "incl", "excl", "eg", "ie", "cf", "vs",
+            "např", "tj", "tzn", "tzv", "resp", "popř", "příp", "cca", "mj");
+
+    /** Titles before a name -- when written with a capital, as a title is: "Mr. Smith", not "for 20 ms." */
+    private static final java.util.Set<String> TITLES = java.util.Set.of("mr", "mrs", "ms", "dr", "prof");
 
     /** Short forms of "number": they end no sentence before the number itself ("the no. 3 email"). */
-    private static final java.util.Set<String> BEFORE_A_NUMBER = java.util.Set.of("no", "nr", "nos", "tel", "str");
+    private static final java.util.Set<String> BEFORE_A_NUMBER = java.util.Set.of("no", "nr");
 
     /** Each trigger's words, compiled once: the triggers are constants. */
     private static final Map<String, List<Pattern>> WORDS = new java.util.concurrent.ConcurrentHashMap<>();
@@ -623,21 +635,28 @@ public class CapabilityResolver {
     }
 
     /**
-     * Whether the one dot at {@code dot} is an abbreviation's and no sentence's end: after a
-     * single letter ("e.g.", "J. Smith", "č. 3"), after a word of {@link #ABBREVIATIONS}, or
-     * after one of {@link #BEFORE_A_NUMBER} when a number follows. Looks back over that one
-     * word, no further than where the sentence began.
+     * Whether the one dot at {@code dot} is an abbreviation's and no sentence's end: after a word
+     * of {@link #ABBREVIATIONS}; after one of {@link #TITLES} written with a capital; after one
+     * of {@link #BEFORE_A_NUMBER}, or a single letter ("č. 3"), when a number follows; after a
+     * single letter that itself follows a dot ("e.g.", "i.e."). Any other single letter ends its
+     * sentence -- "Check plan B. Email me the result" is two. Looks back over that one word, and
+     * no further than an abbreviation is long.
      */
     private static boolean abbreviated(String text, int sentenceStart, int dot, int after) {
         int from = dot;
-        while (from > sentenceStart && Character.isLetter(text.charAt(from - 1))) from--;
+        while (from > sentenceStart && dot - from <= 6 && Character.isLetter(text.charAt(from - 1))) from--;
         int letters = dot - from;
-        if (letters == 0) return false;
-        if (letters == 1) return true;
-        if (letters > 6) return false;
+        if (letters == 0 || letters > 6) return false;
+        if (letters == 1) {
+            return (from > sentenceStart && text.charAt(from - 1) == '.') || aNumberFollows(text, after);
+        }
         String word = text.substring(from, dot).toLowerCase(java.util.Locale.ROOT);
         if (ABBREVIATIONS.contains(word)) return true;
-        if (!BEFORE_A_NUMBER.contains(word)) return false;
+        if (TITLES.contains(word)) return Character.isUpperCase(text.charAt(from));
+        return BEFORE_A_NUMBER.contains(word) && aNumberFollows(text, after);
+    }
+
+    private static boolean aNumberFollows(String text, int after) {
         int next = after;
         while (next < text.length() && Character.isWhitespace(text.charAt(next)) && !lineBreak(text.charAt(next))) next++;
         return next < text.length() && Character.isDigit(text.charAt(next));

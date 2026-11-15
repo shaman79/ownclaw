@@ -72,7 +72,9 @@ public class DynamicSkillRegistry {
         if (!Files.isDirectory(generatedDir)) {
             // Known to be absent, or not known at all: isDirectory says no to both. Only an
             // install with no skills may use the one-time grant up for none -- behind a parent
-            // that cannot be searched, or a volume that is not there, the skills are waiting.
+            // that cannot be searched, or a path that is a file, the skills may be waiting.
+            // (Not told apart: a directory that is absent because its volume is. There the
+            // database is as a rule absent with it, and this is another install's first start.)
             if (Files.notExists(generatedDir)) {
                 log.info("No generated skills directory at {} — no dynamic skills loaded", generatedDir);
                 keepGranted();
@@ -316,8 +318,9 @@ public class DynamicSkillRegistry {
     }
 
     /**
-     * Move a quarantined directory back and register it again -- with no grant: every account
-     * grants it again before it reads a credential of theirs.
+     * Move a quarantined directory back and register it again. One the owner's tasks wrote, or
+     * with no author, keeps the grants of its name; one another account wrote keeps that
+     * account's alone, and every other account grants it again before it reads a credential.
      *
      * @param entry the directory name exactly as {@link #quarantined()} reports it
      * @return the skill's name once live again, or empty with the reason logged
@@ -342,12 +345,16 @@ public class DynamicSkillRegistry {
             return Optional.empty();
         }
         try {
-            // It starts with no grant. Which directory of that name this is cannot be told
-            // from here: the skill maintenance retired, with its grants left behind, or one a
-            // task of another account wrote that never loaded -- and that one would be
-            // registered under what the other was granted. Ended before anything moves, so a
-            // database that refuses leaves it where it is.
-            endGrants(name, null);
+            // Code another account than the owner wrote comes back to that account's grant
+            // alone, as when that account writes a skill again: which directory of the name
+            // this is cannot be told from here, and one of its tasks' that never loaded would
+            // be registered under what the owner granted the skill maintenance retired. The
+            // owner's own, or one with no author, comes back as it left -- so a retirement
+            // that was a mistake is undone by this alone. The author is the one its
+            // SKILL.yaml names, which the skill manager wrote and a jailed skill cannot
+            // change. Ended before anything moves, so a database that refuses leaves it there.
+            String author = authorOf(source);
+            if (author != null && authService != null && !authService.isOwner(author)) endGrants(name, author);
             Files.move(source, dest);
             DynamicSkill skill = loadSkill(dest);
             if (skill == null) {

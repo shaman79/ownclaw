@@ -256,20 +256,19 @@ class VaultReadersInventoryTest {
     }
 
     @Test
-    @DisplayName("a grant is taken back by its account's /revoke, or ends with its skill: for every account at once only where the skill manager deletes a skill, makes one under a free name, or writes another account's again, and where the registry brings one back from quarantine")
+    @DisplayName("a grant is taken back by its account's /revoke, or ends with its skill: for every account at once only where the skill manager deletes a skill, makes one under a free name, or writes another account's again, and where the registry brings another account's back from quarantine")
     void aGrantIsEndedWithItsSkillByTheSkillManagerAlone() throws IOException {
         assertEquals(Map.of(
                 GRANTS, List.of("String userId, String skill, Collection<String> keys"),   // its declaration
-                // /revoke; and, for a skill that is gone, once more by its name in lower case
-                COMMANDS, List.of("userId, skill, keys", "userId, skill, keys")),
+                COMMANDS, List.of("userId, skill, keys")),                                  // /revoke
                 every("revoke"), "An account takes back its own grants, in a command it sends.");
 
         // Everyone's grants of a skill at once (CredentialGrantService#end): through the registry's
         // endGrants, which the skill manager calls where a skill's code ends or changes hands, and
-        // the registry itself where a directory is brought back from quarantine -- which skill of
-        // that name it is cannot be told there, so it starts with none.
+        // the registry itself where a directory another account than the owner wrote is brought
+        // back from quarantine -- to that account's grant alone, as when it writes a skill again.
         assertEquals(Map.of(
-                REGISTRY, List.of("String skill, String keep", "name, null"),               // its declaration; a restore
+                REGISTRY, List.of("String skill, String keep", "name, author"),             // its declaration; a restore
                 // A skill made under a name no skill held: whatever was left under it. Written again
                 // by another account than the owner: everyone's but that account's. Deleted: all.
                 SKILL_MANAGER, List.of("name, null", "name, requester", "name, null")),

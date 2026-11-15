@@ -286,11 +286,14 @@ class GrantCommandsTest {
         assertEquals(List.of(), rows());
         assertFalse(say("ann", "/grants").contains("mailer:"), say("ann", "/grants"));
 
-        // A name from before names were lower case kept its capitals: typed as it is listed, it is found.
-        vault.grants().grant("ann", "OldMailer", List.of("SMTP_PASS"));
-        assertTrue(say("ann", "/grants").contains("OldMailer: SMTP_PASS"), say("ann", "/grants"));
-        assertTrue(say("ann", "/revoke OldMailer").contains("'OldMailer' may no longer read: SMTP_PASS."));
+        // A name from before names were lower case kept its capitals: it is found as it is listed,
+        // and typed in any other case.
+        vault.grants().grant("ann", "OldMailer", List.of("SMTP_PASS", "SMTP_USER"));
+        assertTrue(say("ann", "/grants").contains("OldMailer: SMTP_PASS, SMTP_USER"), say("ann", "/grants"));
+        assertTrue(say("ann", "/revoke OldMailer SMTP_PASS").contains("'OldMailer' may no longer read: SMTP_PASS."));
+        assertTrue(say("ann", "/revoke OLDMAILER").contains("'OldMailer' may no longer read: SMTP_USER."));
         assertEquals(List.of(), rows());
+        assertEquals("'nosuchskill' had been granted nothing.", say("ann", "/revoke NoSuchSkill"));
         // Mutations: /revoke of a name no registered skill has does nothing -> the grants a retired
         // skill left stay; the name of a skill that is gone taken as typed alone -> 'Mailer' had been
         // granted nothing; taken in lower case alone -> 'oldmailer' had been granted nothing.

@@ -225,8 +225,28 @@ class GrantsEndWithTheSkillTest {
     }
 
     @Test
-    @DisplayName("a skill brought back from where it was set aside starts with no grant: which directory of that name it is cannot be told, and one a task of another account wrote would be registered under what the retired skill was granted")
-    void broughtBackWithNoGrant() throws Exception {
+    @DisplayName("bringing back a skill the owner's tasks wrote, or one with no author, is no new skill: it comes back with its grants and runs on them -- a retirement that was a mistake is undone by the restore alone")
+    void broughtBackWithItsGrants() {
+        write("owner", "mailer", "the owner's");
+        write(null, "old_mailer", "from before authors were kept");
+        everyoneGrants("mailer");
+        everyoneGrants("old_mailer");
+        Path aside = skills.registry.retire("mailer", "not used for a year").orElseThrow();
+        Path old = skills.registry.retire("old_mailer", "not used for a year").orElseThrow();
+
+        assertEquals("mailer", skills.registry.restoreFromQuarantine(aside.getFileName().toString()).orElseThrow());
+        assertEquals("old_mailer", skills.registry.restoreFromQuarantine(old.getFileName().toString()).orElseThrow());
+
+        assertEquals(List.of("ann", "kid", "owner"), grantedBy("mailer"));
+        assertEquals(List.of("ann", "kid", "owner"), grantedBy("old_mailer"));
+        assertTrue(GrantsKit.run(skill("mailer"), "ann").success());
+        assertEquals(Map.of("SMTP_PASS", ANNS), skills.launches.runs().getLast().credentials());
+        // Mutations: retiring a skill ends its grants; bringing the owner's back ends them -> nobody's are left.
+    }
+
+    @Test
+    @DisplayName("a directory another account than the owner wrote comes back to that account's grant alone: which skill of the name it is cannot be told, and one that never loaded would be registered under what the owner granted the skill that was retired")
+    void anotherAccountsIsBroughtBackToItsOwnGrantAlone() throws Exception {
         // kid's mailer never loaded: set aside at its creation, never registered.
         var ok = skills.launches.answer;
         skills.launches.answer = launch -> launch.script().getFileName().toString().startsWith("_load_check_")
@@ -237,30 +257,21 @@ class GrantsEndWithTheSkillTest {
         // The owner's mailer: made, granted by everyone, and retired by maintenance with its grants left.
         write("owner", "mailer", "the owner's");
         everyoneGrants("mailer");
-        Path owners = skills.registry.retire("mailer", "not used for a year").orElseThrow();
+        skills.registry.retire("mailer", "not used for a year").orElseThrow();
         assertEquals(List.of("ann", "kid", "owner"), grantedBy("mailer"), "the premise: retiring a skill ends no grant");
 
         // The operator brings kid's back, by its entry's name.
         assertEquals("mailer", skills.registry.restoreFromQuarantine(kids).orElseThrow());
 
         assertTrue(code("mailer").contains("kid's, never registered"), "the premise: it is kid's code that is registered");
-        assertEquals(List.of(), grantedBy("mailer"), "kid's code was registered under what the owner's skill was granted");
-        for (String account : List.of("owner", "ann", "kid")) assertRefused("mailer", account);
-        assertEquals(List.of(), vault.decrypted);
-
-        // The skill that was retired starts the same when it is brought back: granted again by whoever uses it.
-        assertEquals("Skill 'mailer' has been permanently deleted.",
-                skills.manager.deleteSkill("mailer", "kid", () -> false, () -> {}));
-        grants.grant("ann", "mailer", PASS);   // left under the name, by whatever
-        assertEquals("mailer", skills.registry.restoreFromQuarantine(owners.getFileName().toString()).orElseThrow());
-        assertTrue(code("mailer").contains("the owner's"));
-        assertEquals(List.of(), grantedBy("mailer"));
+        assertEquals(List.of("kid"), grantedBy("mailer"), "kid's code was registered under what the owner's skill was granted");
+        assertRefused("mailer", "owner");
         assertRefused("mailer", "ann");
-        grants.grant("ann", "mailer", PASS);
-        assertTrue(GrantsKit.run(skill("mailer"), "ann").success());
-        assertEquals(Map.of("SMTP_PASS", ANNS), skills.launches.runs().getLast().credentials());
-        // Mutation: what is brought back keeps the grants of its name, as at first -> kid's code runs
-        // for the owner with the owner's password.
+        assertEquals(List.of(), vault.decrypted, "kid's code was handed nothing of anyone else's");
+        assertTrue(GrantsKit.run(skill("mailer"), "kid").success(), "its own account's grant stays, as when it writes a skill again");
+        assertEquals(Map.of("SMTP_PASS", KIDS), skills.launches.runs().getLast().credentials());
+        // Mutation: what is brought back keeps the grants of its name whoever wrote it, as at first ->
+        // kid's code runs for the owner with the owner's password.
     }
 
     @Test

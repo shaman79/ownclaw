@@ -99,16 +99,24 @@ class CapabilityResolverTest {
         assertEquals(List.of("ping 192.0.2.7 and example.org now"), sentencesOf("ping 192.0.2.7 and example.org now"));
         assertEquals(List.of("....x ?!y"), sentencesOf("....x ?!y"), "marks with no blank after them end nothing");
         for (String one : List.of("check Mr. Smith's email", "Fetch approx. 10 emails", "check e.g. the email from Bob",
-                "read the no. 3 email", "Zkontroluj např. e-maily od Petra", "mail from J. Smith", "dopis č. 3 od pí. Nové")) {
+                "read the no. 3 email", "Zkontroluj např. e-maily od Jany", "dopis č. 3 od Jany", "Scan i.e. the home network")) {
             assertEquals(List.of(one), sentencesOf(one), "one request");
         }
+        // What only looks like one: a letter, a unit, a noun that is also a title or a short form.
+        assertEquals(List.of("Check plan B", "Email me the result"), sentencesOf("Check plan B. Email me the result"));
+        assertEquals(List.of("Run it for 20 ms", "The command timed out"), sentencesOf("Run it for 20 ms. The command timed out"));
+        assertEquals(List.of("I checked with the prof", "Mail me the notes"), sentencesOf("I checked with the prof. Mail me the notes"));
+        assertEquals(List.of("Scan the doc", "Then tell the network team"), sentencesOf("Scan the doc. Then tell the network team"));
+        assertEquals(List.of("Convert it for Dr. X", "The video is fine"), sentencesOf("Convert it for Dr. X. The video is fine"));
         assertEquals(List.of("I said no. 3 mails came"), sentencesOf("I said no. 3 mails came"), "the word \"no\" at a sentence's end, before a number, is read as the abbreviation: known, and left");
         assertEquals(List.of("I said no", "Three mails came"), sentencesOf("I said no. Three mails came"));
         assertEquals(List.of("Check it", "Email Bob"), sentencesOf("Check it. Email Bob"), "a short word is no abbreviation");
         assertEquals(List.of(), sentencesOf(" \n.\n!? "), "nothing but marks and breaks");
         assertEquals(List.of(), sentencesOf(""));
-        // Mutations: the abbreviations not looked at -> each of the seven is two sentences; a mark
-        // with no blank after it taken for an end -> "192" is a sentence.
+        // Mutations: the abbreviations not looked at -> each of the seven is two sentences; any
+        // single letter, or a title in small letters, taken for one -> "Check plan B. Email me the
+        // result" is one sentence, and asks for a mailbox; a mark with no blank after it taken for
+        // an end -> "192" is a sentence.
     }
 
     private static List<String> sentencesOf(String text) {
@@ -153,11 +161,39 @@ class CapabilityResolverTest {
                 "check my gmail", "read my gmail", "any new gmail?", "fetch my webmail", "Zkontroluj gmail",
                 "run a portscan on 192.0.2.10", "do a portscan of the router", "scan the subnetwork",
                 "přeskenuj síť", "rerun the command", "check the openssl cert", "rediscover hosts",
-                "check Mr. Smith's email", "Fetch approx. 10 emails", "Zkontroluj např. e-maily od Petra",
+                "check Mr. Smith's email", "Fetch approx. 10 emails", "Zkontroluj např. e-maily od Jany",
                 "check e.g. the email from Bob", "read the no. 3 email", "Scan e.g. the home network")) {
             assertNotNull(bare().resolve(message), message);
         }
         // Mutation: WORD_START also put after each word (whole words only) -> "emails", "records" fail.
+    }
+
+    @Test
+    @DisplayName("an address or a host's name is no word for mail, and a sentence that only looks unfinished is finished: a task that sends something to someone@gmail.com asks for no mailbox")
+    void addressesAndFinishedSentencesAskForNothing() {
+        for (String message : List.of(
+                "Check the weather for tomorrow and send it to someone@gmail.com",
+                "Read this article and send the gist to a.friend@gmail.com",
+                "Send the new price list to sales@gmail.com",
+                "Write a summary of the meeting for someone@gmail.com",
+                "Fetch the lunch menu and send it to me@gmail.com",
+                "Check the build, then notify ops@webmail.example.org",
+                "Read the changelog and post it to https://webmail.example.org/compose",
+                "Fetch the report and upload it to mail.example.org",
+                "Check the build and tell someone@mail.example.org",
+                // Two sentences, a trigger's words in each
+                "Check plan B. Email me the result",
+                "Scan page A. Network diagram is on page B",
+                "Scan the doc. Then tell the network team",
+                "Run it for 20 ms. The command timed out",
+                "Read chapter 3 of the doc. My email is down",
+                "I checked with the prof. Mail me the notes",
+                "Convert it for Dr. X. The video is fine as it is")) {
+            assertNull(bare().resolve(message), message);
+        }
+        // Mutations: the mail word found after an @, a dot or a slash, or before a dot and a
+        // letter -> the first nine ask for a mailbox reader; the abbreviation rule as it was
+        // first written (any single letter, "doc", "ms", "prof" in small letters) -> the rest ask.
     }
 
     @Test
