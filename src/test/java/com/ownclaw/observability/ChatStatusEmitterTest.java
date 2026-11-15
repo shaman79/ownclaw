@@ -70,7 +70,7 @@ class ChatStatusEmitterTest {
 
         emitter.emitForTask("u1", "t1", StatusMessage.Type.STEP, "Step 2 · anthropic");
         emitter.emitForTask("u1", "t1", StatusMessage.Type.PROGRESS, "Running ping (40s)");
-        emitter.emitForTask("u1", "t1", StatusMessage.Type.WARNING, "Daily budget at 80%");
+        emitter.emitForTask("u1", "t1", StatusMessage.Type.WARNING, "ping ✗ 40s");
         emitter.emitForTask("u1", "t1", StatusMessage.Type.PROGRESS_MESSAGE, "☁️ Step 2 · ping");
         assertEquals("Running ping (40s)", emitter.doing("u1", null).text(), "the last step or progress status");
         assertNull(emitter.doing("u2", null), "another account's task is not his");

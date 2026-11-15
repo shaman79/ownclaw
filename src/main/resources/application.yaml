@@ -146,11 +146,6 @@ ownclaw:
     # only the local model reads it. Any other result goes to the cloud through the filter.
     personal-sources: [IMAP_, POP3_]
 
-  budgets:
-    daily-cloud-tokens: 0
-    per-task-cloud-tokens: 0
-    warning-threshold: 0.8
-
   queue:
     # How many tasks run at once: one at a time per chat, tasks of different chats side by side,
     # scheduled and /bg work beside them but never on the last worker. The local model still

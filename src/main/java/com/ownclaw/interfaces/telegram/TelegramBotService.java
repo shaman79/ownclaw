@@ -732,7 +732,7 @@ public class TelegramBotService {
                     Map.of("command", "help",    "description", "Show available commands"),
                     Map.of("command", "skills",  "description", "List available tools"),
                     Map.of("command", "status",  "description", "System status"),
-                    Map.of("command", "tokens",  "description", "Token budget summary"),
+                    Map.of("command", "tokens",  "description", "Tokens used today"),
                     Map.of("command", "log",     "description", "Recent events: /log [count|all] [page N]")
             );
             String json = mapper.writeValueAsString(Map.of("commands", commands));

@@ -9,7 +9,7 @@ import com.ownclaw.conversation.FileStorageService;
 import com.ownclaw.core.LongRunningTaskManager;
 import com.ownclaw.core.ScheduledTaskService;
 import com.ownclaw.core.TaskCancellationService;
-import com.ownclaw.core.TokenBudgetTracker;
+import com.ownclaw.core.TokenUsageTracker;
 import com.ownclaw.llm.ModelPricing;
 import com.ownclaw.llm.LlmProvider;
 import com.ownclaw.observability.ChatStatusEmitter;
@@ -67,7 +67,7 @@ public class AgentLoop {
     private final ConversationService conversationService;
     private final LongRunningTaskManager longRunningTaskManager;
     private final CapabilityResolver capabilityResolver;
-    private final TokenBudgetTracker budgetTracker;
+    private final TokenUsageTracker usageTracker;
     /** For serialising step details into events.details. Jackson's mapper is thread-safe once built. */
     private static final com.fasterxml.jackson.databind.ObjectMapper JSON =
             new com.fasterxml.jackson.databind.ObjectMapper();
@@ -107,7 +107,7 @@ public class AgentLoop {
             ConversationService conversationService,
             LongRunningTaskManager longRunningTaskManager,
             CapabilityResolver capabilityResolver,
-            TokenBudgetTracker budgetTracker,
+            TokenUsageTracker usageTracker,
             EventLogService eventLog,
             @Lazy ScheduledTaskService scheduledTaskService,
             LocalExecutor localExecutor,
@@ -137,7 +137,7 @@ public class AgentLoop {
         this.conversationService = conversationService;
         this.longRunningTaskManager = longRunningTaskManager;
         this.capabilityResolver = capabilityResolver;
-        this.budgetTracker = budgetTracker;
+        this.usageTracker = usageTracker;
         this.eventLog = eventLog;
         this.taskTraces = new TaskTraceService(eventLog);
         this.scheduledTaskService = scheduledTaskService;
@@ -3695,11 +3695,12 @@ public class AgentLoop {
      * {@code input_tokens}, and with the static system prompt cached they are most of the input --
      * plus output. The tokens go to the counter of the tier that did the work -- local ones billed
      * after the task's ending, to a row of their own ({@link #recordAfterEnd}) -- and a cloud call's
-     * to the budget too, priced attempt by attempt at the rates of the model that ran each
-     * ({@link ModelPricing#costUsd(String, LlmResponse)}): a declined request can be finished by a
-     * fallback model, or retried on the one the refusal names. Local tokens never reach the cloud
-     * budget: an outage that forced everything local used to spend the daily cloud allowance
-     * fastest, without a single cloud call having been made.
+     * to the day's cloud usage too ({@link TokenUsageTracker}), priced attempt by attempt at the
+     * rates of the model that ran each ({@link ModelPricing#costUsd(String, LlmResponse)}): a
+     * declined request can be finished by a fallback model, or retried on the one the refusal
+     * names. Local tokens never reach the day's cloud usage: they used to, and an outage that
+     * forced everything local then counted as cloud use, without a single cloud call having been
+     * made.
      *
      * @param reply the reply, or null when none came -- what such a call's attempts were billed
      *              for has been counted as each ended
@@ -3716,7 +3717,7 @@ public class AgentLoop {
         if (billed > 0) {
             double cost = ModelPricing.costUsd(reply.model() != null ? reply.model() : provider.model(), reply);
             context.addCloudCost(cost);
-            budgetTracker.recordUsage(context.userId(), provider.name(), billed, cost);
+            usageTracker.recordUsage(context.userId(), provider.name(), billed, cost);
         }
         return billed;
     }

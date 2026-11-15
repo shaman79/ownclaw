@@ -6536,8 +6536,9 @@
         } else if (sub === 'scheduled' || sub === 'warning') {
             // Notices, not evidence that work is in flight. The scheduler emits
             // SCHEDULED "Recurring task #N completed. Next run: 07:00" AFTER the run
-            // has already delivered its result, and budget warnings arrive whenever a
-            // threshold is crossed. Both fell into the catch-all below, which calls
+            // has already delivered its result, and a warning tells of something that
+            // went wrong -- a call that failed, a task being stopped -- not that work
+            // goes on. Both fell into the catch-all below, which calls
             // setThinking(true) -- so the spinner restarted with nothing left to stop
             // it, for the full 15-minute safety timeout, after every single recurring
             // task.

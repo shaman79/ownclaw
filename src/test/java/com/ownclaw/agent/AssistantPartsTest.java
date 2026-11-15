@@ -10,7 +10,7 @@ import com.ownclaw.config.OwnClawConfig;
 import com.ownclaw.conversation.MigratedDatabase;
 import com.ownclaw.core.LongRunningTaskManager;
 import com.ownclaw.core.TaskCancellationService;
-import com.ownclaw.core.TokenBudgetTracker;
+import com.ownclaw.core.TokenUsageTracker;
 import com.ownclaw.llm.CloudGateway;
 import com.ownclaw.llm.EgressLedger;
 import com.ownclaw.llm.EgressRefused;
@@ -405,7 +405,7 @@ class AssistantPartsTest {
                 null, new SkillCuratorService(jdbc, null, null), new NoSkills(),
                 new DebugSessionService(), new TaskCancellationService(), null, null,
                 new LongRunningTaskManager(jdbc, emitter, events, config), null,
-                new TokenBudgetTracker(jdbc, config, emitter), events, null, null, null,
+                new TokenUsageTracker(jdbc), events, null, null, null,
                 new com.ownclaw.privacy.Redactor(null));
     }
 

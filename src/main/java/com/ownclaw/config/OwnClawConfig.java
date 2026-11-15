@@ -23,7 +23,6 @@ public class OwnClawConfig {
     private Sandbox sandbox = new Sandbox();
     private Skills skills = new Skills();
     private Database database = new Database();
-    private Budgets budgets = new Budgets();
     private SelfRepair selfRepair = new SelfRepair();
 
     // --- Nested classes ---
@@ -334,19 +333,6 @@ public class OwnClawConfig {
         public void setPath(String path) { this.path = path; }
     }
 
-    public static class Budgets {
-        private long dailyCloudTokens = 0;
-        private int perTaskCloudTokens = 0;
-        private double warningThreshold = 0.8;
-
-        public long getDailyCloudTokens() { return dailyCloudTokens; }
-        public void setDailyCloudTokens(long v) { this.dailyCloudTokens = v; }
-        public int getPerTaskCloudTokens() { return perTaskCloudTokens; }
-        public void setPerTaskCloudTokens(int v) { this.perTaskCloudTokens = v; }
-        public double getWarningThreshold() { return warningThreshold; }
-        public void setWarningThreshold(double v) { this.warningThreshold = v; }
-    }
-
     /**
      * Self-repair ({@code com.ownclaw.agent.SkillSelfRepair}): when unattended work -- a scheduled
      * run, /bg -- shows that a skill did not do its whole job, a background task repairs the skill
@@ -381,8 +367,6 @@ public class OwnClawConfig {
     public void setSkills(Skills v) { this.skills = v; }
     public Database getDatabase() { return database; }
     public void setDatabase(Database v) { this.database = v; }
-    public Budgets getBudgets() { return budgets; }
-    public void setBudgets(Budgets v) { this.budgets = v; }
     public SelfRepair getSelfRepair() { return selfRepair; }
     public void setSelfRepair(SelfRepair v) { this.selfRepair = v; }
 }

@@ -301,7 +301,7 @@ class SkillCodegenTest {
         assertEquals(1_000, ctx2.localTokens());
         assertEquals(0, ctx2.cloudTokens());
         assertEquals(0, offline.jdbc.queryForObject("SELECT count(*) FROM token_usage", Integer.class),
-                "local tokens reached the cloud budget");
+                "local tokens reached the day's cloud usage");
     }
 
     @Test
