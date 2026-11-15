@@ -1442,33 +1442,61 @@ PY
 # a change made in code is asked for by a changeset. Where it cannot be told (no JAR installed,
 # one that cannot be read), it counts as a change.
 changes_database() {
-    local installed="$1" new="$2" was now
+    local installed="$1" new="$2" was="" now=""
     [ -f "$installed" ] || return 0
-    was=$(changelog_of "$installed") || return 0
-    now=$(changelog_of "$new") || return 0
-    [ -n "$was" ] && [ -n "$now" ] || return 0
+    if ! was=$(changelog_of "$installed") || ! now=$(changelog_of "$new") || [ -z "$was" ] || [ -z "$now" ]; then
+        log "The changelogs of the installed JAR and the new one could not be compared -- taken as a change to the database"
+        return 0
+    fi
     [ "$was" != "$now" ]
+}
+
+# Where the service keeps its database: where .env tells it to (OWNCLAW_DATABASE_PATH, a relative
+# path from the deploy directory, where the service runs), else the default.
+database_path() {
+    local told=""
+    if [ -f "$DEPLOY_DIR/.env" ]; then
+        told=$(sed -n 's/^[[:space:]]*OWNCLAW_DATABASE_PATH[[:space:]]*=[[:space:]]*//p' "$DEPLOY_DIR/.env" 2>/dev/null | tail -1) || told=""
+        told=${told%$'\r'}
+        told=${told%\"}; told=${told#\"}
+        told=${told%\'}; told=${told#\'}
+    fi
+    case "$told" in
+        '') echo "$DEPLOY_DIR/data/ownclaw.db" ;;
+        /*) echo "$told" ;;
+        *)  echo "$DEPLOY_DIR/${told#./}" ;;
+    esac
+}
+
+# Whether only root can add or replace a name in this directory: it is root's, and neither its
+# group nor everyone else may write to it.
+only_root_writes() {
+    local owner mode
+    owner=$(stat -c %u -- "$1" 2>/dev/null) || return 1
+    mode=$(stat -c %a -- "$1" 2>/dev/null) || return 1
+    [ "$owner" = 0 ] || return 1
+    case "$mode" in *[2367]?|*[2367]) return 1 ;; esac
+    return 0
 }
 
 # A build's changes to the database are made at its first start, and rolling the JAR back does
 # not undo them. So before a JAR that changes the database is put in place -- from then on any
 # start of the service, the updater's or not, runs it -- the database is copied, and a build
-# whose copy could not be made is not deployed. Nothing here puts a copy back; by hand that is:
-#   systemctl stop ownclaw
-#   rm -f data/ownclaw.db-wal data/ownclaw.db-shm     # or the newer changes come back from them
-#   cp backups/ownclaw-db-<time>.db data/ownclaw.db   # then give it the owner and mode it had
-#   then roll the JAR back to the build from before (--rollback), which starts the service
-# What was written between the copy and the new build's first start is not in it.
+# whose copy could not be made is not deployed. Nothing here puts a copy back: that is done by
+# hand, with the JAR that goes with it (deploy/README.md). What was written between the copy and
+# the new build's first start is not in it.
 #
 # The copy is SQLite's own backup, which reads one consistent state while the service goes on
 # writing; a plain copy of a database in use can be torn. It holds what the database holds, the
 # vault's key included: made readable by its owner alone, in the backups directory, which no
 # skill can read. As root it is made as the account that owns that directory -- the service's,
 # on a hardened host -- so that root never creates, moves or deletes by a name in a directory
-# another account can write, where a name can be made a link to anything.
+# another account can write, where a name can be made a link to anything. Root's own directory
+# is written by root; reached through a link, only when nobody but root could have made the link.
 # Returns 1 when there is a database and no copy of it was made.
 backup_database() {
-    local db="$DEPLOY_DIR/data/ownclaw.db"
+    local db
+    db=$(database_path)
     if [ ! -f "$db" ]; then
         log "No database at $db yet -- nothing to copy"
         return 0
@@ -1478,35 +1506,54 @@ backup_database() {
         return 1
     fi
     mkdir -p -- "$BACKUP_DIR" 2>/dev/null || true
-    if [ -L "$BACKUP_DIR" ] || [ ! -d "$BACKUP_DIR" ]; then
+    local dir=""
+    dir=$(readlink -f -- "$BACKUP_DIR" 2>/dev/null) || dir=""
+    if [ -z "$dir" ] || [ ! -d "$dir" ]; then
         log "ERROR: $BACKUP_DIR is not a directory -- the database cannot be copied"
         return 1
     fi
 
     local -a as_owner=()
     if [ "$(id -u)" -eq 0 ]; then
-        local uid gid
-        uid=$(stat -c %u -- "$BACKUP_DIR" 2>/dev/null || true)
-        gid=$(stat -c %g -- "$BACKUP_DIR" 2>/dev/null || true)
-        case "$uid:$gid" in
-            0:*|:*|*:|*[!0-9:]*) ;;   # root's own directory, or one that could not be read: as root
-            *)
-                if ! command -v setpriv >/dev/null 2>&1; then
-                    log "ERROR: setpriv not found -- the database cannot be copied as the owner of $BACKUP_DIR"
+        local uid="" gid=""
+        uid=$(stat -c %u -- "$dir" 2>/dev/null) || uid=""
+        case "$uid" in
+            ''|*[!0-9]*)
+                log "ERROR: the owner of $dir could not be read -- the database cannot be copied"
+                return 1
+                ;;
+            0)
+                if [ -L "$BACKUP_DIR" ] && ! only_root_writes "$(dirname -- "$BACKUP_DIR")"; then
+                    log "ERROR: $BACKUP_DIR is a link to root's $dir, in a directory another account can write -- the database is not copied through it"
                     return 1
                 fi
+                ;;
+            *)
+                if ! command -v setpriv >/dev/null 2>&1; then
+                    log "ERROR: setpriv not found -- the database cannot be copied as the owner of $dir"
+                    return 1
+                fi
+                # The account's own group; the directory's, for an account with no entry to look up.
+                gid=$(id -g -- "$uid" 2>/dev/null) || gid=$(stat -c %g -- "$dir" 2>/dev/null) || gid=""
+                case "$gid" in
+                    ''|*[!0-9]*)
+                        log "ERROR: the group of $dir's owner could not be read -- the database cannot be copied"
+                        return 1
+                        ;;
+                esac
                 as_owner=(setpriv --reuid "$uid" --regid "$gid" --clear-groups)
                 ;;
         esac
     fi
 
-    local ts dest part err rc=0
-    ts=$(date '+%Y%m%d-%H%M%S')
-    dest="$BACKUP_DIR/ownclaw-db-${ts}.db"
+    # Named by the time in UTC, so that the names sort in the order the copies were made.
+    local ts dest part err="" rc=0
+    ts=$(date -u '+%Y%m%dT%H%M%SZ')
+    dest="$dir/ownclaw-db-${ts}.db"
     part="$dest.partial"
     # What a copy that was killed half way left behind.
-    ${as_owner[@]+"${as_owner[@]}"} rm -f -- "$BACKUP_DIR"/ownclaw-db-*.db.partial \
-        "$BACKUP_DIR"/ownclaw-db-*.db.partial-journal 2>/dev/null || true
+    ${as_owner[@]+"${as_owner[@]}"} rm -f -- "$dir"/ownclaw-db-*.db.partial \
+        "$dir"/ownclaw-db-*.db.partial-journal 2>/dev/null || true
     # -I and the directory: python would import a sqlite3.py lying where the updater was started.
     err=$( (umask 077; cd / && ${as_owner[@]+"${as_owner[@]}"} timeout 300 python3 -I - "$db" "$part" <<'PY'
 import sqlite3, sys, urllib.parse
@@ -1520,7 +1567,10 @@ finally:
 PY
     ) 2>&1 >/dev/null ) || rc=$?
     if [ "$rc" -eq 0 ] && [ -s "$part" ] && ${as_owner[@]+"${as_owner[@]}"} mv -fT -- "$part" "$dest"; then
-        log "Copied the database to $(basename "$dest") ($(du -h "$dest" 2>/dev/null | cut -f1)) before the build that changes it"
+        local bytes was
+        bytes=$(stat -c %s -- "$dest" 2>/dev/null) || bytes=0
+        was=$(deployed_commit)
+        log "Copied the database to $(basename "$dest") ($(( bytes / 1048576 )) MB), as it is under the installed build (${was:-commit unknown}), before the build that changes it"
     else
         ${as_owner[@]+"${as_owner[@]}"} rm -f -- "$part" "$part-journal" 2>/dev/null || true
         [ "$rc" -eq 124 ] && err="it took more than 300 s"
@@ -1530,7 +1580,7 @@ PY
 
     # The newest MAX_DB_BACKUPS stay: sorted by name, and the name is the time. Not the copies a
     # --reset left (ownclaw-db-pre-reset-*): those are kept.
-    local -a copies=("$BACKUP_DIR"/ownclaw-db-2*.db)
+    local -a copies=("$dir"/ownclaw-db-2*.db)
     local i n=$(( ${#copies[@]} - MAX_DB_BACKUPS ))
     for (( i = 0; i < n; i++ )); do
         ${as_owner[@]+"${as_owner[@]}"} rm -f -- "${copies[i]}" 2>/dev/null || true
@@ -1543,6 +1593,15 @@ PY
 deploy_jar() {
     local new_jar="$1"
 
+    # From the swap below any start of the service runs the new build, and its first start makes
+    # its changes to the database: the copy is taken here, first, with nothing touched yet -- not
+    # even the JAR backups, or each attempt stopped here would push an older build out of them.
+    if changes_database "$DEPLOY_DIR/ownclaw.jar" "$new_jar"; then
+        backup_database || die "Could not copy the database before a build that changes it -- deploy not started"
+    else
+        log "This build's database changelog is the installed one's -- the database is not copied"
+    fi
+
     # A JAR still waiting for its restart never ran, so it is no build to roll back to: the
     # newest backup stays the last one that did. Nothing has been touched yet, so a failed
     # backup stops the deploy rather than rolling back.
@@ -1550,14 +1609,6 @@ deploy_jar() {
         log "The JAR on disk was staged but never started -- keeping the last backup that ran"
     else
         backup_current || die "Could not back up the current JAR (disk full?) -- deploy not started"
-    fi
-
-    # From the swap below any start of the service runs the new build, and its first start makes
-    # its changes to the database: the copy is taken here, with nothing touched yet.
-    if changes_database "$DEPLOY_DIR/ownclaw.jar" "$new_jar"; then
-        backup_database || die "Could not copy the database before a build that changes it -- deploy not started"
-    else
-        log "This build's database changelog is the installed one's -- the database is not copied"
     fi
 
     # IMPORTANT: do not overwrite the currently-running JAR in-place.
