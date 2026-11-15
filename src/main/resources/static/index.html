@@ -6478,6 +6478,10 @@
                         doneActivity();
                     }
                     var drawnMsg = addMsg(type, content, data.taskId, null, data.timestamp);
+                    // A finished answer can offer something to click as well -- the command that grants a
+                    // skill the credentials it waits for, which the task's ending wrote: drawn when it
+                    // arrives as a question's answers are, and as a reload draws the saved row.
+                    addChoices(drawnMsg, data.choices);
                     // The server's echo of a slash text this page sent: "/queue ..." is a message,
                     // and what became of it is said under this bubble.
                     if (type === 'user' && data.clientId) sentBubbles[data.clientId] = drawnMsg;
