@@ -602,14 +602,17 @@ do_setup() {
         # Inject the GitHub token
         sed -i "s|^GITHUB_TOKEN=.*|GITHUB_TOKEN=${GITHUB_TOKEN}|" "$DEPLOY_DIR/.env"
 
-        # Prompt for OpenAI key
+        # Prompt for the cloud LLM's key: Anthropic's, the default provider
         echo ""
-        echo "  OpenAI API key is required for the Mentor LLM (GPT-4o)."
-        echo "  Get one at: https://platform.openai.com/api-keys"
+        echo "  An Anthropic API key is needed for the cloud LLM (Claude)."
+        echo "  Get one at: https://console.anthropic.com/settings/keys"
+        echo "  OpenAI is the alternative: skip this, and set OWNCLAW_MENTOR_PROVIDER=openai"
+        echo "  and OPENAI_API_KEY in $DEPLOY_DIR/.env. With no key at all, every task runs"
+        echo "  on the local model."
         echo ""
-        read -r -p "  Paste your OpenAI API key (or press Enter to skip): " openai_key
-        if [ -n "$openai_key" ]; then
-            sed -i "s|^OPENAI_API_KEY=.*|OPENAI_API_KEY=${openai_key}|" "$DEPLOY_DIR/.env"
+        read -r -p "  Paste your Anthropic API key (or press Enter to skip): " anthropic_key
+        if [ -n "$anthropic_key" ]; then
+            sed -i "s|^ANTHROPIC_API_KEY=.*|ANTHROPIC_API_KEY=${anthropic_key}|" "$DEPLOY_DIR/.env"
         fi
 
         # Prompt for Telegram bot token
