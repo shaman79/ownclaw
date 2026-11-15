@@ -45,6 +45,14 @@ public class CriticAgent {
      */
     private static final double NAME_OVERLAP_BLOCK = 0.6;
 
+    /**
+     * skill_create's parameter that overrides the duplicate check ({@link #evaluateSkillCreate}):
+     * true creates the skill although an existing one looks similar. It was read here and
+     * declared nowhere, so no model had ever been told of it. It is the gate's alone: no part of
+     * the skill, and the loop hands it to nothing that makes one (AgentLoop#createSkill).
+     */
+    static final String FORCE = "force";
+
     private final ToolRegistry toolRegistry;
 
     public CriticAgent(ToolRegistry toolRegistry) {
@@ -188,10 +196,18 @@ public class CriticAgent {
      *       siblings that share no prefix, such as {@code imap_move_to_bin_by_sender_gmail}
      *       against {@code imap_move_to_trash_by_sender}.</li>
      * </ul>
-     * A block is never a dead end. The message names the specific tool believed to cover the case,
-     * and {@code force: true} overrides it — "capable of anything I ask" means a genuinely new
+     * A block is never a dead end. The message names the specific skill believed to cover the
+     * case and says how this task's model uses it -- it calls it or, on local-first work, names it
+     * to delegate -- and the loop offers it that skill ({@link Verdict#instead});
+     * {@code force: true} overrides it — "capable of anything I ask" means a genuinely new
      * capability must stay reachable, and a gate with no escape hatch is a worse failure than the
      * bloat it prevents. A forced creation is recorded as a warning rather than passing silently.
+     * <p>
+     * A name that exists is never blocked, whatever else the library holds: that is a repair.
+     * <p>
+     * A creation is never refused for having been asked for before, however often: a skill that
+     * failed is fixed under its own name, and a refusal left the model no way to fix it
+     * (AgentLoop, where skill_create is run). Counting its attempts is a limit on them.
      */
     private Verdict evaluateSkillCreate(AgentAction action, AgentContext context,
                                         List<String> warnings) {
@@ -199,8 +215,17 @@ public class CriticAgent {
         Object rawName = params == null ? null : params.get("name");
         String proposed = rawName == null ? "" : rawName.toString().trim().toLowerCase();
 
-        Object force = params == null ? null : params.get("force");
+        Object force = params == null ? null : params.get(FORCE);
         boolean forced = force != null && Boolean.parseBoolean(force.toString());
+
+        // Re-creating the same name is a repair/overwrite, which is the behaviour we actually
+        // want instead of a sibling. Never blocked -- and asked before any other skill is
+        // compared: the library holds near-duplicates already, and while the name was only
+        // skipped in the comparison below, a skill's sibling blocked its repair
+        // (imap_move_to_trash_by_sender, with imap_move_to_bin_by_sender_gmail beside it).
+        for (String existing : toolRegistry.names()) {
+            if (proposed.equals(existing.toLowerCase())) return Verdict.allow(warnings);
+        }
 
         if (!proposed.isEmpty() && !forced) {
             // First pass: is this a GENERALISATION of something that already exists? If an
@@ -222,36 +247,40 @@ public class CriticAgent {
                 return Verdict.allow(warnings);
             }
 
+            // How this task's model uses a skill that exists. On local-first work -- unattended,
+            // or a chat that prefers cost -- the cloud calls no skill: it names them to delegate,
+            // as find_tools says of its matches (AgentLoop#findTools). "Call it" was wrong there.
+            boolean delegates = context.offeredTools() != null;
             for (String existing : toolRegistry.names()) {
                 String e = existing.toLowerCase();
-                // Re-creating the same name is a repair/overwrite, which is the behaviour we
-                // actually want instead of a sibling. Never block it here.
-                if (proposed.equals(e)) continue;
                 if (proposed.startsWith(e + "_")) {
                     return Verdict.block("'" + proposed + "' is a narrower version of the existing "
-                            + "tool '" + existing + "'. Call '" + existing + "' and pass the "
-                            + "specifics as parameters instead. If '" + existing + "' genuinely "
-                            + "cannot do this, either extend it under its own name, or retry with "
-                            + "force=true and state what is missing.");
+                            + "skill '" + existing + "', so nothing was created. "
+                            + (delegates ? "Name '" + existing + "' in delegate's 'tools' and state "
+                                    + "the specifics in the goal: you do not call it yourself."
+                                    : "Call '" + existing + "' and pass the specifics as "
+                                    + "parameters: you can call it from your next step.")
+                            + " If '" + existing + "' genuinely cannot do this, extend it with "
+                            + "skill_create under its own name, or create '" + proposed + "' with "
+                            + FORCE + ": true and say in its description what '" + existing
+                            + "' is missing.", existing);
                 }
                 if (tokenOverlap(proposed, e) >= NAME_OVERLAP_BLOCK) {
                     return Verdict.block("'" + proposed + "' looks like a duplicate of the existing "
-                            + "tool '" + existing + "'. Use '" + existing + "', or extend it to "
-                            + "cover this case under its own name. If it is genuinely a different "
-                            + "capability, retry with force=true and say how it differs.");
+                            + "skill '" + existing + "', so nothing was created. "
+                            + (delegates ? "Name '" + existing + "' in delegate's 'tools': you do "
+                                    + "not call it yourself."
+                                    : "Call '" + existing + "': you can call it from your next step.")
+                            + " If it does not cover this case, extend it with skill_create under "
+                            + "its own name. If '" + proposed + "' is genuinely a different "
+                            + "capability, create it with " + FORCE + ": true and say in its "
+                            + "description how it differs.", existing);
                 }
             }
         }
         if (forced) {
             warnings.add("skill_create forced past the duplicate check for '" + proposed + "'");
             log.warn("skill_create for '{}' forced past the duplicate check", proposed);
-        }
-
-        // Repeating an identical creation is a loop whatever it is called.
-        int identical = countIdenticalTrailingActions(context.trajectory(), action);
-        if (identical >= MAX_IDENTICAL_CONSECUTIVE) {
-            return Verdict.block("You have tried to create '" + proposed + "' with identical "
-                    + "parameters " + identical + " times. Change the approach or ask the user.");
         }
         return Verdict.allow(warnings);
     }
@@ -294,18 +323,27 @@ public class CriticAgent {
 
     /**
      * Verdict from the critic.
+     *
+     * @param instead the existing skill a blocked skill_create is told to use, for the loop to
+     *                offer the model ({@link #evaluateSkillCreate}); null in every other verdict
      */
     public record Verdict(
             boolean allowed,
             String blockReason,
-            List<String> warnings
+            List<String> warnings,
+            String instead
     ) {
         public static Verdict allow(List<String> warnings) {
-            return new Verdict(true, null, warnings);
+            return new Verdict(true, null, warnings, null);
         }
 
         public static Verdict block(String reason) {
-            return new Verdict(false, reason, List.of());
+            return new Verdict(false, reason, List.of(), null);
+        }
+
+        /** A skill_create blocked because the existing skill {@code instead} covers it. */
+        public static Verdict block(String reason, String instead) {
+            return new Verdict(false, reason, List.of(), instead);
         }
 
         public boolean hasWarnings() {

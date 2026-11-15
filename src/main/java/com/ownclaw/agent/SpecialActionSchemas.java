@@ -98,7 +98,11 @@ public final class SpecialActionSchemas {
                                     "Docker base image. Omit unless a specific one is needed."),
                             "requires_network", ToolParam.optional("boolean", "Does it reach the network?"),
                             "has_side_effects", ToolParam.optional("boolean", "Does it change anything?"),
-                            "timeout", ToolParam.optional("integer", "Seconds before it is killed."))),
+                            "timeout", ToolParam.optional("integer", "Seconds before it is killed."),
+                            // Read by the duplicate gate and by nothing else (CriticAgent).
+                            CriticAgent.FORCE, ToolParam.optional("boolean", "True creates it although "
+                                    + "an existing skill looks similar; say in the description how it "
+                                    + "differs."))),
 
             spec(AgentAction.SKILL_MANAGE,
                     "Inspect or remove skills: list them, read one's source, or delete one.",

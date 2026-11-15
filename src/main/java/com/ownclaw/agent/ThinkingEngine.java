@@ -733,11 +733,17 @@ public class ThinkingEngine {
      * In that state an answer is a plan, not an answer — "I'll fetch today's news digest first"
      * — and delivering it ends the task COMPLETED having done nothing. Asked of every channel the
      * model can finish through, in {@link #unlessAnsweredBeforeWork}.
+     * <p>
+     * The skill the loop makes at step 1 for the capability resolver is not something that ran:
+     * no model chose it, and counted, it let the model's very first reply -- "I made a scanner
+     * and will run it" -- end a scheduled run with nothing run ({@link AgentLoop#BY_THE_RESOLVER}).
      */
     private static boolean nothingRanYet(AgentContext context, StepMode mode) {
         // Unattended only: on a chat, a question that needs no skill is answered at once.
         return mode.localFirst() && context.isUnattended() && context.trajectory().turns().stream()
-                .noneMatch(t -> t.observation() != null && t.observation().success());
+                .noneMatch(t -> t.observation() != null && t.observation().success()
+                        && (t.observation().structured() == null
+                                || !Boolean.TRUE.equals(t.observation().structured().get(AgentLoop.BY_THE_RESOLVER))));
     }
 
     /**
@@ -956,7 +962,8 @@ public class ThinkingEngine {
         // NOTE: CapabilityResolver hints are handled deterministically in AgentLoop.runLoop()
         // at step 0 — the hint bypasses the ThinkingEngine entirely and synthesizes the
         // skill_create action without any LLM call. By the time the ThinkingEngine runs
-        // (step 1+), the skill is already created and visible in the trajectory.
+        // (step 1+), the skill is already created and visible in the trajectory -- or was not
+        // made at all: the duplicate gate kept it from being, and the model takes step 1.
 
         // Special actions (static — tool descriptions never change).
         //
@@ -976,6 +983,8 @@ public class ThinkingEngine {
         sb.append("  name*: lowercase id | description*: behavior spec + edge cases + output format\n");
         sb.append("  parameters*: JSON {key: {type, description, required}} | requirements: pip pkgs (one/line)\n");
         sb.append("  requires_network | has_side_effects | timeout: max secs (default 30)\n");
+        sb.append("  " + CriticAgent.FORCE + ": true creates it although an existing skill looks similar; "
+                + "say in the description how it differs.\n");
         sb.append("  credentials: comma-separated vault keys, auto-injected as env vars. NEVER pass values directly.\n");
         sb.append("  system_packages: space-separated apt pkg names \u2192 auto-installed in a container. Use for ANY needed OS binary or library.\n");
         sb.append("  container_image: Docker base image. Optional \u2014 system picks a sensible default and auto-recovers if unavailable.\n\n");

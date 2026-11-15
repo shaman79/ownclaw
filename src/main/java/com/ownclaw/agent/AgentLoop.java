@@ -1009,12 +1009,6 @@ public class AgentLoop {
             if (step == 0 && context.capabilityHint() != null) {
                 CapabilityResolver.CapabilityHint hint = context.capabilityHint();
 
-                log.info("Task {} step 1: deterministic skill_create from CapabilityResolver → '{}'",
-                        context.taskId(), hint.suggestedName());
-
-                statusEmitter.emitForTask(context.userId(), context.taskId(), StatusMessage.Type.STEP,
-                        "Creating skill '" + hint.suggestedName() + "' (auto-detected)...");
-
                 // Build skill_create params directly from the hint
                 Map<String, Object> skillParams = new HashMap<>();
                 skillParams.put("name", hint.suggestedName());
@@ -1035,6 +1029,27 @@ public class AgentLoop {
                         AgentAction.SKILL_CREATE, skillParams,
                         "CapabilityResolver detected missing " + hint.category()
                                 + " capability — creating skill deterministically");
+
+                // The resolver's skill passes the gate a model's skill_create passes (critique):
+                // this step never reaches the critique below. One the gate blocks -- a skill that
+                // exists covers it by name, so the resolver saw a gap where there is none -- is not
+                // made and not recorded: no model asked for it, so the model takes the task's
+                // first step itself, with every skill there to find.
+                CriticAgent.Verdict gate = critique(action, context);
+                if (!gate.allowed()) {
+                    log.info("Task {}: no deterministic skill_create of '{}' -- {}", context.taskId(),
+                            hint.suggestedName(), gate.blockReason());
+                    context.setCapabilityHint(null);
+                    step--; // the same step, taken by the model
+                    continue;
+                }
+
+                log.info("Task {} step 1: deterministic skill_create from CapabilityResolver → '{}'",
+                        context.taskId(), hint.suggestedName());
+
+                statusEmitter.emitForTask(context.userId(), context.taskId(), StatusMessage.Type.STEP,
+                        "Creating skill '" + hint.suggestedName() + "' (auto-detected)...");
+
                 // No model chose this step, so nothing was written beside it; its code is written
                 // on the cloud, or on the local model when the cloud is not available.
                 context.chat().step(step + 1, action, null, llmRouter.isLocal(llmRouter.selectProvider(context)));
@@ -1046,6 +1061,10 @@ public class AgentLoop {
                 }
 
                 AgentObservation obs = createSkill(action, context);
+                // Recorded as the loop's own step: unattended work whose model has run nothing may
+                // not answer yet, and a skill made before its first reply is nothing it ran.
+                obs = new AgentObservation(obs.tool(), obs.success(), obs.output(),
+                        Map.of(BY_THE_RESOLVER, true), obs.durationMs());
                 recordAndEmitObservation(context, action, obs, step + 1);
                 context.markProgress();
                 if (debug) {
@@ -1271,14 +1290,20 @@ public class AgentLoop {
             }
 
             // === CRITIQUE ===
-            // skill_manage and the registry's tools: the other special actions have no rules
-            // there. A call the critic blocks runs nothing (stepRanNothing).
-            CriticAgent.Verdict verdict = action.isSkillManage() || action.isFindTools() || !action.isSpecialAction()
-                    ? criticAgent.evaluate(action, context) : CriticAgent.Verdict.allow(List.of());
+            // skill_create, skill_manage, find_tools and the registry's tools: the other special
+            // actions have no rules there (critique). A call the critic blocks runs nothing
+            // (stepRanNothing).
+            CriticAgent.Verdict verdict = critique(action, context);
             if (!verdict.allowed()) {
                 log.warn("Task {} step {} blocked by critic: {}", context.taskId(), step + 1, verdict.blockReason());
                 if (debug) emitDebug(context, "CRITIC BLOCKED: " + verdict.blockReason());
-                AgentResult end = stepRanNothing(context, action, "BLOCKED: " + verdict.blockReason(), null, step, nothing);
+                // The skill a blocked skill_create is told to use instead is offered from the next
+                // step, as a match of find_tools is -- where skills are offered by TOOLS messages at
+                // all: a model can call only what it is offered.
+                if (verdict.instead() != null && context.toolsAdded() != null) {
+                    context.addTaskTools(List.of(verdict.instead()));
+                }
+                AgentResult end = stepRanNothing(context, action, BLOCKED + verdict.blockReason(), null, step, nothing);
                 if (end != null) return end;
                 continue;
             }
@@ -1652,6 +1677,30 @@ public class AgentLoop {
         }
     }
 
+    /**
+     * The critic's verdict on an action: skill_create, skill_manage, find_tools and the registry's
+     * tools are its to judge; the other special actions have no rules there.
+     * <p>
+     * skill_create was not among them, so the critic's rule against a near-duplicate of a skill
+     * that exists (its compose-before-create gate) had never once been asked. Every skill_create
+     * is asked here, before any code is written, whatever protocol it came by -- but for one whose
+     * name no skill may have: a name that is none, or a variant of an existing skill
+     * (web_fetch_v2). createSkill refuses those in SkillManager's own words, which say what to do
+     * instead, and the gate's way out, force, could not help them.
+     */
+    private CriticAgent.Verdict critique(AgentAction action, AgentContext context) {
+        boolean judged = action.isSkillCreate()
+                ? skillManager.nameRefusal(str(action.params(), "name")) == null
+                : action.isSkillManage() || action.isFindTools() || !action.isSpecialAction();
+        return judged ? criticAgent.evaluate(action, context) : CriticAgent.Verdict.allow(List.of());
+    }
+
+    /**
+     * Marks the skill_create the loop ran at a task's first step for the capability resolver: no
+     * model chose it, so it is not work the task's model has done (ThinkingEngine#nothingRanYet).
+     */
+    static final String BY_THE_RESOLVER = "byTheResolver";
+
     /** The steps in a row that ran nothing, as {@link #stepRanNothing} counts them. */
     private static final class RunOfNothing {
         /** Steps in a row that ran nothing; a step that ran sets it back to 0. */
@@ -1760,6 +1809,9 @@ public class AgentLoop {
                 + times(steps - failedCalls) + ", and the call to it failed " + times(failedCalls) + last + ".";
     }
 
+    /** How the step of a call the critic blocked begins: nothing of the call ran. */
+    static final String BLOCKED = "BLOCKED: ";
+
     /** Where a failed skill_create's observation keeps its own error, apart from the earlier ones. */
     static final String SKILL_CREATE_ERROR = "skillCreateError";
 
@@ -1776,14 +1828,17 @@ public class AgentLoop {
     /**
      * What a skill_create that failed is told beyond its own error when skill_create has already
      * failed for the same name in this task: each earlier attempt's error, whole and in order, so
-     * the model changes the approach instead of the wording. Null when there is none.
+     * the model changes the approach instead of the wording. Null when there is none. A skill_create
+     * the critic blocked is none of them: no code was written for it, and the forced creation that
+     * follows a block has not failed before.
      */
     static String earlierAttempts(AgentTrajectory trajectory, String name) {
         if (name == null) return null;
         var errors = new ArrayList<String>();
         for (var turn : trajectory.turns()) {
             if (turn.action().isSkillCreate() && !turn.observation().success()
-                    && name.equals(String.valueOf(turn.action().params().get("name")))) {
+                    && name.equals(String.valueOf(turn.action().params().get("name")))
+                    && !turn.observation().output().startsWith(BLOCKED)) {
                 // Its own error, without the earlier ones it was told of: those are listed here.
                 Object own = turn.observation().structured() == null ? null
                         : turn.observation().structured().get(SKILL_CREATE_ERROR);
@@ -2908,7 +2963,11 @@ public class AgentLoop {
         long startMs = System.currentTimeMillis();
         String result = skillManager.nameRefusal(str(action.params(), "name"));
         if (result == null) {
-            Codegen code = generateSkillCode(action.params(), context);
+            // Without 'force': the duplicate gate has read it (CriticAgent), and it is no part of
+            // the skill -- not of what its code is written from, nor of what SkillManager is handed.
+            Map<String, Object> spec = new HashMap<>(action.params());
+            spec.remove(CriticAgent.FORCE);
+            Codegen code = generateSkillCode(spec, context);
             result = code.error() != null ? code.error()
                     : skillManager.createSkill(code.params(), code.asWritten(), context.userId(), context::isCancelled,
                             () -> waitingForSkill(context, str(action.params(), "name")));
