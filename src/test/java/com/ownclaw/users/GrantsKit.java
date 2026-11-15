@@ -93,6 +93,20 @@ public final class GrantsKit {
         jdbc.update("INSERT INTO users (id, display_name) VALUES (?, ?)", id, "Account " + id);
     }
 
+    /**
+     * An account that can log in, made at {@code createdAt}: the oldest of them is the owner, as
+     * whoever set the instance up is (AuthService#ownerId).
+     */
+    public static void account(JdbcTemplate jdbc, String id, String createdAt) {
+        jdbc.update("INSERT INTO users (id, display_name, password_hash, created_at) VALUES (?, ?, 'no-real-hash', ?)",
+                id, "Account " + id, createdAt);
+    }
+
+    /** The real AuthService over {@code jdbc}: who the owner is, as the application decides it. */
+    public static AuthService accounts(JdbcTemplate jdbc) {
+        return new AuthService(jdbc, new UserRepository(jdbc), new OwnClawConfig());
+    }
+
     /** Every row of credential_grants, as {@code user skill CREDENTIAL type}, in that order. */
     public static List<String> rows(JdbcTemplate jdbc) {
         return jdbc.queryForList("SELECT user_id || ' ' || skill_name || ' ' || credential || ' ' || grant_type "
@@ -194,12 +208,22 @@ public final class GrantsKit {
         /** An environment service that sets nothing up: every skill runs on "python3", and an install is only kept. */
         public final PythonEnvironmentService python;
         private final CredentialVault vault;
+        private final AuthService accounts;
 
         /** @param root where the skills directory is; made by the first skill, not before */
         public Skills(Path root, ToolRegistry tools, CredentialVault vault) {
+            this(root, tools, vault, null);
+        }
+
+        /**
+         * @param accounts who the owner is, for the skill manager and the registry; null for a test
+         *                 without accounts, where nobody is told apart
+         */
+        public Skills(Path root, ToolRegistry tools, CredentialVault vault, AuthService accounts) {
             this.generated = root.resolve("skills/generated");
             this.tools = tools;
             this.vault = vault;
+            this.accounts = accounts;
             config.getSkills().setGeneratedPath(generated.toString());
             python = new PythonEnvironmentService(config, JailTestKit.off()) {
                 @Override
@@ -230,12 +254,14 @@ public final class GrantsKit {
                 }
             };
             registry = registry();
-            manager = new SkillManager(registry, tools, config, launches, python, null, null);
+            manager = new SkillManager(registry, tools, config, launches, python, null, accounts);
         }
 
-        /** Another registry over the same directory, tools and vault, not started: what a restart makes. */
+        /** Another registry over the same directory, tools, vault and accounts, not started: what a restart makes. */
         public DynamicSkillRegistry registry() {
-            return new DynamicSkillRegistry(config, tools, launches, null, python, vault, null);
+            var made = new DynamicSkillRegistry(config, tools, launches, null, python, vault, null);
+            if (accounts != null) made.setAuthService(accounts);
+            return made;
         }
 
         /**
@@ -243,21 +269,40 @@ public final class GrantsKit {
          * list, or one string -- through the real skill manager; the skill it registered.
          */
         public DynamicSkill create(String name, Object credentials) {
+            String said = create(null, name, credentials);
+            if (said.startsWith("ERROR")) throw new AssertionError(said);
+            return registry.getDynamic(name).orElseThrow();
+        }
+
+        /**
+         * skill_create of {@code name} for a task of {@code requester}'s -- null for the owner's
+         * pages and maintenance, which are no account's task -- and what the skill manager answered.
+         */
+        public String create(String requester, String name, Object credentials) {
+            return manager.createSkill(spec(name, credentials), requester, () -> false, () -> {});
+        }
+
+        /** What a skill_create of {@code name} is handed: its description, its code, and what it declares. */
+        public static Map<String, Object> spec(String name, Object credentials) {
             var params = new LinkedHashMap<String, Object>();
             params.put("name", name);
             params.put("description", "Test skill " + name + ".");
             params.put("parameters", "{}");
             params.put("code", "def run(params):\n    return {'output': 'ran'}\n");
             if (credentials != null) params.put("credentials", credentials);
-            String said = manager.createSkill(params);
-            if (said.startsWith("ERROR")) throw new AssertionError(said);
-            return registry.getDynamic(name).orElseThrow();
+            return params;
         }
 
         /** The files of a skill written where a start finds them; nothing is registered. */
         public Path onDisk(String name, String credentialsYaml) throws IOException {
+            return onDisk(name, null, credentialsYaml);
+        }
+
+        /** {@link #onDisk(String, String)}, of a skill whose SKILL.yaml names {@code author} as the account that wrote it. */
+        public Path onDisk(String name, String author, String credentialsYaml) throws IOException {
             Path dir = Files.createDirectories(generated.resolve(name));
-            Files.writeString(dir.resolve("SKILL.yaml"), "name: " + name + "\ndescription: Test skill " + name + ".\n"
+            Files.writeString(dir.resolve("SKILL.yaml"), "name: " + name + "\n"
+                    + (author == null ? "" : "author: " + author + "\n") + "description: Test skill " + name + ".\n"
                     + (credentialsYaml == null ? "" : "credentials: " + credentialsYaml + "\n"));
             Files.writeString(dir.resolve("skill.py"), "def run(params):\n    return {'output': 'ran'}\n");
             return dir;

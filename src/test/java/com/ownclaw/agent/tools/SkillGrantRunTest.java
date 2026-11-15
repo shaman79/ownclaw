@@ -219,8 +219,10 @@ class SkillGrantRunTest {
     // ───────────────────────── a skill's name and a credential's name (R7) ─────────────────────────
 
     @Test
-    @DisplayName("a skill written again under its name keeps its grants; a credential it declares anew waits for a grant of its own, and until then the whole skill is refused")
+    @DisplayName("a skill written again under its name -- here by maintenance, as by the owner -- keeps its grants; a credential it declares anew waits for a grant of its own, and until then the whole skill is refused")
     void rewrittenKeepsItsGrantsAndANewCredentialWaits() {
+        // Written again by another account than the owner, every other account's grant ends:
+        // GrantsEndWithTheSkillTest.
         skills.create("mailer", List.of("SMTP_PASS"));
         grants.grant("ann", "mailer", List.of("SMTP_PASS"));
 
@@ -244,19 +246,35 @@ class SkillGrantRunTest {
     }
 
     @Test
-    @DisplayName("a skill deleted and made again under its name keeps its grants; another skill declaring the same credential has none")
+    @DisplayName("a grant ends with the skill it was given to: deleting the skill ends every account's grants of it, and a skill made under its name afterwards is another skill, not started until it is granted itself")
     void deletedAndMadeAgain() {
+        // The rule changed with the reviews of the release. Until then a grant was for a name
+        // alone and outlived its skill, so whatever was made under a deleted skill's name next
+        // -- by any account -- read what the deleted one had been allowed.
         skills.create("mailer", List.of("SMTP_PASS"));
+        skills.create("postman", List.of("SMTP_PASS"));
         grants.grant("ann", "mailer", List.of("SMTP_PASS"));
+        grants.grant("bob", "mailer", List.of("SMTP_PASS"));
+        grants.grant("ann", "postman", List.of("SMTP_PASS"));
+
         assertEquals("Skill 'mailer' has been permanently deleted.", skills.manager.deleteSkill("mailer"));
-        assertEquals(List.of("ann mailer SMTP_PASS permanent"), GrantsKit.rows(jdbc), "deleting a skill takes no grant back");
+        assertEquals(List.of("ann postman SMTP_PASS permanent"), GrantsKit.rows(jdbc),
+                "every account's grant of the deleted skill, and no other skill's");
 
         DynamicSkill again = skills.create("mailer", List.of("SMTP_PASS"));
-        DynamicSkill other = skills.create("postman", List.of("SMTP_PASS"));
+        vault.decrypted.clear();
+        ToolResult refused = GrantsKit.run(again, "ann");
+        assertFalse(refused.success(), "the new skill ran on what the deleted one was granted");
+        assertTrue(refused.output().contains("`/grant mailer SMTP_PASS`"), refused.output());
+        assertEquals(List.of(), skills.launches.runs());
+        assertEquals(List.of(), vault.decrypted);
 
-        assertTrue(GrantsKit.run(again, "ann").success());
-        assertFalse(GrantsKit.run(other, "ann").success(), "a grant is for the skill's name");
-        assertEquals(1, skills.launches.runs().size());
+        grants.grant("ann", "mailer", List.of("SMTP_PASS"));
+        assertTrue(GrantsKit.run(again, "ann").success(), "granted itself, it runs");
+        assertTrue(GrantsKit.run(skills.registry.getDynamic("postman").orElseThrow(), "ann").success());
+        assertEquals(2, skills.launches.runs().size());
+        // Mutation: a delete that leaves the grants behind -> ann's and bob's rows stay, though the
+        // skill made next starts without them all the same (its making ends what was left).
     }
 
     // ───────────────────────── names (the adversarial pass) ─────────────────────────

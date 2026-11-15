@@ -132,7 +132,11 @@ class VaultReadersInventoryTest {
      * @param name a regular expression for what stands before the parenthesis
      */
     private static Map<String, List<String>> every(String name) throws IOException {
-        Pattern call = Pattern.compile("(?<![A-Za-z0-9_$])" + name + "\\s*\\(");
+        return everyMatch(Pattern.compile("(?<![A-Za-z0-9_$])" + name + "\\s*\\("));
+    }
+
+    /** By file, what stands between the parentheses after each match of {@code call}, which ends at the opening one. */
+    private static Map<String, List<String>> everyMatch(Pattern call) throws IOException {
         var out = new TreeMap<String, List<String>>();
         for (Path file : javaFiles()) {
             String src = code(file, true);
@@ -149,6 +153,7 @@ class VaultReadersInventoryTest {
     private static final String SKILL = "com/ownclaw/agent/tools/DynamicSkill.java";
     private static final String SKILL_MANAGER = "com/ownclaw/agent/SkillManager.java";
     private static final String LOOP = "com/ownclaw/agent/AgentLoop.java";
+    private static final String REGISTRY = "com/ownclaw/agent/tools/DynamicSkillRegistry.java";
     private static final String COMMANDS = "com/ownclaw/interfaces/CommandHandler.java";
 
     private static final String READ_IT = " Read the call: a value of the vault goes to a skill through "
@@ -212,9 +217,15 @@ class VaultReadersInventoryTest {
                 GRANTS, List.of("String userId, String skill, Collection<String> keys"),   // its declaration
                 COMMANDS, List.of("userId, skill, keys")),                                  // /grant
                 every("grant"), "A grant is made by its account, in a command it sends: nothing a model can call makes one.");
+        // The one-time grant has two forms since the reviews of the release: for every holder, and
+        // -- what the registry asks -- with whose skill each is, so that another account's skill is
+        // granted to its author alone. The first only hands on to the second, restricting nobody.
         assertEquals(Map.of(
-                GRANTS, List.of("Map<String, ? extends Collection<String>> declared"),     // its declaration
-                "com/ownclaw/agent/tools/DynamicSkillRegistry.java", List.of("declared")),  // init(), once
+                GRANTS, List.of(
+                        "Map<String, ? extends Collection<String>> declared",                                // for every holder: its declaration
+                        "declared, Map.of()",                                                                 // ... asking the one below
+                        "Map<String, ? extends Collection<String>> declared, Map<String, String> onlyFor"),  // by author: its declaration
+                REGISTRY, List.of("declared, onlyFor")),                                                      // keepGranted(), at a start
                 every("grantExisting"), "What worked before the check is granted once, at the first start.");
 
         // The rows themselves: written nowhere but in the service.
@@ -240,7 +251,36 @@ class VaultReadersInventoryTest {
                 "com/ownclaw/interfaces/web/ChatWebSocketHandler.java");
         assertEquals(chats, holders, "who holds a CommandHandler");
         assertEquals(Map.of(chats.get(0), 1L, chats.get(1), 1L), callers, "who hands it a message");
-        // Mutation: the loop grants what a skill waits for (credentialVault.grants().grant(...)) -> listed, and not allowed.
+        // Mutations: the loop grants what a skill waits for (credentialVault.grants().grant(...)) -> listed,
+        // and not allowed; the registry asking the one-time grant for every holder -> its call is another.
+    }
+
+    @Test
+    @DisplayName("a grant is taken back by its account's /revoke, or ends with its skill: for every account at once only where the skill manager deletes a skill, makes one under a free name, or writes another account's again")
+    void aGrantIsEndedWithItsSkillByTheSkillManagerAlone() throws IOException {
+        assertEquals(Map.of(
+                GRANTS, List.of("String userId, String skill, Collection<String> keys"),   // its declaration
+                COMMANDS, List.of("userId, skill, keys")),                                  // /revoke
+                every("revoke"), "An account takes back its own grants, in a command it sends.");
+
+        // Everyone's grants of a skill at once (CredentialGrantService#end): through the registry's
+        // endGrants, which the skill manager calls where a skill's code ends or changes hands.
+        assertEquals(Map.of(
+                REGISTRY, List.of("String skill, String keep"),                             // its declaration
+                // A skill made under a name no skill held: whatever was left under it. Written again
+                // by another account than the owner: everyone's but that account's. Deleted: all.
+                SKILL_MANAGER, List.of("name, null", "name, requester", "name, null")),
+                every("endGrants"), "Who ends the grants of a skill for every account: read the call. Not a retirement, "
+                        + "nor a restore, nor anything a model can call but through skill_create and skill_manage.");
+        // And no other way to the rows: every call of something's end( that is handed two things, as
+        // the service's is (a matcher's end(), a model call's end(progress) are none).
+        Map<String, List<String>> ends = everyMatch(Pattern.compile("\\.\\s*end\\s*\\("));
+        ends.values().forEach(calls -> calls.removeIf(arguments -> arguments.isEmpty() || split(arguments).size() != 2));
+        ends.values().removeIf(List::isEmpty);
+        assertEquals(Map.of(REGISTRY, List.of("skill, keep")), ends,
+                "CredentialGrantService#end is called by DynamicSkillRegistry#endGrants alone.");
+        // Mutations: a retirement ends the skill's grants -> a second endGrants in the registry;
+        // deleting a credential ends grants by itself (grants.end(...) in the vault) -> listed, and not allowed.
     }
 
     @Test

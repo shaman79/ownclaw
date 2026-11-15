@@ -268,20 +268,41 @@ class GrantCommandsTest {
     }
 
     @Test
-    @DisplayName("/revoke works for a skill that no longer exists: what it was granted is still listed, and can be taken back")
+    @DisplayName("/revoke works for a skill that is no longer registered -- retired, set aside -- and left its grants: they are still listed, and taken back by its name, typed in any case")
     void revokeForASkillThatIsGone() {
+        // The rule changed with the reviews of the release: a deleted skill's grants end with it
+        // (aDeletedSkillLeavesNothingToRevoke), so what is left to take back is what a skill left
+        // that was retired or set aside -- kept, for when it is brought back.
         say("ann", "/grant mailer");
-        skills.manager.deleteSkill("mailer");
+        assertTrue(skills.registry.retire("mailer", "not used for a year").isPresent());
         assertEquals("Skill not found: mailer", say("ann", "/grant mailer"));
         assertTrue(say("ann", "/grants").contains("mailer: SMTP_PASS, SMTP_USER"), say("ann", "/grants"));
 
-        String said = say("ann", "/revoke mailer SMTP_PASS");
+        // No registered skill to find the name by: it is read in lower case, as every skill's name is.
+        String said = say("ann", "/revoke Mailer SMTP_PASS");
         assertTrue(said.contains("'mailer' may no longer read: SMTP_PASS."), said);
-        assertTrue(say("ann", "/revoke mailer").contains("'mailer' may no longer read: SMTP_USER."));
+        assertTrue(say("ann", "/REVOKE MAILER").contains("'mailer' may no longer read: SMTP_USER."));
 
         assertEquals(List.of(), rows());
         assertFalse(say("ann", "/grants").contains("mailer:"), say("ann", "/grants"));
-        // Mutation: /revoke of a name no registered skill has does nothing -> the grants of a deleted skill stay.
+        // Mutations: /revoke of a name no registered skill has does nothing -> the grants a retired
+        // skill left stay; the name of a skill that is gone taken as typed -> 'Mailer' had been granted nothing.
+    }
+
+    @Test
+    @DisplayName("a deleted skill leaves nothing to revoke: its grants ended with it, for every account, and /grants no longer lists it")
+    void aDeletedSkillLeavesNothingToRevoke() {
+        say("ann", "/grant mailer");
+        say("bob", "/grant mailer");
+        say("ann", "/grant mail_digest");
+
+        skills.manager.deleteSkill("mailer");
+
+        assertEquals(List.of("ann mail_digest IMAP_PASS permanent"), rows(), "the deleted skill's grants, and no other's");
+        assertFalse(say("ann", "/grants").contains("mailer"), say("ann", "/grants"));
+        assertEquals("'mailer' had been granted nothing.", say("ann", "/revoke mailer"));
+        assertEquals("'mailer' had been granted nothing.", say("bob", "/revoke mailer"));
+        // Mutation: a delete that leaves the grants behind -> they are listed, and a skill made under the name next would read them.
     }
 
     @Test
