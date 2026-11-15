@@ -304,6 +304,22 @@ class CredentialGrantsTest {
         }
     }
 
+    @Test
+    @DisplayName("the vault hands no skill the link-signing secret, not even with a row that says it was granted: nothing is decrypted, and nothing else is handed over with it")
+    void aRowForTheLinkSecretHandsNothingOver() {
+        vault.storeCredential("ann", CredentialVault.LINK_SECRET, "the-signing-secret-0001");
+        // A row of before grants were checked, when /grant took any name.
+        grants.grant("ann", "mailer", List.of(CredentialVault.LINK_SECRET, "SMTP_PASS"));
+        vault.decrypted.clear();
+
+        var handed = vault.forSkill("ann", "mailer", List.of("SMTP_PASS", " guardian_link_secret "));
+
+        assertEquals(Map.of(), handed.values(), "not the granted password either: all or nothing");
+        assertEquals(List.of(CredentialVault.LINK_SECRET), handed.ungranted());
+        assertEquals(List.of(), vault.decrypted, "nothing was read from the vault's values");
+        // Mutation: forSkill without its own forSkills check -> the secret is decrypted and handed over.
+    }
+
     // ───────────────────────── foreign keys on, as in production (R8) ─────────────────────────
 
     @Test

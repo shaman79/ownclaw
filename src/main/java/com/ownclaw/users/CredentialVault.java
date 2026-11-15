@@ -141,6 +141,11 @@ public class CredentialVault {
      * declares.
      */
     public Handover forSkill(String userId, String skill, List<String> keys) {
+        // Never the secret that signs chat links (forSkills), whatever a row says: before grants
+        // were checked /grant took any name, so a row for it may be there. Decided here too, not
+        // only by the one caller there is.
+        List<String> never = keys.stream().filter(k -> !forSkills(k)).map(CredentialGrantService::key).distinct().toList();
+        if (!never.isEmpty()) return new Handover(Map.of(), never, List.of());
         List<String> ungranted = grants.ungranted(userId, skill, keys);
         if (!ungranted.isEmpty()) {
             Set<String> stored = new HashSet<>(listCredentialKeys(userId));

@@ -35,8 +35,21 @@ class GrantChoicePageTest {
                 "an answer that arrives is drawn without the choices it came with: " + drawn);
         // A question's, and a saved row's after a reload, as before.
         assertTrue(page.contains("addChoices(addMsg('input_request', content, data.taskId, null, data.timestamp), data.choices);"));
-        assertTrue(page.contains("if (asked && type === 'input_request') addChoices(drawn, m.choices);"));
+        assertTrue(page.contains("if (offered.length && (type === 'input_request' || type === 'response')) addChoices(drawn, offered);"));
         // Mutation: the answer drawn alone, as before -> the command is text until the page is reloaded.
+    }
+
+    @Test
+    @DisplayName("a saved row whose only offers are commands is drawn as an answer, and a command's button is not done by the owner's next message")
+    void commandsAreNoAnswers() {
+        // Only an offer that is no command makes a saved row a question.
+        assertTrue(page.contains("var asked = offered.some(function(c) { return String(c).trim().charAt(0) !== '/'; });"));
+        // Commands are a group of their own, which the owner's next message leaves as it is.
+        assertTrue(page.contains("(String(choice).trim().charAt(0) === '/' ? commands : answers).push(choice);"));
+        assertTrue(page.contains("var group = node('div', offered === commands ? 'msg-choices commands' : 'msg-choices');"));
+        assertTrue(page.contains("messagesEl.querySelectorAll('.msg-choices:not(.retired):not(.commands)')"));
+        // Mutation: settleChoices over every group -> the granting command is greyed out by the next
+        // message although the skill still waits (the browser check's step 9 fails).
     }
 
     @Test
