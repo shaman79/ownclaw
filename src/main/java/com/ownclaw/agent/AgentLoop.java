@@ -1271,14 +1271,20 @@ public class AgentLoop {
             }
 
             // === CRITIQUE ===
-            // skill_manage and the registry's tools: the other special actions have no rules
-            // there. A call the critic blocks runs nothing (stepRanNothing).
-            CriticAgent.Verdict verdict = action.isSkillManage() || action.isFindTools() || !action.isSpecialAction()
-                    ? criticAgent.evaluate(action, context) : CriticAgent.Verdict.allow(List.of());
+            // skill_create, skill_manage, find_tools and the registry's tools: the other special
+            // actions have no rules there (critique). A call the critic blocks runs nothing
+            // (stepRanNothing).
+            CriticAgent.Verdict verdict = critique(action, context);
             if (!verdict.allowed()) {
                 log.warn("Task {} step {} blocked by critic: {}", context.taskId(), step + 1, verdict.blockReason());
                 if (debug) emitDebug(context, "CRITIC BLOCKED: " + verdict.blockReason());
-                AgentResult end = stepRanNothing(context, action, "BLOCKED: " + verdict.blockReason(), null, step, nothing);
+                // The skill a blocked skill_create is told to use instead is offered from the next
+                // step, as a match of find_tools is -- where skills are offered by TOOLS messages at
+                // all: a model can call only what it is offered.
+                if (verdict.instead() != null && context.toolsAdded() != null) {
+                    context.addTaskTools(List.of(verdict.instead()));
+                }
+                AgentResult end = stepRanNothing(context, action, BLOCKED + verdict.blockReason(), null, step, nothing);
                 if (end != null) return end;
                 continue;
             }
@@ -1652,6 +1658,24 @@ public class AgentLoop {
         }
     }
 
+    /**
+     * The critic's verdict on an action: skill_create, skill_manage, find_tools and the registry's
+     * tools are its to judge; the other special actions have no rules there.
+     * <p>
+     * skill_create was not among them, so the critic's rule against a near-duplicate of a skill
+     * that exists (its compose-before-create gate) had never once been asked. Every skill_create
+     * is asked here, before any code is written, whatever protocol it came by -- but for one whose
+     * name no skill may have: a name that is none, or a variant of an existing skill
+     * (web_fetch_v2). createSkill refuses those in SkillManager's own words, which say what to do
+     * instead, and the gate's way out, force, could not help them.
+     */
+    private CriticAgent.Verdict critique(AgentAction action, AgentContext context) {
+        boolean judged = action.isSkillCreate()
+                ? skillManager.nameRefusal(str(action.params(), "name")) == null
+                : action.isSkillManage() || action.isFindTools() || !action.isSpecialAction();
+        return judged ? criticAgent.evaluate(action, context) : CriticAgent.Verdict.allow(List.of());
+    }
+
     /** The steps in a row that ran nothing, as {@link #stepRanNothing} counts them. */
     private static final class RunOfNothing {
         /** Steps in a row that ran nothing; a step that ran sets it back to 0. */
@@ -1760,6 +1784,9 @@ public class AgentLoop {
                 + times(steps - failedCalls) + ", and the call to it failed " + times(failedCalls) + last + ".";
     }
 
+    /** How the step of a call the critic blocked begins: nothing of the call ran. */
+    static final String BLOCKED = "BLOCKED: ";
+
     /** Where a failed skill_create's observation keeps its own error, apart from the earlier ones. */
     static final String SKILL_CREATE_ERROR = "skillCreateError";
 
@@ -1776,14 +1803,17 @@ public class AgentLoop {
     /**
      * What a skill_create that failed is told beyond its own error when skill_create has already
      * failed for the same name in this task: each earlier attempt's error, whole and in order, so
-     * the model changes the approach instead of the wording. Null when there is none.
+     * the model changes the approach instead of the wording. Null when there is none. A skill_create
+     * the critic blocked is none of them: no code was written for it, and the forced creation that
+     * follows a block has not failed before.
      */
     static String earlierAttempts(AgentTrajectory trajectory, String name) {
         if (name == null) return null;
         var errors = new ArrayList<String>();
         for (var turn : trajectory.turns()) {
             if (turn.action().isSkillCreate() && !turn.observation().success()
-                    && name.equals(String.valueOf(turn.action().params().get("name")))) {
+                    && name.equals(String.valueOf(turn.action().params().get("name")))
+                    && !turn.observation().output().startsWith(BLOCKED)) {
                 // Its own error, without the earlier ones it was told of: those are listed here.
                 Object own = turn.observation().structured() == null ? null
                         : turn.observation().structured().get(SKILL_CREATE_ERROR);
