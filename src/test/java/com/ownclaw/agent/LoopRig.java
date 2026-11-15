@@ -144,6 +144,11 @@ final class LoopRig {
         volatile Function<String, String> files = name -> "ERROR: '" + name + "' is not a skill or does not exist.";
         volatile Function<String, String> syntax = code -> null;
         volatile Function<Map<String, Object>, String> create = p -> "Skill '" + p.get("name") + "' created.";
+        /**
+         * A test's own write of a skill, told which account's task asks for it: the real skill
+         * manager behind the loop's, where what a write does is the test. Unset, {@link #create} answers.
+         */
+        volatile java.util.function.BiFunction<Map<String, Object>, String, String> createFor = null;
         /** Where the real Python that puts values back into code is set up, on first use. */
         private final Path pythonDir;
         private volatile SkillManager python;
@@ -182,11 +187,16 @@ final class LoopRig {
         @Override String checkPythonSyntax(String code) { return syntax.apply(code); }
         @Override public String createSkill(Map<String, Object> params, String requester,
                                             java.util.function.BooleanSupplier stopped,
-                                            Runnable waiting) { return create.apply(params); }
+                                            Runnable waiting) { return write(params, requester); }
         @Override public String createSkill(Map<String, Object> params, String kept, String requester,
                                             java.util.function.BooleanSupplier stopped, Runnable waiting) {
             if (kept != null) keptAsWritten.add(kept);
-            return create.apply(params);
+            return write(params, requester);
+        }
+
+        private String write(Map<String, Object> params, String requester) {
+            var forAccount = createFor;
+            return forAccount != null ? forAccount.apply(params, requester) : create.apply(params);
         }
     }
 
