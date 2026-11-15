@@ -126,7 +126,8 @@ public record AgentAction(
         for (Object item : items) {
             if (item instanceof String || item instanceof Number || item instanceof Boolean) {
                 String choice = item.toString().strip();
-                if (!choice.isEmpty() && !CommandHandler.isCommand(choice) && !CommandHandler.misplacedSecret(choice)) {
+                if (!choice.isEmpty() && !CommandHandler.isCommand(choice) && !CommandHandler.readsAsCommand(choice)
+                        && !CommandHandler.misplacedSecret(choice)) {
                     choices.add(choice);
                 }
             }

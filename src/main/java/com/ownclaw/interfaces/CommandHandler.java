@@ -341,6 +341,36 @@ public class CommandHandler {
     private static final Pattern AFTER_COMMAND_WORD = Pattern.compile(
             "^(" + Blank.NONE + "+)" + Blank.ANY + "+", Pattern.UNICODE_CHARACTER_CLASS);
 
+    /**
+     * Whether a text would be a command once what shows as nothing in front of it is gone: more
+     * than {@link #unblanked} takes off -- a filler letter that is drawn as a blank, a mark with
+     * nothing to sit on. Asked of the answers a model offers to click ({@code AgentAction#choices}):
+     * a chat client that drops such a character from a tapped key would send the rest, and the
+     * rest would be a command nobody typed.
+     */
+    public static boolean readsAsCommand(String text) {
+        if (text == null) return false;
+        for (int i = 0; i < text.length(); ) {
+            int c = text.codePointAt(i);
+            i += Character.charCount(c);
+            if (c == '/') return true;
+            if (!showsAsNothing(c)) return false;
+        }
+        return false;
+    }
+
+    private static boolean showsAsNothing(int c) {
+        if (Character.isWhitespace(c) || Character.isSpaceChar(c) || Character.isISOControl(c)) return true;
+        int type = Character.getType(c);
+        if (type == Character.FORMAT || type == Character.NON_SPACING_MARK || type == Character.ENCLOSING_MARK
+                || type == Character.UNASSIGNED || type == Character.PRIVATE_USE) {
+            return true;
+        }
+        // Letters and symbols that are drawn as a blank: the Hangul fillers, the Braille blank,
+        // the Khmer inherent vowels.
+        return c == 0x115F || c == 0x1160 || c == 0x3164 || c == 0xFFA0 || c == 0x2800 || c == 0x17B4 || c == 0x17B5;
+    }
+
     /** Whether the text, {@link #unblanked}, is a slash command's: what each chat routes by. */
     public static boolean isCommand(String text) {
         String s = unblanked(text);
@@ -1199,7 +1229,7 @@ public class CommandHandler {
         if (parts.length == 0) return "Usage: `/revoke <skill> [KEY ...]` — with no key, everything it was granted.";
         // By the name as it is registered, or as typed: what a skill that is gone was granted can still be taken back.
         String skill = toolRegistry.find(parts[0]).or(() -> toolRegistry.find(parts[0].toLowerCase(Locale.ROOT)))
-                .map(com.ownclaw.agent.tools.Tool::name).orElse(parts[0]);
+                .map(com.ownclaw.agent.tools.Tool::name).orElse(parts[0].toLowerCase(Locale.ROOT));
         List<String> keys = java.util.Arrays.asList(parts).subList(1, parts.length);
         List<String> revoked = credentialGrants.revoke(userId, skill, keys);
         if (revoked.isEmpty()) {

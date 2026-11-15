@@ -996,7 +996,7 @@ Every Python process OwnClaw starts on the host for skills -- a skill's run, its
 
 ### 8.3 Credential Grants
 
-A skill is code the agent wrote, and declaring a credential in SKILL.yaml is not being allowed to read it. The vault hands a skill a credential only when the user the run is for **granted that skill that credential**. One it was not granted is not decrypted, and with one refused the skill is handed nothing and is not started: a skill does not run on half of what it declares.
+A skill is code the agent wrote, and declaring a credential in SKILL.yaml is not being allowed to read it. The vault hands a skill a credential only when the user the run is for **granted that skill that credential**. One it was not granted is not read from the vault for it, and with one refused the skill is handed nothing and is not started: a skill does not run on half of what it declares.
 
 **Where it is decided.** `CredentialVault.forSkill` is the one place a skill's credentials are read, and it asks `CredentialGrantService` (table `credential_grants`: user, skill name, credential name). Whoever calls a skill asks first (`Tool.ungranted`: the cloud model's own call in `AgentLoop`, a delegated call in `LocalExecutor`), so a refused call runs nothing and records no result, and is not taken for a failure of the skill to repair.
 
@@ -1017,7 +1017,9 @@ A skill is code the agent wrote, and declaring a credential in SKILL.yaml is not
 
 **What a grant covers.** A skill's name and a credential's name, for one user. A skill rewritten under its name keeps what it was granted — a repair must leave it working — so a grant is trust in the skill as it will be, not in one version of its code. A credential a skill declares later is not granted with the rest, and until its user grants it the skill is not run.
 
-**Skills that existed before grants were checked.** They keep the credentials they were being handed: at the first start of that release each registered skill was granted, once, the credentials it declares, for every user whose vault held them. A skill made since is granted by its user or not at all.
+**When a grant ends.** With `/revoke`; when the skill is deleted; and when a skill is made under a name no skill holds any more, so a new skill starts with no grant whatever one of that name was granted before. When an account other than the owner writes a skill again, every other account's grant for it ends: its author could otherwise put any code under the owner's grant. Deleting a credential ends nothing: a credential stored later under that name is read by what was granted the name.
+
+**Skills that existed before grants were checked.** They keep the credentials they were being handed: at the first start of that release each registered skill was granted, once, the credentials it declares, for every user whose vault held them -- a skill another account than the owner wrote, for that account only. A skill made since is granted by its user or not at all.
 
 **Never handed to any skill**: `GUARDIAN_LINK_SECRET`, which signs the links that open the chat as verified (§8.2).
 
@@ -1027,7 +1029,7 @@ A skill is code the agent wrote, and declaring a credential in SKILL.yaml is not
 |--------|-----------|
 | Malicious skill code | SkillJail (bubblewrap), once bubblewrap is installed: the host read-only, the service's state hidden, only its own directory and its account's /tmp writable (§8.1); until then the systemd unit's limits |
 | Credential exfiltration | A skill reads only the credentials its user granted it (§8.3); with the jail on, the database and .env are hidden from it (§8.1). A skill that was granted a credential can send it anywhere its code chooses: the network is shared, not filtered |
-| Unauthorized credential access | A credential a skill was not granted is never decrypted for it, and the skill is not run (§8.3) |
+| Unauthorized credential access | A credential a skill was not granted is never handed to it, and the skill is not run (§8.3) |
 | Mentor generating credential-grabbing skills | A new skill reads no credential until its user grants it, in a command only they can send (§8.3). Not covered: a skill that already holds a grant, rewritten under its own name, keeps it |
 | Prompt injection via user input | Executor uses structured I/O, not raw string interpolation |
 | Mentor generating harmful skills | A new skill is checked for its syntax and that it imports and defines run(), inside the jail; what it does is not judged. The critic blocks duplicates of existing skills |

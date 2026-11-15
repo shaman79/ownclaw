@@ -377,6 +377,15 @@ public class SkillManager {
             // look-up of the skill found no such tool.
             dynamicSkillRegistry.register(skill);
             keepAsWritten(name, asWritten, code, requester);
+            // A grant was given to the code that was there. A name no skill held starts with
+            // none -- one deleted, retired or set aside may have left its grants behind -- and a
+            // skill written again by another account than the owner is everyone else's to grant
+            // again: its author could otherwise put any code under the owner's grant.
+            if (!isUpdate) {
+                dynamicSkillRegistry.endGrants(name, null);
+            } else if (requester != null && authService != null && !authService.isOwner(requester)) {
+                dynamicSkillRegistry.endGrants(name, requester);
+            }
 
             return "Skill '" + name + "' " + (isUpdate ? "updated" : "created") +
                     " and registered. It is now available as a tool.";
@@ -621,6 +630,8 @@ public class SkillManager {
         // the read lock to start. (Nor could one turn the delete on anything outside the
         // directory: deleting never follows a link below it -- see SkillJail.deleteTree.)
         dynamicSkillRegistry.unregister(name);
+        // Its grants go with it: a skill made under this name later is another skill.
+        dynamicSkillRegistry.endGrants(name, null);
 
         boolean dirGone = SkillJail.deleteTree(skill.skillDir());
         keepAsWritten(name, null, null, null);

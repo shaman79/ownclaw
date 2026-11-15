@@ -1226,7 +1226,8 @@ public class LocalExecutor {
             log.warn("Delegation step {}: '{}' not run — user {} has not granted it {}.", mine.size() + 1,
                     action.tool, parentContext.userId(), ungranted);
             parentContext.notAllowed(target.name());
-            return "Not run: " + com.ownclaw.users.CredentialGrantService.notAllowed(target.name(), ungranted);
+            return "Not run: " + com.ownclaw.users.CredentialGrantService.notAllowed(target.name(), ungranted,
+                    parentContext.credentialKeys());
         }
 
         // A change is attempted once per delegation, and made once per task. The cloud path

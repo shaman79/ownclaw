@@ -71,11 +71,20 @@ public class DynamicSkillRegistry {
         Path generatedDir = Path.of(config.getSkills().getGeneratedPath());
         if (!Files.isDirectory(generatedDir)) {
             log.info("No generated skills directory at {} — no dynamic skills loaded", generatedDir);
-        } else {
-            scan(generatedDir, new java.util.HashSet<>());
-            log.info("Loaded {} dynamic skill(s)", dynamicSkills.size());
+            keepGranted();
+            return;
         }
-        keepGranted();
+        boolean read = scan(generatedDir, new java.util.HashSet<>());
+        log.info("Loaded {} dynamic skill(s)", dynamicSkills.size());
+        // Not after a directory that could not be read: the grant is made once, for the skills
+        // found, and made for none it would leave every skill that holds a credential refused
+        // from the start that does read them. It stays asked for, and the next start makes it.
+        if (read) {
+            keepGranted();
+        } else {
+            log.error("The skills directory {} could not be read, so the credentials its skills were being "
+                    + "handed are not granted at this start: the next start that reads it grants them.", generatedDir);
+        }
     }
 
     /**
@@ -87,17 +96,59 @@ public class DynamicSkillRegistry {
     private void keepGranted() {
         if (credentialVault == null) return;
         var declared = new LinkedHashMap<String, List<String>>();
-        for (DynamicSkill skill : dynamicSkills.values()) declared.put(skill.name(), skill.requiredCredentials());
-        credentialVault.grants().grantExisting(declared);
+        // A skill another account than the owner wrote is that account's to write again, so it
+        // keeps that account's credentials and nobody else's. One with no author, from before
+        // authors were kept, is the owner's.
+        var onlyFor = new LinkedHashMap<String, String>();
+        for (DynamicSkill skill : dynamicSkills.values()) {
+            declared.put(skill.name(), skill.requiredCredentials());
+            String author = authorOf(skill.skillDir());
+            if (author != null && authService != null && !authService.isOwner(author)) onlyFor.put(skill.name(), author);
+        }
+        credentialVault.grants().grantExisting(declared, onlyFor);
     }
 
-    /** Load and register each skill in the directory; one a task writes or runs now is left as it is, named in {@code busy}. */
-    private void scan(Path generatedDir, java.util.Set<String> busy) {
+    /** Who is the owner: asked once, for the one-time grant ({@link #keepGranted}). Not there in a test without accounts. */
+    private com.ownclaw.users.AuthService authService;
+
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    public void setAuthService(@Lazy com.ownclaw.users.AuthService authService) {
+        this.authService = authService;
+    }
+
+    /** The account a skill's SKILL.yaml names as its author, or null: none named, or a file that does not read. */
+    private static String authorOf(Path skillDir) {
+        try {
+            Map<String, Object> yaml = yamlMapper.readValue(
+                    SkillJail.readAuthored(skillDir.resolve("SKILL.yaml")), new TypeReference<>() {});
+            Object author = yaml.get("author");
+            return author == null || author.toString().isBlank() ? null : author.toString();
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /**
+     * The grants of a skill's name end ({@link com.ownclaw.users.CredentialGrantService#end}): for
+     * whoever makes, rewrites or deletes skills, which has this registry and not the vault.
+     */
+    public void endGrants(String skill, String keep) {
+        if (credentialVault != null) credentialVault.grants().end(skill, keep);
+    }
+
+    /**
+     * Load and register each skill in the directory; one a task writes or runs now is left as it is, named in {@code busy}.
+     *
+     * @return whether the directory could be read
+     */
+    private boolean scan(Path generatedDir, java.util.Set<String> busy) {
         try (Stream<Path> dirs = Files.list(generatedDir)) {
             dirs.filter(Files::isDirectory)
                 .forEach(dir -> loadAndRegister(dir, busy));
-        } catch (IOException e) {
+            return true;
+        } catch (IOException | java.io.UncheckedIOException e) {
             log.error("Failed to scan generated skills directory: {}", e.getMessage());
+            return false;
         }
     }
 

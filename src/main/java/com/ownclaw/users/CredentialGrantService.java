@@ -137,6 +137,18 @@ public class CredentialGrantService {
      * @return how many grants were made
      */
     public int grantExisting(Map<String, ? extends Collection<String>> declared) {
+        return grantExisting(declared, Map.of());
+    }
+
+    /**
+     * {@link #grantExisting(Map)}, with whose skill each is: one that another account than the
+     * owner wrote is granted to that account alone. Its author can write it again whenever they
+     * like, so handing it the owner's credentials unasked would hand them to that account.
+     *
+     * @param onlyFor a skill's name with the one account it is granted to; a skill not named is
+     *                granted to every account that holds its credentials
+     */
+    public int grantExisting(Map<String, ? extends Collection<String>> declared, Map<String, String> onlyFor) {
         List<String> asked = jdbc.queryForList("SELECT value FROM system_settings WHERE key = ?", String.class, EXISTING);
         if (asked.isEmpty() || !PENDING.equals(asked.getFirst())) return 0;
         int made = 0;
@@ -145,11 +157,17 @@ public class CredentialGrantService {
             for (String name : skill.getValue()) {
                 if (CredentialVault.forSkills(name) && !key(name).isEmpty()) keys.add(key(name));
             }
+            String only = onlyFor.get(skill.getKey());
             for (String key : keys) {
+                // Only for an account there is: a vault row left by one that is gone would fail
+                // the whole statement on the grant's reference to its account -- OR IGNORE does
+                // not pass over that -- and with it this start, and every start after it.
                 made += jdbc.update("""
                         INSERT OR IGNORE INTO credential_grants (user_id, skill_name, credential, grant_type)
-                        SELECT user_id, ?, ?, ? FROM credential_vault WHERE credential_key = ?
-                        """, skill.getKey(), key, GRANTED, key);
+                        SELECT user_id, ?, ?, ? FROM credential_vault
+                        WHERE credential_key = ? AND user_id IN (SELECT id FROM users)
+                          AND (? IS NULL OR user_id = ?)
+                        """, skill.getKey(), key, GRANTED, key, only, only);
             }
         }
         jdbc.update("UPDATE system_settings SET value = 'done ' || datetime('now'), updated_at = datetime('now') "
@@ -158,6 +176,26 @@ public class CredentialGrantService {
                 + "once. From here a skill reads a credential only when its user granted it (/grant).",
                 declared.size(), made);
         return made;
+    }
+
+    /**
+     * The grants of a skill's name end: all of them, or all but {@code keep}'s. A grant is given
+     * to the code that was there. A name no skill held any more starts with none, whatever a
+     * skill of that name was once granted; and when another account than the owner writes a skill
+     * again, everyone else's grant was for what it replaced, and is theirs to give again.
+     *
+     * @param keep the account whose grants stay, or null for none
+     * @return how many grants ended
+     */
+    public int end(String skill, String keep) {
+        int ended = keep == null
+                ? jdbc.update("DELETE FROM credential_grants WHERE skill_name = ?", skill)
+                : jdbc.update("DELETE FROM credential_grants WHERE skill_name = ? AND user_id <> ?", skill, keep);
+        if (ended > 0) {
+            log.info("Credential grants ended: skill={}, {} grant(s){}", skill, ended,
+                    keep == null ? "" : " of accounts other than " + keep);
+        }
+        return ended;
     }
 
     /** The command that grants this skill these credentials: what its user sends, or clicks. */
@@ -170,15 +208,42 @@ public class CredentialGrantService {
      * credentials, and only they can.
      */
     public static String notAllowed(String skill, List<String> keys) {
+        return notAllowed(skill, keys, null);
+    }
+
+    /**
+     * {@link #notAllowed(String, List)}, saying which of them the vault does not hold either: its
+     * user stores those too, or the grant alone leaves the skill failing for want of them.
+     */
+    public static String notAllowed(String skill, List<String> keys, Collection<String> stored) {
+        List<String> missing = missing(keys, stored);
         return "'" + skill + "' has not been allowed to read " + String.join(", ", keys) + " from the vault. "
                 + "Only the user can allow it, by sending `" + grantCommand(skill, keys) + "` in the chat: the task's "
                 + "answer shows them that command. Nothing you can call allows it. Go on with what does not need "
-                + "this skill, and say that it waits for them.";
+                + "this skill, and say that it waits for them."
+                + (missing.isEmpty() ? "" : " Not in the vault yet either: " + String.join(", ", missing)
+                        + " -- they store each by typing /cred set KEY value; do not ask them to paste the value to you.");
     }
 
     /** The line a task's answer gets for a skill that was not run, for its user. */
     public static String asked(String skill, List<String> keys) {
+        return asked(skill, keys, null);
+    }
+
+    /** {@link #asked(String, List)}, saying which of them are not in the vault yet either. */
+    public static String asked(String skill, List<String> keys, Collection<String> stored) {
+        List<String> missing = missing(keys, stored);
         return "_🔑 " + skill + " was not run: you have not allowed it to read " + String.join(", ", keys)
-                + " from your vault. To allow it, send:_ `" + grantCommand(skill, keys) + "`";
+                + " from your vault. To allow it, send:_ `" + grantCommand(skill, keys) + "`"
+                + (missing.isEmpty() ? "" : "\n_Not in your vault yet: " + String.join(", ", missing)
+                        + ". Store each with_ `/cred set <KEY> <VALUE>`");
+    }
+
+    /** Those of {@code keys} that are not among the names a vault holds; none when what it holds is not known (null). */
+    private static List<String> missing(List<String> keys, Collection<String> stored) {
+        if (stored == null) return List.of();
+        var held = new HashSet<String>();
+        for (String name : stored) held.add(key(name));
+        return keys.stream().filter(k -> !held.contains(key(k))).toList();
     }
 }

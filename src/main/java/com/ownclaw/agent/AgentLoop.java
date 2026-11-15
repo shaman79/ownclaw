@@ -555,11 +555,14 @@ public class AgentLoop {
         try {
             var lines = new ArrayList<String>();
             var choices = new ArrayList<>(ended.choices());
+            // What the vault holds now, not at the task's start: a credential stored meanwhile is there.
+            List<String> stored = context.notAllowed().isEmpty() || credentialVault == null || context.userId() == null
+                    ? null : credentialVault.listCredentialKeys(context.userId());
             for (String skill : context.notAllowed()) {
                 List<String> still = toolRegistry.find(skill)
                         .map(tool -> tool.ungranted(context.userId())).orElse(List.of());
                 if (still.isEmpty()) continue;
-                lines.add(com.ownclaw.users.CredentialGrantService.asked(skill, still));
+                lines.add(com.ownclaw.users.CredentialGrantService.asked(skill, still, stored));
                 choices.add(com.ownclaw.users.CredentialGrantService.grantCommand(skill, still));
             }
             if (lines.isEmpty()) return ended;
@@ -1985,7 +1988,8 @@ public class AgentLoop {
                     context.taskId(), action.tool(), context.userId(), ungranted);
             context.notAllowed(tool.name());
             return AgentObservation.failure(action.tool(), "Not run: "
-                    + com.ownclaw.users.CredentialGrantService.notAllowed(tool.name(), ungranted), 0);
+                    + com.ownclaw.users.CredentialGrantService.notAllowed(tool.name(), ungranted,
+                            context.credentialKeys()), 0);
         }
 
         // A secret the filter removed is no value. The cloud reads a router's configuration with
