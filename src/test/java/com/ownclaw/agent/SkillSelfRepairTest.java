@@ -469,6 +469,27 @@ class SkillSelfRepairTest {
     }
 
     @Test
+    @DisplayName("a repair of a skill that has a near-duplicate beside it changes it all the same: the duplicate gate blocks no skill_create under a name that exists")
+    void aNearDuplicateBesideItDoesNotBlockARepair(@TempDir Path tmp) throws Exception {
+        // Three of four name tokens shared: were either name new, its skill_create would be blocked for the other.
+        String sibling = "daily_lunch_menu_fetcher";
+        assertTrue(CriticAgent.tokenOverlap(MENU, sibling) >= 0.6, "the premise: the gate takes them for duplicates");
+        fix = new Fix(tmp, skill(sibling, false, List.of(), false, new CopyOnWriteArrayList<>(),
+                p -> ToolResult.success(GOOD)));
+        fix.rig.queue.start();
+        fix.scriptMenu(true);
+        scriptFixAndCheck(fix.rig, Map.of("debug", true), verdict("It asks as a browser now; checked.", "passed"));
+        fix.unattended(TASK);
+        var row = fix.ended(fix.lastId());
+
+        assertEquals("fixed", row.get("outcome"), String.valueOf(row.get("report")));
+        assertEquals(1, fix.created.size(), fix.created.toString());
+        assertEquals(MENU, fix.created.get(0).get("name"));
+        // Mutation: skip only the name itself when the critic compares names, as before -> the
+        // repair's skill_create is blocked for the sibling, and the repair changes nothing.
+    }
+
+    @Test
     @DisplayName("checked through a delegation's exact call, as a cloud that is not given the skill runs it: fixed")
     void checkedThroughADelegation(@TempDir Path tmp) throws Exception {
         fix = new Fix(tmp);
