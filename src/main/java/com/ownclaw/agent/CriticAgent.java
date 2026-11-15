@@ -228,15 +228,47 @@ public class CriticAgent {
         }
 
         if (!proposed.isEmpty() && !forced) {
-            // First pass: is this a GENERALISATION of something that already exists? If an
-            // existing tool's name extends the proposed one — web_search_bikes when web_search
-            // is proposed — then the proposal is the broader capability, and creating it is the
-            // consolidation we want. Checking this first matters: the narrow sibling would
-            // otherwise block its own replacement by token overlap (web_search vs
-            // web_search_bikes scores 0.67), leaving the library permanently stuck with the
-            // specific version and no way to create the general one.
+            // How this task's model uses a skill that exists. On local-first work -- unattended,
+            // or a chat that prefers cost -- the cloud calls no skill: it names them to delegate,
+            // as find_tools says of its matches (AgentLoop#findTools). "Call it" was wrong there.
+            boolean delegates = context.offeredTools() != null;
+            // By name, so that the skill a block names does not depend on the order the registry
+            // happens to hold them in.
+            List<String> names = toolRegistry.names().stream().sorted().toList();
+
+            // 1. A narrowing: the proposed name extends an existing skill's. Asked first -- it
+            // used to be asked after "generalises" below, which let web_search_bikes through as
+            // the general form of web_search_bikes_cz while it narrows web_search. The longest
+            // name it extends is the nearest skill.
+            String narrowed = null;
+            for (String existing : names) {
+                if (proposed.startsWith(existing.toLowerCase() + "_")
+                        && (narrowed == null || existing.length() > narrowed.length())) {
+                    narrowed = existing;
+                }
+            }
+            if (narrowed != null) {
+                return Verdict.block("'" + proposed + "' is a narrower version of the existing "
+                        + "skill '" + narrowed + "', so nothing was created. "
+                        + (delegates ? "Name '" + narrowed + "' in delegate's 'tools' and state "
+                                + "the specifics in the goal: you do not call it yourself."
+                                : "Call '" + narrowed + "' and pass the specifics as "
+                                + "parameters: you can call it from your next step.")
+                        + " If '" + narrowed + "' genuinely cannot do this, extend it with "
+                        + "skill_create under its own name, or create '" + proposed + "' with "
+                        + FORCE + ": true and say in its description what '" + narrowed
+                        + "' is missing.", narrowed);
+            }
+
+            // 2. A GENERALISATION of something that already exists: an existing skill's name
+            // extends the proposed one -- web_search_bikes when web_search is proposed -- so the
+            // proposal is the broader capability, and creating it is the consolidation we want.
+            // Before the token rule below: the narrow sibling would otherwise block its own
+            // replacement by token overlap (web_search vs web_search_bikes scores 0.67), leaving
+            // the library permanently stuck with the specific version and no way to create the
+            // general one.
             List<String> superseded = new ArrayList<>();
-            for (String existing : toolRegistry.names()) {
+            for (String existing : names) {
                 if (existing.toLowerCase().startsWith(proposed + "_")) superseded.add(existing);
             }
             if (!superseded.isEmpty()) {
@@ -247,35 +279,26 @@ public class CriticAgent {
                 return Verdict.allow(warnings);
             }
 
-            // How this task's model uses a skill that exists. On local-first work -- unattended,
-            // or a chat that prefers cost -- the cloud calls no skill: it names them to delegate,
-            // as find_tools says of its matches (AgentLoop#findTools). "Call it" was wrong there.
-            boolean delegates = context.offeredTools() != null;
-            for (String existing : toolRegistry.names()) {
-                String e = existing.toLowerCase();
-                if (proposed.startsWith(e + "_")) {
-                    return Verdict.block("'" + proposed + "' is a narrower version of the existing "
-                            + "skill '" + existing + "', so nothing was created. "
-                            + (delegates ? "Name '" + existing + "' in delegate's 'tools' and state "
-                                    + "the specifics in the goal: you do not call it yourself."
-                                    : "Call '" + existing + "' and pass the specifics as "
-                                    + "parameters: you can call it from your next step.")
-                            + " If '" + existing + "' genuinely cannot do this, extend it with "
-                            + "skill_create under its own name, or create '" + proposed + "' with "
-                            + FORCE + ": true and say in its description what '" + existing
-                            + "' is missing.", existing);
+            // 3. A near-duplicate by its name's words: the one that shares most of them.
+            String nearest = null;
+            double most = 0;
+            for (String existing : names) {
+                double overlap = tokenOverlap(proposed, existing.toLowerCase());
+                if (overlap >= NAME_OVERLAP_BLOCK && overlap > most) {
+                    most = overlap;
+                    nearest = existing;
                 }
-                if (tokenOverlap(proposed, e) >= NAME_OVERLAP_BLOCK) {
-                    return Verdict.block("'" + proposed + "' looks like a duplicate of the existing "
-                            + "skill '" + existing + "', so nothing was created. "
-                            + (delegates ? "Name '" + existing + "' in delegate's 'tools': you do "
-                                    + "not call it yourself."
-                                    : "Call '" + existing + "': you can call it from your next step.")
-                            + " If it does not cover this case, extend it with skill_create under "
-                            + "its own name. If '" + proposed + "' is genuinely a different "
-                            + "capability, create it with " + FORCE + ": true and say in its "
-                            + "description how it differs.", existing);
-                }
+            }
+            if (nearest != null) {
+                return Verdict.block("'" + proposed + "' looks like a duplicate of the existing "
+                        + "skill '" + nearest + "', so nothing was created. "
+                        + (delegates ? "Name '" + nearest + "' in delegate's 'tools': you do "
+                                + "not call it yourself."
+                                : "Call '" + nearest + "': you can call it from your next step.")
+                        + " If it does not cover this case, extend it with skill_create under "
+                        + "its own name. If '" + proposed + "' is genuinely a different "
+                        + "capability, create it with " + FORCE + ": true and say in its "
+                        + "description how it differs.", nearest);
             }
         }
         if (forced) {
