@@ -193,6 +193,8 @@ public class CriticAgent {
      * capability must stay reachable, and a gate with no escape hatch is a worse failure than the
      * bloat it prevents. A forced creation is recorded as a warning rather than passing silently.
      * <p>
+     * A name that exists is never blocked, whatever else the library holds: that is a repair.
+     * <p>
      * A creation is never refused for having been asked for before, however often: a skill that
      * failed is fixed under its own name, and a refusal left the model no way to fix it
      * (AgentLoop, where skill_create is run). Counting its attempts is a limit on them.
@@ -205,6 +207,15 @@ public class CriticAgent {
 
         Object force = params == null ? null : params.get("force");
         boolean forced = force != null && Boolean.parseBoolean(force.toString());
+
+        // Re-creating the same name is a repair/overwrite, which is the behaviour we actually
+        // want instead of a sibling. Never blocked -- and asked before any other skill is
+        // compared: the library holds near-duplicates already, and while the name was only
+        // skipped in the comparison below, a skill's sibling blocked its repair
+        // (imap_move_to_trash_by_sender, with imap_move_to_bin_by_sender_gmail beside it).
+        for (String existing : toolRegistry.names()) {
+            if (proposed.equals(existing.toLowerCase())) return Verdict.allow(warnings);
+        }
 
         if (!proposed.isEmpty() && !forced) {
             // First pass: is this a GENERALISATION of something that already exists? If an
@@ -228,9 +239,6 @@ public class CriticAgent {
 
             for (String existing : toolRegistry.names()) {
                 String e = existing.toLowerCase();
-                // Re-creating the same name is a repair/overwrite, which is the behaviour we
-                // actually want instead of a sibling. Never block it here.
-                if (proposed.equals(e)) continue;
                 if (proposed.startsWith(e + "_")) {
                     return Verdict.block("'" + proposed + "' is a narrower version of the existing "
                             + "tool '" + existing + "'. Call '" + existing + "' and pass the "
