@@ -420,27 +420,50 @@ class GrantRefusedCallTest {
     }
 
     @Test
-    @DisplayName("a task whose start could not read the vault does not take it for an empty one: the refusal names the grant alone, and the ending's line reads the vault as it is then")
-    void aVaultThatCouldNotBeReadIsNotAnEmptyOne(@TempDir Path tmp) throws Exception {
+    @DisplayName("a refusal reads the vault as it is then, as the ending does: a credential stored since the task began is not named as missing")
+    void storedSinceTheTaskBeganIsNotNamedToTheModel(@TempDir Path tmp) throws Exception {
         run = new Run(tmp, null);
         run.disk.create("mail_digest", List.of("SMTP_PASS", "IMAP_PASS"));   // the vault holds the first alone
-        // The vault cannot be read when the task starts, and can again by its first call.
-        run.rig.jdbc.execute("ALTER TABLE credential_vault RENAME TO credential_vault_away");
         run.rig.cloud.think.add(config -> {
-            run.rig.jdbc.execute("ALTER TABLE credential_vault_away RENAME TO credential_vault");
+            // The owner sends /cred set in another chat, after the task began and before its call.
+            run.rig.vault.storeCredential("u1", "IMAP_PASS", "loop-canary-imap-34");
             return call("mail_digest", Map.of()).answer(config);
         });
         run.rig.cloud.think.add(respond("It waits for you."));
 
         AgentResult r = run.rig.turn(run.session(), "digest my mail", ChatOptions.NONE);
 
+        String refusal = run.sent(1).substring(run.sent(1).indexOf("Not run: 'mail_digest'"));
+        assertTrue(refusal.startsWith("Not run: 'mail_digest' has not been allowed to read SMTP_PASS, IMAP_PASS from the vault."), refusal);
+        assertFalse(refusal.contains("Not in the vault yet"), "IMAP_PASS was stored before the call: " + refusal);
+        assertFalse(r.response().contains("Not in your vault yet"), r.response());
+        // Mutation: the refusal told the names the task read when it began -> IMAP_PASS is named as one to store.
+    }
+
+    @Test
+    @DisplayName("a vault that cannot be read is not taken for an empty one: the refusal names the grant alone, and the ending's line reads the vault once it can")
+    void aVaultThatCannotBeReadIsNotAnEmptyOne(@TempDir Path tmp) throws Exception {
+        run = new Run(tmp, null);
+        run.disk.create("mail_digest", List.of("SMTP_PASS", "IMAP_PASS"));   // the vault holds the first alone
+        run.rig.cloud.think.add(config -> {
+            // The vault cannot be read when the call is refused, and can again by the task's end.
+            run.rig.jdbc.execute("ALTER TABLE credential_vault RENAME TO credential_vault_away");
+            return call("mail_digest", Map.of()).answer(config);
+        });
+        run.rig.cloud.think.add(config -> {
+            run.rig.jdbc.execute("ALTER TABLE credential_vault_away RENAME TO credential_vault");
+            return respond("It waits for you.").answer(config);
+        });
+
+        AgentResult r = run.rig.turn(run.session(), "digest my mail", ChatOptions.NONE);
+
         assertTrue(run.sent(1).contains("Not run: 'mail_digest'"), run.sent(1));
         String refusal = run.sent(1).substring(run.sent(1).indexOf("Not run: 'mail_digest'"));
         assertTrue(refusal.startsWith("Not run: 'mail_digest' has not been allowed to read SMTP_PASS, IMAP_PASS from the vault."), refusal);
-        assertFalse(refusal.contains("Not in the vault yet"), "SMTP_PASS is stored, and the task never learned what is: " + refusal);
+        assertFalse(refusal.contains("Not in the vault yet"), "SMTP_PASS is stored, and what is could not be read: " + refusal);
         assertTrue(r.response().contains(ASKED_AND_MISSING), "the ending reads the vault itself: " + r.response());
-        // Mutation: the refusal given the names the task holds -- none -- as what the vault holds ->
-        // it names SMTP_PASS, which is stored, as one the user has yet to store.
+        // Mutation: a vault that cannot be read taken for one that holds nothing -> the refusal names
+        // SMTP_PASS, which is stored, as one the user has yet to store.
     }
 
     @Test

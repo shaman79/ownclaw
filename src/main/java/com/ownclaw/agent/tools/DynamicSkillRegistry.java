@@ -70,8 +70,17 @@ public class DynamicSkillRegistry {
     public void init() {
         Path generatedDir = Path.of(config.getSkills().getGeneratedPath());
         if (!Files.isDirectory(generatedDir)) {
-            log.info("No generated skills directory at {} — no dynamic skills loaded", generatedDir);
-            keepGranted();
+            // Known to be absent, or not known at all: isDirectory says no to both. Only an
+            // install with no skills may use the one-time grant up for none -- behind a parent
+            // that cannot be searched, or a volume that is not there, the skills are waiting.
+            if (Files.notExists(generatedDir)) {
+                log.info("No generated skills directory at {} — no dynamic skills loaded", generatedDir);
+                keepGranted();
+            } else {
+                log.error("The skills directory {} cannot be reached (or is no directory), so no skill is loaded "
+                        + "and the credentials its skills were being handed are not granted at this start: the "
+                        + "next start that reads it grants them.", generatedDir);
+            }
             return;
         }
         boolean read = scan(generatedDir, new java.util.HashSet<>());
@@ -307,7 +316,8 @@ public class DynamicSkillRegistry {
     }
 
     /**
-     * Move a quarantined directory back and register it again.
+     * Move a quarantined directory back and register it again -- with no grant: every account
+     * grants it again before it reads a credential of theirs.
      *
      * @param entry the directory name exactly as {@link #quarantined()} reports it
      * @return the skill's name once live again, or empty with the reason logged
@@ -332,13 +342,28 @@ public class DynamicSkillRegistry {
             return Optional.empty();
         }
         try {
+            // It starts with no grant. Which directory of that name this is cannot be told
+            // from here: the skill maintenance retired, with its grants left behind, or one a
+            // task of another account wrote that never loaded -- and that one would be
+            // registered under what the other was granted. Ended before anything moves, so a
+            // database that refuses leaves it where it is.
+            endGrants(name, null);
             Files.move(source, dest);
-            Files.deleteIfExists(dest.resolve("QUARANTINE-REASON.txt"));
             DynamicSkill skill = loadSkill(dest);
             if (skill == null) {
+                Files.deleteIfExists(dest.resolve("QUARANTINE-REASON.txt"));
                 log.error("Restored {} to {} but it would not load; it stays on disk.", entry, dest);
                 return Optional.empty();
             }
+            if (!skill.name().equals(name)) {
+                // Its SKILL.yaml names another skill than its directory: it would be registered
+                // as that one, under that one's grants, which nothing here ended.
+                Files.move(dest, source);
+                log.error("Not restoring {}: its SKILL.yaml names the skill '{}', not '{}'. It is back in quarantine.",
+                        entry, skill.name(), name);
+                return Optional.empty();
+            }
+            Files.deleteIfExists(dest.resolve("QUARANTINE-REASON.txt"));
             register(skill);
             log.warn("Restored quarantined skill '{}' from {}", name, entry);
             return Optional.of(skill.name());

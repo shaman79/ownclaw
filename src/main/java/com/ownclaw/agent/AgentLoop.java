@@ -401,6 +401,8 @@ public class AgentLoop {
                     + e.getMessage() + "), so none are here. Do not take that to mean there are none.)");
         }
 
+        // What the vault holds when it is asked, for what a refused skill is told is missing from it.
+        context.setVaultNames(() -> credentialVault.listCredentialKeys(userId));
         // Load credential keys so the LLM knows what's in the vault without calling credential_manage list
         try {
             List<String> keys = credentialVault.listCredentialKeys(userId);
@@ -1979,7 +1981,7 @@ public class AgentLoop {
             context.notAllowed(tool.name());
             return AgentObservation.failure(action.tool(), "Not run: "
                     + com.ownclaw.users.CredentialGrantService.notAllowed(tool.name(), ungranted,
-                            context.credentialKeysIfRead()), 0);
+                            context.vaultNamesNow()), 0);
         }
 
         // A secret the filter removed is no value. The cloud reads a router's configuration with

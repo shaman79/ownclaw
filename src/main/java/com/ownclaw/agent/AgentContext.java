@@ -65,7 +65,7 @@ public class AgentContext {
 
     /** Credential keys available in the vault for this user (loaded once at task start). */
     private List<String> credentialKeys = List.of();
-    private boolean credentialKeysRead;
+    private java.util.function.Supplier<List<String>> vaultNames;
 
     /** See {@link #setPersonalSources}. */
     private List<String> personalSources = com.ownclaw.config.OwnClawConfig.Privacy.DEFAULT_PERSONAL_SOURCES;
@@ -607,12 +607,25 @@ public class AgentContext {
     public void setOfferedTools(java.util.Set<String> names) { this.offeredTools = names; }
 
     public List<String> credentialKeys() { return credentialKeys; }
+
     /**
-     * {@link #credentialKeys()}, or null when this task was never told what the vault holds -- its
-     * start could not read it. No names is then not "the vault holds none": a skill that was
-     * refused would be told that every credential it declares has yet to be stored.
+     * The names the vault holds now, or null when that is not known -- nothing was given to
+     * read it with, or it cannot be read. For what is said to be missing from it (a skill that
+     * was refused is told which credentials have yet to be stored): {@link #credentialKeys()} is
+     * what it held when the task began, so one stored since was still named, and it is no names
+     * at all when the start could not read it, so every one was.
      */
-    public List<String> credentialKeysIfRead() { return credentialKeysRead ? credentialKeys : null; }
+    public List<String> vaultNamesNow() {
+        if (vaultNames == null) return null;
+        try {
+            return vaultNames.get();
+        } catch (RuntimeException unread) {
+            return null;
+        }
+    }
+
+    /** How {@link #vaultNamesNow()} reads the vault: set where the task starts. */
+    public void setVaultNames(java.util.function.Supplier<List<String>> names) { this.vaultNames = names; }
     /**
      * The names the vault holds, as the prompts name them -- those made of letters, digits, '_',
      * '.' and '-'. One stored before /cred set checked names can be a value typed where the name
@@ -620,7 +633,6 @@ public class AgentContext {
      * name of an older spelling that is only a name -- "ROUTER-PASS" -- stays: a skill reads it.
      */
     public void setCredentialKeys(List<String> keys) {
-        this.credentialKeysRead = keys != null;
         this.credentialKeys = keys == null ? List.of()
                 : keys.stream().filter(k -> k.matches("[A-Za-z][A-Za-z0-9_.-]*")).toList();
     }

@@ -256,22 +256,25 @@ class VaultReadersInventoryTest {
     }
 
     @Test
-    @DisplayName("a grant is taken back by its account's /revoke, or ends with its skill: for every account at once only where the skill manager deletes a skill, makes one under a free name, or writes another account's again")
+    @DisplayName("a grant is taken back by its account's /revoke, or ends with its skill: for every account at once only where the skill manager deletes a skill, makes one under a free name, or writes another account's again, and where the registry brings one back from quarantine")
     void aGrantIsEndedWithItsSkillByTheSkillManagerAlone() throws IOException {
         assertEquals(Map.of(
                 GRANTS, List.of("String userId, String skill, Collection<String> keys"),   // its declaration
-                COMMANDS, List.of("userId, skill, keys")),                                  // /revoke
+                // /revoke; and, for a skill that is gone, once more by its name in lower case
+                COMMANDS, List.of("userId, skill, keys", "userId, skill, keys")),
                 every("revoke"), "An account takes back its own grants, in a command it sends.");
 
         // Everyone's grants of a skill at once (CredentialGrantService#end): through the registry's
-        // endGrants, which the skill manager calls where a skill's code ends or changes hands.
+        // endGrants, which the skill manager calls where a skill's code ends or changes hands, and
+        // the registry itself where a directory is brought back from quarantine -- which skill of
+        // that name it is cannot be told there, so it starts with none.
         assertEquals(Map.of(
-                REGISTRY, List.of("String skill, String keep"),                             // its declaration
+                REGISTRY, List.of("String skill, String keep", "name, null"),               // its declaration; a restore
                 // A skill made under a name no skill held: whatever was left under it. Written again
                 // by another account than the owner: everyone's but that account's. Deleted: all.
                 SKILL_MANAGER, List.of("name, null", "name, requester", "name, null")),
                 every("endGrants"), "Who ends the grants of a skill for every account: read the call. Not a retirement, "
-                        + "nor a restore, nor anything a model can call but through skill_create and skill_manage.");
+                        + "nor anything a model can call but through skill_create and skill_manage.");
         // And no other way to the rows: every call of something's end( that is handed two things, as
         // the service's is (a matcher's end(), a model call's end(progress) are none).
         Map<String, List<String>> ends = everyMatch(Pattern.compile("\\.\\s*end\\s*\\("));

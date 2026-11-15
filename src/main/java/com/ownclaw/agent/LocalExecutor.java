@@ -1227,7 +1227,7 @@ public class LocalExecutor {
                     action.tool, parentContext.userId(), ungranted);
             parentContext.notAllowed(target.name());
             return "Not run: " + com.ownclaw.users.CredentialGrantService.notAllowed(target.name(), ungranted,
-                    parentContext.credentialKeysIfRead());
+                    parentContext.vaultNamesNow());
         }
 
         // A change is attempted once per delegation, and made once per task. The cloud path

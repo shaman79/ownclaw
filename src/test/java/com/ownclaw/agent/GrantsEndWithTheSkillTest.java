@@ -225,18 +225,92 @@ class GrantsEndWithTheSkillTest {
     }
 
     @Test
-    @DisplayName("bringing a retired skill back is no new skill: it comes back with its grants, and runs on them")
-    void broughtBackWithItsGrants() {
+    @DisplayName("a skill brought back from where it was set aside starts with no grant: which directory of that name it is cannot be told, and one a task of another account wrote would be registered under what the retired skill was granted")
+    void broughtBackWithNoGrant() throws Exception {
+        // kid's mailer never loaded: set aside at its creation, never registered.
+        var ok = skills.launches.answer;
+        skills.launches.answer = launch -> launch.script().getFileName().toString().startsWith("_load_check_")
+                ? new SandboxResult(1, "", "ModuleNotFoundError: No module named 'nowhere'", 1, false) : ok.apply(launch);
+        assertTrue(write("kid", "mailer", "kid's, never registered").startsWith("ERROR: 'mailer' was written but does not load"));
+        skills.launches.answer = ok;
+        String kids = skills.registry.quarantined().getFirst();
+        // The owner's mailer: made, granted by everyone, and retired by maintenance with its grants left.
         write("owner", "mailer", "the owner's");
         everyoneGrants("mailer");
-        Path aside = skills.registry.retire("mailer", "not used for a year").orElseThrow();
+        Path owners = skills.registry.retire("mailer", "not used for a year").orElseThrow();
+        assertEquals(List.of("ann", "kid", "owner"), grantedBy("mailer"), "the premise: retiring a skill ends no grant");
 
-        assertEquals("mailer", skills.registry.restoreFromQuarantine(aside.getFileName().toString()).orElseThrow());
+        // The operator brings kid's back, by its entry's name.
+        assertEquals("mailer", skills.registry.restoreFromQuarantine(kids).orElseThrow());
 
-        assertEquals(List.of("ann", "kid", "owner"), grantedBy("mailer"));
+        assertTrue(code("mailer").contains("kid's, never registered"), "the premise: it is kid's code that is registered");
+        assertEquals(List.of(), grantedBy("mailer"), "kid's code was registered under what the owner's skill was granted");
+        for (String account : List.of("owner", "ann", "kid")) assertRefused("mailer", account);
+        assertEquals(List.of(), vault.decrypted);
+
+        // The skill that was retired starts the same when it is brought back: granted again by whoever uses it.
+        assertEquals("Skill 'mailer' has been permanently deleted.",
+                skills.manager.deleteSkill("mailer", "kid", () -> false, () -> {}));
+        grants.grant("ann", "mailer", PASS);   // left under the name, by whatever
+        assertEquals("mailer", skills.registry.restoreFromQuarantine(owners.getFileName().toString()).orElseThrow());
+        assertTrue(code("mailer").contains("the owner's"));
+        assertEquals(List.of(), grantedBy("mailer"));
+        assertRefused("mailer", "ann");
+        grants.grant("ann", "mailer", PASS);
         assertTrue(GrantsKit.run(skill("mailer"), "ann").success());
         assertEquals(Map.of("SMTP_PASS", ANNS), skills.launches.runs().getLast().credentials());
-        // Mutations: retiring a skill ends its grants; bringing one back ends them -> nobody's are left.
+        // Mutation: what is brought back keeps the grants of its name, as at first -> kid's code runs
+        // for the owner with the owner's password.
+    }
+
+    @Test
+    @DisplayName("a grant cannot land on a rewrite that is under way: sent while another account's new code is being checked, it is not made -- it would have been read off the version that is going and stayed on the one that comes")
+    void aGrantCannotLandOnARewriteUnderWay() throws Exception {
+        write("kid", "kids_mailer", "v1");
+        everyoneGrants("kids_mailer");
+        var commands = new com.ownclaw.interfaces.CommandHandler(skills.tools, null, null, null, vault, grants, null, null,
+                null, null, null, null, null, null, null, null);
+        var ok = skills.launches.answer;
+        var checking = new CountDownLatch(1);
+        var goOn = new CountDownLatch(1);
+        skills.launches.answer = launch -> {
+            if (launch.script().getFileName().toString().startsWith("_load_check_")) {
+                checking.countDown();
+                try {
+                    goOn.await(30, TimeUnit.SECONDS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+            return ok.apply(launch);
+        };
+        var tasks = Executors.newFixedThreadPool(1);
+        try {
+            Future<String> rewrite = tasks.submit(() -> write("kid", "kids_mailer", "v2"));
+            assertTrue(checking.await(30, TimeUnit.SECONDS), "the rewrite is at its load check");
+            assertEquals(List.of("kid"), grantedBy("kids_mailer"), "the premise: the owner's grant has ended, and v2 is not registered yet");
+
+            // The owner's call was refused a moment ago, and the owner clicks the command it offered.
+            String said = commands.handle("owner", "/grant kids_mailer SMTP_PASS").orElseThrow();
+
+            assertTrue(said.startsWith("Not granted: 'kids_mailer' is being changed right now."), said);
+            assertEquals(List.of("kid"), grantedBy("kids_mailer"), "a grant was made while the skill was being written");
+            goOn.countDown();
+            assertTrue(rewrite.get(30, TimeUnit.SECONDS).startsWith("Skill 'kids_mailer' updated"));
+        } finally {
+            goOn.countDown();
+            tasks.shutdownNow();
+        }
+        assertEquals(List.of("kid"), grantedBy("kids_mailer"));
+        assertRefused("kids_mailer", "owner");
+        assertEquals(List.of(), vault.decrypted, "the owner's password was read for kid's new code");
+
+        // Sent again once it is done, it is a grant for the code that is there.
+        String said = commands.handle("owner", "/grant kids_mailer SMTP_PASS").orElseThrow();
+        assertTrue(said.contains("'kids_mailer' may now read: SMTP_PASS."), said);
+        assertTrue(GrantsKit.run(skill("kids_mailer"), "owner").success());
+        // Mutation: /grant made without the skill's lock, as at first -> it is made during the load
+        // check, stays when v2 is registered, and the owner's next run hands v2 the owner's password.
     }
 
     // ───────────────────────── what ends nothing ─────────────────────────

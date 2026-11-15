@@ -85,8 +85,40 @@ class CapabilityResolverTest {
     void triggersStayInOneSentence() {
         assertNull(bare().resolve("Check the weather for tomorrow. Then send it to my email."));
         assertNull(bare().resolve("Scan this page for typos!\nOur network team will review it."));
-        assertNotNull(bare().resolve("Please scan the 192.168.5.0/24 network for me."), "a dot inside a word ends no sentence");
-        // Mutation: sentences() returning the whole text as one -> the first two ask for a skill.
+        assertNull(bare().resolve("Check the logs. Mail them to Bob."));
+        assertNull(bare().resolve("Is the backup done? I will check. The mail can wait"), "three sentences, a trigger's words in two of them");
+        assertNotNull(bare().resolve("Please scan the 192.0.2.0/24 network for me."), "a dot inside a word ends no sentence");
+        // Mutation: sentences() returning the whole text as one -> the first four ask for a skill.
+    }
+
+    @Test
+    @DisplayName("where a sentence ends: at marks before a blank and at line breaks -- not at a dot inside a word, not at the dot of an abbreviation, a title or an initial")
+    void whereASentenceEnds() {
+        assertEquals(List.of("One", "Two", "Three", "Four"), sentencesOf("One. Two! Three?\nFour"));
+        assertEquals(List.of("Wait", "go on", "really", "yes"), sentencesOf("Wait... go on?! really\r\n\r\nyes."));
+        assertEquals(List.of("ping 192.0.2.7 and example.org now"), sentencesOf("ping 192.0.2.7 and example.org now"));
+        assertEquals(List.of("....x ?!y"), sentencesOf("....x ?!y"), "marks with no blank after them end nothing");
+        for (String one : List.of("check Mr. Smith's email", "Fetch approx. 10 emails", "check e.g. the email from Bob",
+                "read the no. 3 email", "Zkontroluj např. e-maily od Petra", "mail from J. Smith", "dopis č. 3 od pí. Nové")) {
+            assertEquals(List.of(one), sentencesOf(one), "one request");
+        }
+        assertEquals(List.of("I said no. 3 mails came"), sentencesOf("I said no. 3 mails came"), "the word \"no\" at a sentence's end, before a number, is read as the abbreviation: known, and left");
+        assertEquals(List.of("I said no", "Three mails came"), sentencesOf("I said no. Three mails came"));
+        assertEquals(List.of("Check it", "Email Bob"), sentencesOf("Check it. Email Bob"), "a short word is no abbreviation");
+        assertEquals(List.of(), sentencesOf(" \n.\n!? "), "nothing but marks and breaks");
+        assertEquals(List.of(), sentencesOf(""));
+        // Mutations: the abbreviations not looked at -> each of the seven is two sentences; a mark
+        // with no blank after it taken for an end -> "192" is a sentence.
+    }
+
+    private static List<String> sentencesOf(String text) {
+        int[] bounds = CapabilityResolver.sentences(text);
+        var out = new java.util.ArrayList<String>();
+        for (int i = 0; i < bounds.length; i += 2) {
+            String sentence = text.substring(bounds[i], bounds[i + 1]).strip();
+            if (!sentence.isEmpty()) out.add(sentence);
+        }
+        return out;
     }
 
     @Test
@@ -115,7 +147,14 @@ class CapabilityResolverTest {
                 "run this command: uptime",
                 "resize the image to 800 pixels",
                 "Zkontroluj mail, pros\u00edm",
-                "skenuj dom\u00e1c\u00ed s\u00ed\u0165")) {
+                "skenuj dom\u00e1c\u00ed s\u00ed\u0165",
+                // What matched while a trigger's words were found anywhere, and was lost with that
+                // for no reason: mail under another name, a word with a prefix, an abbreviation's dot.
+                "check my gmail", "read my gmail", "any new gmail?", "fetch my webmail", "Zkontroluj gmail",
+                "run a portscan on 192.0.2.10", "do a portscan of the router", "scan the subnetwork",
+                "přeskenuj síť", "rerun the command", "check the openssl cert", "rediscover hosts",
+                "check Mr. Smith's email", "Fetch approx. 10 emails", "Zkontroluj např. e-maily od Petra",
+                "check e.g. the email from Bob", "read the no. 3 email", "Scan e.g. the home network")) {
             assertNotNull(bare().resolve(message), message);
         }
         // Mutation: WORD_START also put after each word (whole words only) -> "emails", "records" fail.
@@ -139,5 +178,24 @@ class CapabilityResolverTest {
         var resolver = bare();
         org.junit.jupiter.api.Assertions.assertTimeoutPreemptively(java.time.Duration.ofSeconds(20),
                 () -> assertNull(resolver.resolve(text)));
+    }
+
+    @Test
+    @DisplayName("marks in a row, and very many short sentences, are read in time that grows with their number: forty thousand dots before a letter took half a minute")
+    void marksInARowAreLinear() {
+        var resolver = bare();
+        String letter = "x";
+        for (String text : List.of(
+                ".".repeat(400_000) + letter,                         // a run that ends no sentence
+                "?!".repeat(200_000) + letter,
+                ("." .repeat(999) + letter).repeat(400),              // many such runs
+                ". ".repeat(200_000),                                 // nothing but ends
+                "open. ".repeat(60_000) + "scan? ".repeat(60_000),    // a trigger's first word in every sentence, never its second
+                "no. 3 ".repeat(60_000) + "mr. ".repeat(60_000))) {   // every dot an abbreviation's: one long sentence
+            org.junit.jupiter.api.Assertions.assertTimeoutPreemptively(java.time.Duration.ofSeconds(20),
+                    () -> assertNull(resolver.resolve(text)), () -> "a text of " + text.length() + " characters beginning " + text.substring(0, 12));
+        }
+        // Mutation: the sentences found by the regex of before ([.!?]+ then a look ahead for a
+        // blank) -> the first text alone takes minutes.
     }
 }

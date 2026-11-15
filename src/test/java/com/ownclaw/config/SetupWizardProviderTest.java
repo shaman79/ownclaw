@@ -84,6 +84,69 @@ class SetupWizardProviderTest {
     }
 
     @Test
+    @DisplayName("what is decided for such an install is stored, as a choice is: an Anthropic key added later does not move it to Anthropic at the next start")
+    void whatIsDecidedIsKept(@TempDir Path tmp) throws Exception {
+        Path db = tmp.resolve("a.db");
+        assertEquals("openai", providerOf(db, "sk-test-openai", null, null, null));
+        assertEquals("openai", wizard(db, new OwnClawConfig()).getSetting("cloud_provider").orElse(null), "stored");
+
+        // The next start, with an Anthropic key added in the meantime.
+        var config = new OwnClawConfig();
+        config.getMentor().setApiKey("sk-test-openai");
+        config.getMentor().setAnthropicApiKey("sk-ant-test");
+        assertEquals("anthropic", config.getMentor().getProvider(), "the premise: the default");
+        var wizard = wizard(db, config);
+        wizard.environment = name -> null;
+        wizard.applyOverrides();
+
+        assertEquals("openai", config.getMentor().getProvider(), "moved to Anthropic with nobody choosing");
+        // Mutation: the rule not storing what it decides -> the second start has both keys and takes the default.
+    }
+
+    @Test
+    @DisplayName("a key saved in the settings counts at once: the only key, OpenAI's, on an install that never chose -> OpenAI from then, not from the next start; with both keys, or a choice, nothing moves")
+    void aKeySavedInTheSettingsCountsAtOnce(@TempDir Path tmp) throws Exception {
+        var neverChose = new Settings(tmp.resolve("a.db"));
+        neverChose.save(java.util.Map.of("openai_api_key", "sk-test-openai"));
+        assertEquals("openai", neverChose.config.getMentor().getProvider());
+        assertEquals("openai", neverChose.wizard.getSetting("cloud_provider").orElse(null));
+
+        var bothKeys = new Settings(tmp.resolve("b.db"));
+        bothKeys.save(java.util.Map.of("anthropic_api_key", "sk-ant-test"));
+        bothKeys.save(java.util.Map.of("openai_api_key", "sk-test-openai"));
+        assertEquals("anthropic", bothKeys.config.getMentor().getProvider());
+        assertTrue(bothKeys.wizard.getSetting("cloud_provider").isEmpty(), "nothing was decided");
+
+        var chose = new Settings(tmp.resolve("c.db"));
+        chose.save(java.util.Map.of("cloud_provider", "anthropic"));
+        chose.save(java.util.Map.of("openai_api_key", "sk-test-openai"));
+        assertEquals("anthropic", chose.config.getMentor().getProvider(), "a choice stands, whatever the keys");
+        // Mutation: the settings not asking the rule -> the first stays on anthropic, with no key, until a restart.
+    }
+
+    /** The settings page's controller over a fresh install, as its owner saves into it. */
+    private static final class Settings {
+        final OwnClawConfig config = new OwnClawConfig();
+        final SetupWizardService wizard;
+        final com.ownclaw.interfaces.web.SettingsController controller;
+
+        Settings(Path db) throws Exception {
+            wizard = wizard(db, config);
+            wizard.environment = name -> null;
+            controller = new com.ownclaw.interfaces.web.SettingsController(wizard, config,
+                    new com.ownclaw.users.AuthService(null, null, config) {
+                        @Override public boolean isOwner(String userId) { return true; }
+                    },
+                    new com.ownclaw.llm.LocalModelCheck(config, new ObjectMapper()), new LocalMode(config, wizard),
+                    new ThinkingEffort(config, wizard));
+        }
+
+        void save(java.util.Map<String, String> updates) {
+            assertEquals(200, controller.updateSettings(updates, "owner").getStatusCode().value());
+        }
+    }
+
+    @Test
     @DisplayName("a provider that was chosen is left alone, and so is an install with both keys or none: there the default decides")
     void aChoiceOrTheDefaultStands(@TempDir Path tmp) throws Exception {
         assertEquals("anthropic", providerOf(tmp.resolve("a.db"), "sk-test-openai", null, "anthropic", null), "chosen in the settings");

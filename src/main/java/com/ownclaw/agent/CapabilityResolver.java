@@ -76,10 +76,10 @@ public class CapabilityResolver {
             new CapabilityPattern(
                     "network_scanning",
                     List.of(
-                            "(?:re|port)?scan.*network", "network.*(?:re|port)?scan", "find.*devices",
-                            "discover.*hosts?", "open.*ports?", "port.*scan",
+                            "(?:re|port)?scan.*(?:sub)?network", "(?:sub)?network.*(?:re|port)?scan", "port-?scan", "find.*devices",
+                            "(?:re)?discover.*hosts?", "open.*ports?", "port.*scan",
                             "\\bnmap\\b", "network.*discover",
-                            "(?:na|pro|o|za)?skenov.*síť", "(?:na|pro|o|za)?skenuj.*síť", "najdi.*zařízení",  // Czech
+                            "(?:na|pro|o|za|pře)?skenov.*síť", "(?:na|pro|o|za|pře)?skenuj.*síť", "najdi.*zařízení",  // Czech
                             "otevřené.*porty", "skenování.*sítě"
                     ),
                     "network_scanner",
@@ -194,7 +194,7 @@ public class CapabilityResolver {
             // ── SSL/TLS certificate check ──
             new CapabilityPattern(
                     "ssl_check",
-                    List.of("ssl.*cert", "tls.*cert", "certificate.*check", "certificate.*expir",
+                    List.of("(?:open)?ssl.*cert", "tls.*cert", "certificate.*check", "certificate.*expir",
                             "https.*cert", "check.*ssl"),
                     "ssl_checker",
                     "Check SSL/TLS certificates: expiration date, issuer, subject, "
@@ -210,7 +210,7 @@ public class CapabilityResolver {
             // ── Generic shell command execution ──
             new CapabilityPattern(
                     "shell_execution",
-                    List.of("run.*command", "execute.*command", "shell.*command",
+                    List.of("(?:re)?run.*command", "execute.*command", "shell.*command",
                             "spusť.*příkaz", "spust.*příkaz", "proveď.*příkaz",  // Czech
                             "terminal.*command", "bash.*command", "linux.*command"),
                     "shell_exec",
@@ -228,13 +228,13 @@ public class CapabilityResolver {
             new CapabilityPattern(
                     "email_imap",
                     List.of(
-                            "check.*e?-?mail", "e?-?mail.*check", "read.*e?-?mail", "e?-?mail.*read",
-                            "fetch.*e?-?mail", "e?-?mail.*fetch", "inbox", "\\bimap\\b",
-                            "unread.*e?-?mail", "e?-?mail.*unread", "\\bnew\\b.*e?-?mail", "e?-?mail.*\\bnew\\b",
-                            "e?-?mail.*summ", "summ.*e?-?mail",
-                            "zkontroluj.*e?-?mail", "přečti.*e?-?mail", "\\bpošt",  // Czech
-                            "nepřečten.*e?-?mail", "e?-?mail.*nepřečten",
-                            "stáhni.*e?-?mail", "e?-?mail.*stáhn"
+                            "check.*(?:e-?|g|web)?mail", "(?:e-?|g|web)?mail.*check", "read.*(?:e-?|g|web)?mail", "(?:e-?|g|web)?mail.*read",
+                            "fetch.*(?:e-?|g|web)?mail", "(?:e-?|g|web)?mail.*fetch", "inbox", "\\bimap\\b",
+                            "unread.*(?:e-?|g|web)?mail", "(?:e-?|g|web)?mail.*unread", "\\bnew\\b.*(?:e-?|g|web)?mail", "(?:e-?|g|web)?mail.*\\bnew\\b",
+                            "(?:e-?|g|web)?mail.*summ", "summ.*(?:e-?|g|web)?mail",
+                            "zkontroluj.*(?:e-?|g|web)?mail", "přečti.*(?:e-?|g|web)?mail", "\\bpošt",  // Czech
+                            "nepřečten.*(?:e-?|g|web)?mail", "(?:e-?|g|web)?mail.*nepřečten",
+                            "stáhni.*(?:e-?|g|web)?mail", "(?:e-?|g|web)?mail.*stáhn"
                     ),
                     "check_email",
                     "Connect to an IMAP server and fetch emails. "
@@ -274,11 +274,14 @@ public class CapabilityResolver {
         if (userMessage == null || userMessage.isBlank()) return null;
 
         String normalized = userMessage.toLowerCase();
+        // Found once, in the message as it was written: where a sentence ends is read off its
+        // capitals too, and the triggers are matched whatever the case.
+        int[] sentences = sentences(userMessage);
 
         // 1. Match against known capability patterns
         CapabilityPattern matched = null;
         for (CapabilityPattern pattern : CAPABILITY_PATTERNS) {
-            if (pattern.matches(normalized)) {
+            if (pattern.matches(userMessage, sentences, normalized)) {
                 matched = pattern;
                 break;
             }
@@ -511,11 +514,10 @@ public class CapabilityResolver {
             this(category, triggerPatterns, suggestedName, description, systemPackages, pipPackages,
                     parameters, timeout, matchKeywords, List.of());
         }
-        boolean matches(String normalizedInput) {
-            int[] sentences = sentences(normalizedInput);
+        boolean matches(String input, int[] sentences, String normalizedInput) {
             for (String trigger : triggerPatterns) {
                 try {
-                    if (inOneSentence(trigger, normalizedInput, sentences)) return true;
+                    if (inOneSentence(trigger, input, sentences)) return true;
                 } catch (Exception e) {
                     // Invalid regex — treat as literal substring
                     if (normalizedInput.contains(trigger.toLowerCase())) {
@@ -530,8 +532,17 @@ public class CapabilityResolver {
     /** Where a word begins: not after a letter, a digit or the underscore of a skill's name. */
     private static final String WORD_START = "(?<![\\p{L}\\p{N}_])";
 
-    /** Where a sentence ends: at . ! ? before a blank or the end -- a dot inside a word ends none -- and at every line break. */
-    private static final Pattern SENTENCE_END = Pattern.compile("[.!?]+(?=\\s|$)|[\\n\\r\\u0085\\u2028\\u2029]+");
+    /**
+     * What is written with a dot and ends no sentence: titles before a name, and the short forms
+     * of "for example", "that is", "about" -- English and Czech. "Check Mr. Smith's email" and
+     * "Zkontroluj např. e-maily od Petra" are each one request.
+     */
+    private static final java.util.Set<String> ABBREVIATIONS = java.util.Set.of(
+            "mr", "mrs", "ms", "dr", "prof", "st", "jr", "sr", "vs", "cf", "ca", "approx", "incl", "excl", "eg", "ie",
+            "např", "tj", "tzn", "tzv", "resp", "popř", "příp", "cca", "mj", "pí", "sl", "ing", "mgr", "bc", "doc");
+
+    /** Short forms of "number": they end no sentence before the number itself ("the no. 3 email"). */
+    private static final java.util.Set<String> BEFORE_A_NUMBER = java.util.Set.of("no", "nr", "nos", "tel", "str");
 
     /** Each trigger's words, compiled once: the triggers are constants. */
     private static final Map<String, List<Pattern>> WORDS = new java.util.concurrent.ConcurrentHashMap<>();
@@ -556,17 +567,80 @@ public class CapabilityResolver {
         });
     }
 
-    /** The sentences of a text, as pairs of where each begins and ends. */
+    /**
+     * The sentences of a text, as pairs of where each begins and ends. A sentence ends at a run
+     * of . ! ? before a blank or the text's end -- a dot inside a word ("192.168.5.0",
+     * "example.org") ends none, nor does the one dot of an abbreviation -- and at every line break.
+     * <p>
+     * One pass over the text, a character at a time. As a regex -- a run of marks, then a look
+     * ahead for the blank -- a run with no blank after it was read again from each of its
+     * characters: forty thousand dots in a row took half a minute, and this is asked before a
+     * task starts, on its worker.
+     */
     static int[] sentences(String text) {
-        var bounds = new ArrayList<Integer>();
-        var ends = SENTENCE_END.matcher(text);
-        int start = 0;
-        while (ends.find()) {
-            if (ends.start() > start) { bounds.add(start); bounds.add(ends.start()); }
-            start = ends.end();
+        int n = text.length();
+        int[] bounds = new int[16];
+        int count = 0, start = 0, i = 0;
+        while (i < n) {
+            char c = text.charAt(i);
+            int end;       // where the sentence that is open would end
+            int next;      // where the one after it would begin
+            if (lineBreak(c)) {
+                end = i;
+                while (i < n && lineBreak(text.charAt(i))) i++;
+                next = i;
+            } else if (mark(c)) {
+                end = i;
+                while (i < n && mark(text.charAt(i))) i++;
+                next = i;
+                boolean beforeABlank = i == n || Character.isWhitespace(text.charAt(i));
+                if (!beforeABlank || (i - end == 1 && c == '.' && abbreviated(text, start, end, i))) continue;
+            } else {
+                i++;
+                continue;
+            }
+            if (end > start) {
+                if (count + 2 > bounds.length) bounds = java.util.Arrays.copyOf(bounds, bounds.length * 2);
+                bounds[count++] = start;
+                bounds[count++] = end;
+            }
+            start = next;
         }
-        if (start < text.length()) { bounds.add(start); bounds.add(text.length()); }
-        return bounds.stream().mapToInt(Integer::intValue).toArray();
+        if (start < n) {
+            if (count + 2 > bounds.length) bounds = java.util.Arrays.copyOf(bounds, bounds.length + 2);
+            bounds[count++] = start;
+            bounds[count++] = n;
+        }
+        return java.util.Arrays.copyOf(bounds, count);
+    }
+
+    private static boolean mark(char c) {
+        return c == '.' || c == '!' || c == '?';
+    }
+
+    private static boolean lineBreak(char c) {
+        return c == '\n' || c == '\r' || c == '\u0085' || c == '\u2028' || c == '\u2029';
+    }
+
+    /**
+     * Whether the one dot at {@code dot} is an abbreviation's and no sentence's end: after a
+     * single letter ("e.g.", "J. Smith", "č. 3"), after a word of {@link #ABBREVIATIONS}, or
+     * after one of {@link #BEFORE_A_NUMBER} when a number follows. Looks back over that one
+     * word, no further than where the sentence began.
+     */
+    private static boolean abbreviated(String text, int sentenceStart, int dot, int after) {
+        int from = dot;
+        while (from > sentenceStart && Character.isLetter(text.charAt(from - 1))) from--;
+        int letters = dot - from;
+        if (letters == 0) return false;
+        if (letters == 1) return true;
+        if (letters > 6) return false;
+        String word = text.substring(from, dot).toLowerCase(java.util.Locale.ROOT);
+        if (ABBREVIATIONS.contains(word)) return true;
+        if (!BEFORE_A_NUMBER.contains(word)) return false;
+        int next = after;
+        while (next < text.length() && Character.isWhitespace(text.charAt(next)) && !lineBreak(text.charAt(next))) next++;
+        return next < text.length() && Character.isDigit(text.charAt(next));
     }
 
     /**
@@ -584,7 +658,14 @@ public class CapabilityResolver {
             // Transparent: a word at the very start of what is searched still sees what is before it.
             matchers[i] = words.get(i).matcher(text).useTransparentBounds(true);
         }
-        for (int s = 0; s < sentences.length; s += 2) {
+        // Only the sentences the first word is in are read for the rest: where it is next is
+        // found in the text as a whole, so a message of very many short sentences costs each
+        // trigger one pass and not a search per sentence.
+        var first = words.get(0).matcher(text);
+        int from = 0;
+        while (from <= text.length() && first.find(from)) {
+            int s = sentenceEndingAfter(sentences, first.start());
+            if (s < 0) return false;
             int at = sentences[s];
             boolean all = true;
             for (var matcher : matchers) {
@@ -592,7 +673,23 @@ public class CapabilityResolver {
                 at = matcher.end();
             }
             if (all) return true;
+            from = Math.max(sentences[s + 1], first.start() + 1);
         }
         return false;
+    }
+
+    /** The first sentence that ends after {@code position}, as its index in the pairs; -1 when none does. */
+    private static int sentenceEndingAfter(int[] sentences, int position) {
+        int low = 0, high = sentences.length / 2 - 1, found = -1;
+        while (low <= high) {
+            int mid = (low + high) >>> 1;
+            if (sentences[2 * mid + 1] > position) {
+                found = mid;
+                high = mid - 1;
+            } else {
+                low = mid + 1;
+            }
+        }
+        return found < 0 ? -1 : 2 * found;
     }
 }

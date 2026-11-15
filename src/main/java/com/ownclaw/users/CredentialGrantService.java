@@ -24,9 +24,11 @@ import java.util.Set;
  * read). A grant is made by its user alone, in a command they send ({@code /grant}) -- nothing a
  * model can call makes one -- and taken back the same way ({@code /revoke}).
  * <p>
- * What a grant covers is a skill's name and a credential's name. A skill rewritten under its name
- * keeps what it was granted, as it must for a repair to leave it working; a credential it declares
- * anew is not granted with the rest.
+ * What a grant covers is a skill's name and a credential's name. A skill the owner's tasks write
+ * again under its name keeps what it was granted, as it must for a repair to leave it working;
+ * written again by another account it keeps that account's grant alone, and deleted, made under a
+ * name that was free or brought back from quarantine it has none ({@link #end}). A credential it
+ * declares anew is not granted with the rest.
  * <p>
  * Until the release that added this check, {@code /grant} and {@code /revoke} wrote the table and
  * nothing read it: a skill was handed every vault value it declared.

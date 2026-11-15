@@ -388,6 +388,35 @@ class GrantExistingSkillsTest {
     }
 
     @Test
+    @DisplayName("a skills directory that cannot be reached -- its parent cannot be searched -- is not taken for none: the one-time grant stays asked for, and the next start that reaches it grants")
+    void aDirectoryThatCannotBeReachedLeavesItAsked() throws Exception {
+        skills.onDisk("mailer", "[SMTP_PASS]");
+        Path parent = skills.generated.getParent();
+        var open = Files.getPosixFilePermissions(parent);
+        Files.setPosixFilePermissions(parent, PosixFilePermissions.fromString("---------"));
+        try {
+            assumeFalse(Files.isExecutable(parent), "run as root, every directory can be searched");
+            assertFalse(Files.isDirectory(skills.generated), "the premise: to this start it is no directory, as a missing one is not");
+
+            DynamicSkillRegistry blind = restart();
+
+            assertEquals("pending", GrantsKit.existing(jdbc), "marked done for no skill, the grant would be used up");
+            assertEquals(List.of(), GrantsKit.rows(jdbc));
+            assertTrue(blind.allDynamic().isEmpty(), "nothing was read");
+        } finally {
+            Files.setPosixFilePermissions(parent, open);
+        }
+
+        restart();
+
+        assertEquals(List.of("ann mailer SMTP_PASS permanent", "bob mailer SMTP_PASS permanent"), GrantsKit.rows(jdbc),
+                "the start that reaches the skills grants what they were being handed");
+        assertTrue(done(GrantsKit.existing(jdbc)), GrantsKit.existing(jdbc));
+        // Mutation: whatever is no directory taken for no skills, as before -> the blind start marks
+        // it done, and the one that reaches mailer grants nothing.
+    }
+
+    @Test
     @DisplayName("a skill that could not be loaded at the first start was not registered, and is granted nothing when it is brought back")
     void aSkillThatDidNotLoadIsNotGranted() throws Exception {
         skills.onDisk("mailer", "[SMTP_PASS]");

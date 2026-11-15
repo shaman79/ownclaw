@@ -163,6 +163,10 @@ public class SettingsController {
             }
         }
 
+        // The only key there is decides the provider of an install that never chose one, from
+        // now and not from the next start (SetupWizardService#keepOpenAiWhereItWasTheDefault).
+        setupWizard.keepOpenAiWhereItWasTheDefault();
+
         // Re-run diagnostics
         setupWizard.runDiagnostics();
 

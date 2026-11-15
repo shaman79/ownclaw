@@ -1188,19 +1188,44 @@ public class CommandHandler {
      * {@code /grant <skill> [KEY ...]}: its user lets a skill read credentials of theirs -- the one
      * way a grant is made (CredentialGrantService). Only what the skill declares can be granted,
      * so the answer says exactly what it may read from here.
+     * <p>
+     * A grant is for the code that is there, so it is made with the skill's lock held to read,
+     * as a run holds it: not while the skill is being written again. Another account's rewrite
+     * ends this user's grant before it writes and registers its new code a load check later; a
+     * grant made in between -- the refusal of a call is what offers the command -- would be read
+     * off the version that is going and stay on the one that comes. Then it is not made, and
+     * the answer says to send it again.
      */
     private String handleGrant(String userId, String args) {
         String[] parts = args.isEmpty() ? new String[0] : args.split("\\s+");
         if (parts.length == 0) return GRANT_USAGE;
-        var tool = toolRegistry.find(parts[0]).or(() -> toolRegistry.find(parts[0].toLowerCase(Locale.ROOT)));
-        if (tool.isEmpty()) return "Skill not found: " + parts[0];
-        String skill = tool.get().name();
+        var named = toolRegistry.find(parts[0]).or(() -> toolRegistry.find(parts[0].toLowerCase(Locale.ROOT)));
+        if (named.isEmpty()) return "Skill not found: " + parts[0];
+        String skill = named.get().name();
+        var unchanged = com.ownclaw.agent.tools.SkillLocks.of(skill).readLock();
+        if (!unchanged.tryLock()) {
+            return "Not granted: '" + skill + "' is being changed right now. Send the command again when that is "
+                    + "done -- a grant is for the code that is there then.";
+        }
+        try {
+            // Looked up again now that it cannot change: what it declares is what is granted.
+            var tool = toolRegistry.find(skill);
+            if (tool.isEmpty()) return "Skill not found: " + parts[0];
+            return grantHeld(userId, tool.get(), java.util.Arrays.asList(parts).subList(1, parts.length));
+        } finally {
+            unchanged.unlock();
+        }
+    }
+
+    /** {@link #handleGrant}, for the skill as it is registered and stays while this goes. */
+    private String grantHeld(String userId, com.ownclaw.agent.tools.Tool tool, List<String> asked) {
+        String skill = tool.name();
         var declared = new java.util.LinkedHashSet<String>();
-        for (String key : tool.get().requiredCredentials()) declared.add(key.strip().toUpperCase(Locale.ROOT));
+        for (String key : tool.requiredCredentials()) declared.add(key.strip().toUpperCase(Locale.ROOT));
         if (declared.isEmpty()) return "'" + skill + "' declares no credential: there is nothing to grant it.";
 
         var keys = new java.util.LinkedHashSet<String>();
-        for (int i = 1; i < parts.length; i++) keys.add(parts[i].toUpperCase(Locale.ROOT));
+        for (String key : asked) keys.add(key.toUpperCase(Locale.ROOT));
         if (keys.isEmpty()) keys.addAll(declared);
         for (String key : keys) {
             if (!declared.contains(key)) {
@@ -1228,11 +1253,18 @@ public class CommandHandler {
     private String handleRevoke(String userId, String args) {
         String[] parts = args.isEmpty() ? new String[0] : args.split("\\s+");
         if (parts.length == 0) return "Usage: `/revoke <skill> [KEY ...]` — with no key, everything it was granted.";
-        // By the name as it is registered, or as typed: what a skill that is gone was granted can still be taken back.
-        String skill = toolRegistry.find(parts[0]).or(() -> toolRegistry.find(parts[0].toLowerCase(Locale.ROOT)))
-                .map(com.ownclaw.agent.tools.Tool::name).orElse(parts[0].toLowerCase(Locale.ROOT));
         List<String> keys = java.util.Arrays.asList(parts).subList(1, parts.length);
+        // By the name as it is registered. What a skill that is gone was granted can still be
+        // taken back: by its name as typed -- one from before names were lower case kept its
+        // capitals -- and then as names are written now.
+        var registered = toolRegistry.find(parts[0]).or(() -> toolRegistry.find(parts[0].toLowerCase(Locale.ROOT)))
+                .map(com.ownclaw.agent.tools.Tool::name);
+        String skill = registered.orElse(parts[0]);
         List<String> revoked = credentialGrants.revoke(userId, skill, keys);
+        if (revoked.isEmpty() && registered.isEmpty() && !skill.equals(skill.toLowerCase(Locale.ROOT))) {
+            skill = skill.toLowerCase(Locale.ROOT);
+            revoked = credentialGrants.revoke(userId, skill, keys);
+        }
         if (revoked.isEmpty()) {
             return "'" + skill + "' had been granted " + (keys.isEmpty() ? "nothing." : "none of those.");
         }

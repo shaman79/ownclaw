@@ -319,18 +319,25 @@ public class SetupWizardService {
      * the local model -- or failed, with none -- and nothing but a line in the log said why.
      * A provider that was chosen, in the settings, by /setup or in the environment, is left alone,
      * and so is an install with both keys or none: there the default decides, as it says.
+     * <p>
+     * What is decided here is stored, as a choice made in the settings is. Decided again at
+     * every start, an Anthropic key added later -- to have one at hand -- moved the install to
+     * Anthropic at its next start, with nobody choosing. And it is asked when the settings are
+     * saved as well as at a start: an OpenAI key saved there, the only key, is used from then
+     * and not from the next start.
      */
-    private void keepOpenAiWhereItWasTheDefault() {
+    public void keepOpenAiWhereItWasTheDefault() {
         var mentor = config.getMentor();
         if (getSetting("cloud_provider").isPresent()) return;
         String chosen = environment.apply("OWNCLAW_MENTOR_PROVIDER");
         if (chosen != null && !chosen.isBlank()) return;
         boolean anthropicKey = mentor.getAnthropicApiKey() != null && !mentor.getAnthropicApiKey().isBlank();
         boolean openAiKey = mentor.getApiKey() != null && !mentor.getApiKey().isBlank();
-        if (!anthropicKey && openAiKey && !"openai".equals(mentor.getProvider())) {
+        if (!anthropicKey && openAiKey) {
             mentor.setProvider("openai");
+            saveSetting("cloud_provider", "openai");
             log.info("No cloud provider was chosen and the only key set is OpenAI's: OpenAI is used, as while it "
-                    + "was the default. Choose a provider in Settings or with OWNCLAW_MENTOR_PROVIDER to change that.");
+                    + "was the default, and kept as the provider chosen. Choose another in Settings to change that.");
         }
     }
 
