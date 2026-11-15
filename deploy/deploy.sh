@@ -1462,6 +1462,7 @@ database_path() {
     if [ -f "$DEPLOY_DIR/.env" ]; then
         told=$(sed -n 's/^[[:space:]]*OWNCLAW_DATABASE_PATH[[:space:]]*=[[:space:]]*//p' "$DEPLOY_DIR/.env" 2>/dev/null | tail -1) || told=""
         told=${told%$'\r'}
+        told=${told%"${told##*[![:space:]]}"}   # blanks after the value, which the service drops too
         told=${told%\"}; told=${told#\"}
         told=${told%\'}; told=${told#\'}
     fi
@@ -1502,6 +1503,11 @@ backup_database() {
     local db
     db=$(database_path)
     if [ ! -f "$db" ]; then
+        # A service that runs has a database: not finding it is no reason to deploy uncopied.
+        if systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
+            log "ERROR: $SERVICE_NAME is running and its database is not at $db -- it cannot be copied"
+            return 1
+        fi
         log "No database at $db yet -- nothing to copy"
         return 0
     fi
@@ -1527,8 +1533,10 @@ backup_database() {
                 return 1
                 ;;
             0)
-                if [ -L "$BACKUP_DIR" ] && ! only_root_writes "$(dirname -- "$BACKUP_DIR")"; then
-                    log "ERROR: $BACKUP_DIR is a link to root's $dir, in a directory another account can write -- the database is not copied through it"
+                # Root's own directory is written by root -- where no other account can write
+                # into it, or put a link in its place.
+                if ! only_root_writes "$dir" || ! only_root_writes "$(dirname -- "$BACKUP_DIR")"; then
+                    log "ERROR: $dir is root's, and it or $(dirname -- "$BACKUP_DIR") can be written by another account -- the database is not copied there as root"
                     return 1
                 fi
                 ;;
@@ -1571,10 +1579,13 @@ finally:
 PY
     ) 2>&1 >/dev/null ) || rc=$?
     if [ "$rc" -eq 0 ] && [ -s "$part" ] && ${as_owner[@]+"${as_owner[@]}"} mv -fT -- "$part" "$dest"; then
-        local bytes was
+        local bytes was=""
         bytes=$(stat -c %s -- "$dest" 2>/dev/null) || bytes=0
-        was=$(deployed_commit)
-        log "Copied the database to $(basename "$dest") ($(( bytes / 1048576 )) MB), as it is under the installed build (${was:-commit unknown}), before the build that changes it"
+        [ -f "$DEPLOYED_COMMIT_FILE" ] && { read -r was < "$DEPLOYED_COMMIT_FILE" || true; }
+        [ -f "$RESTART_PENDING_MARKER" ] && was="${was:-unknown}, staged and never started: the build running is the one before it"
+        log "Copied the database to $(basename "$dest") ($(( bytes / 1048576 )) MB) before the build that changes it; installed: ${was:-commit unknown}"
+        DB_COPY_MADE="$dest"
+        DB_COPY_AS=(${as_owner[@]+"${as_owner[@]}"})
     else
         ${as_owner[@]+"${as_owner[@]}"} rm -f -- "$part" "$part-journal" 2>/dev/null || true
         [ "$rc" -eq 124 ] && err="it took more than 300 s"
@@ -1582,14 +1593,33 @@ PY
         return 1
     fi
 
-    # The newest MAX_DB_BACKUPS stay: sorted by name, and the name is the time. Not the copies a
-    # --reset left (ownclaw-db-pre-reset-*): those are kept.
+    return 0
+}
+
+# The copy backup_database made in this run, and who made it: for the two functions below.
+DB_COPY_MADE=""
+DB_COPY_AS=()
+
+# The deploy this run's copy was made for did not happen: the copy goes again, so that attempts
+# that stop do not push the copies of earlier builds out.
+forget_database_copy() {
+    [ -n "$DB_COPY_MADE" ] || return 0
+    ${DB_COPY_AS[@]+"${DB_COPY_AS[@]}"} rm -f -- "$DB_COPY_MADE" 2>/dev/null || true
+    DB_COPY_MADE=""
+}
+
+# The new build is in place: of the copies, the newest MAX_DB_BACKUPS stay -- sorted by name, and
+# the name is the time. Not the copies a --reset left (ownclaw-db-pre-reset-*): those are kept.
+prune_database_copies() {
+    [ -n "$DB_COPY_MADE" ] || return 0
+    local dir
+    dir=$(dirname -- "$DB_COPY_MADE")
     local -a copies=("$dir"/ownclaw-db-2*.db)
     local i n=$(( ${#copies[@]} - MAX_DB_BACKUPS ))
     for (( i = 0; i < n; i++ )); do
-        ${as_owner[@]+"${as_owner[@]}"} rm -f -- "${copies[i]}" 2>/dev/null || true
+        ${DB_COPY_AS[@]+"${DB_COPY_AS[@]}"} rm -f -- "${copies[i]}" 2>/dev/null || true
     done
-    [ "$n" -gt 0 ] && log "Pruned old database copies (keeping $MAX_DB_BACKUPS)"
+    if [ "$n" -gt 0 ]; then log "Pruned old database copies (keeping $MAX_DB_BACKUPS)"; fi
     return 0
 }
 
@@ -1600,6 +1630,7 @@ deploy_jar() {
     # From the swap below any start of the service runs the new build, and its first start makes
     # its changes to the database: the copy is taken here, first, with nothing touched yet -- not
     # even the JAR backups, or each attempt stopped here would push an older build out of them.
+    DB_COPY_MADE=""
     if changes_database "$DEPLOY_DIR/ownclaw.jar" "$new_jar"; then
         backup_database || die "Could not copy the database before a build that changes it -- deploy not started"
     else
@@ -1612,7 +1643,7 @@ deploy_jar() {
     if [ -f "$RESTART_PENDING_MARKER" ]; then
         log "The JAR on disk was staged but never started -- keeping the last backup that ran"
     else
-        backup_current || die "Could not back up the current JAR (disk full?) -- deploy not started"
+        backup_current || { forget_database_copy; die "Could not back up the current JAR (disk full?) -- deploy not started"; }
     fi
 
     # IMPORTANT: do not overwrite the currently-running JAR in-place.
@@ -1621,13 +1652,16 @@ deploy_jar() {
     local tmp_jar="$DEPLOY_DIR/ownclaw.jar.new"
     if ! cp "$new_jar" "$tmp_jar"; then
         rm -f "$tmp_jar"
+        forget_database_copy
         die "Could not copy the new JAR into place (disk full?) -- the running build is untouched"
     fi
     if ! mv -f "$tmp_jar" "$DEPLOY_DIR/ownclaw.jar"; then
         rm -f "$tmp_jar"
+        forget_database_copy
         die "Could not swap the new JAR into place -- the running build is untouched"
     fi
     log "Deployed new JAR"
+    prune_database_copies
 
     # Record it at the swap, not after the restart: from here on the JAR on disk is the
     # new build, and getting it loaded is the restart-pending marker's job.
