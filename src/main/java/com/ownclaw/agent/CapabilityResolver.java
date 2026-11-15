@@ -76,10 +76,10 @@ public class CapabilityResolver {
             new CapabilityPattern(
                     "network_scanning",
                     List.of(
-                            "scan.*network", "network.*scan", "find.*devices",
+                            "(?:re|port)?scan.*network", "network.*(?:re|port)?scan", "find.*devices",
                             "discover.*hosts?", "open.*ports?", "port.*scan",
                             "\\bnmap\\b", "network.*discover",
-                            "skenov.*síť", "skenuj.*síť", "najdi.*zařízení",  // Czech
+                            "(?:na|pro|o|za)?skenov.*síť", "(?:na|pro|o|za)?skenuj.*síť", "najdi.*zařízení",  // Czech
                             "otevřené.*porty", "skenování.*sítě"
                     ),
                     "network_scanner",
@@ -129,7 +129,7 @@ public class CapabilityResolver {
             new CapabilityPattern(
                     "media_processing",
                     List.of("convert.*video", "convert.*audio", "transcode", "\\bffmpeg\\b",
-                            "extract.*audio", "video.*to.*mp[34]", "compress.*video",
+                            "extract.*audio", "video.*(?:in)?to.*mp[34]", "compress.*video",
                             "merge.*video", "trim.*video", "cut.*video"),
                     "media_processor",
                     "Process media files using ffmpeg: convert formats, extract audio, "
@@ -164,7 +164,7 @@ public class CapabilityResolver {
             new CapabilityPattern(
                     "document_conversion",
                     List.of("convert.*docx?", "convert.*pdf", "\\bpandoc\\b",
-                            "markdown.*to.*pdf", "html.*to.*pdf", "document.*convert"),
+                            "markdown.*(?:in)?to.*pdf", "html.*(?:in)?to.*pdf", "document.*convert"),
                     "document_converter",
                     "Convert documents between formats using Pandoc: Markdown, HTML, DOCX, PDF, "
                             + "LaTeX, EPUB, etc.",
@@ -230,11 +230,11 @@ public class CapabilityResolver {
                     List.of(
                             "check.*e?-?mail", "e?-?mail.*check", "read.*e?-?mail", "e?-?mail.*read",
                             "fetch.*e?-?mail", "e?-?mail.*fetch", "inbox", "\\bimap\\b",
-                            "unread.*mail", "mail.*unread", "new.*mail", "mail.*new",
+                            "unread.*e?-?mail", "e?-?mail.*unread", "\\bnew\\b.*e?-?mail", "e?-?mail.*\\bnew\\b",
                             "e?-?mail.*summ", "summ.*e?-?mail",
-                            "zkontroluj.*mail", "přečti.*mail", "\\bpošt",  // Czech
-                            "nepřečten.*mail", "mail.*nepřečten",
-                            "stáhni.*mail", "mail.*stáhn"
+                            "zkontroluj.*e?-?mail", "přečti.*e?-?mail", "\\bpošt",  // Czech
+                            "nepřečten.*e?-?mail", "e?-?mail.*nepřečten",
+                            "stáhni.*e?-?mail", "e?-?mail.*stáhn"
                     ),
                     "check_email",
                     "Connect to an IMAP server and fetch emails. "
@@ -512,12 +512,10 @@ public class CapabilityResolver {
                     parameters, timeout, matchKeywords, List.of());
         }
         boolean matches(String normalizedInput) {
+            int[] sentences = sentences(normalizedInput);
             for (String trigger : triggerPatterns) {
                 try {
-                    if (Pattern.compile(asWords(trigger), Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE)
-                            .matcher(normalizedInput).find()) {
-                        return true;
-                    }
+                    if (inOneSentence(trigger, normalizedInput, sentences)) return true;
                 } catch (Exception e) {
                     // Invalid regex — treat as literal substring
                     if (normalizedInput.contains(trigger.toLowerCase())) {
@@ -532,24 +530,69 @@ public class CapabilityResolver {
     /** Where a word begins: not after a letter, a digit or the underscore of a skill's name. */
     private static final String WORD_START = "(?<![\\p{L}\\p{N}_])";
 
-    /** What may lie between two words of a trigger: the rest of one sentence, a dot inside a word included. */
-    private static final String SAME_SENTENCE = "(?:(?![.!?](?:\\s|$))[^\\n])*?";
+    /** Where a sentence ends: at . ! ? before a blank or the end -- a dot inside a word ends none -- and at every line break. */
+    private static final Pattern SENTENCE_END = Pattern.compile("[.!?]+(?=\\s|$)|[\\n\\r\\u0085\\u2028\\u2029]+");
+
+    /** Each trigger's words, compiled once: the triggers are constants. */
+    private static final Map<String, List<Pattern>> WORDS = new java.util.concurrent.ConcurrentHashMap<>();
 
     /**
-     * A trigger as it is matched: each of its words where a word begins, and all of them in one
-     * sentence. Written as "open.*ports?", a trigger was searched for as a plain regex, so its
-     * words were found inside other words and anywhere in the message: "open the file and send me
-     * a report" asked for a port scan ("port" in "report"), and a scheduled task that names its
-     * skills -- "run daily_news_digest, then smtp_send_email" -- asked for a mailbox reader ("new"
-     * in "news", "mail" in "email"), which was then made at step 1 unless a skill happened to
-     * cover it. A trigger's words are still stems: "summ" is "summary" and "summarise".
+     * A trigger's words, as they are looked for: each where a word begins. Written as
+     * "open.*ports?", a trigger was searched for as a plain regex, so its words were found inside
+     * other words and anywhere in the message: "open the file and send me a report" asked for a
+     * port scan ("port" in "report"), and a scheduled task that names its skills -- "run
+     * daily_news_digest, then smtp_send_email" -- asked for a mailbox reader ("new" in "news",
+     * "mail" in "email"), which was then made at step 1 unless a skill happened to cover it. A
+     * trigger's words are still stems: "summ" is "summary" and "summarise".
      */
-    static String asWords(String trigger) {
-        var out = new StringBuilder();
-        for (String word : trigger.split("\\.\\*", -1)) {
-            if (!out.isEmpty()) out.append(SAME_SENTENCE);
-            out.append(word.startsWith("\\b") ? "" : WORD_START).append(word);
+    static List<Pattern> words(String trigger) {
+        return WORDS.computeIfAbsent(trigger, t -> {
+            var out = new ArrayList<Pattern>();
+            for (String word : t.split("\\.\\*", -1)) {
+                out.add(Pattern.compile((word.startsWith("\\b") ? "" : WORD_START) + word,
+                        Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE));
+            }
+            return List.copyOf(out);
+        });
+    }
+
+    /** The sentences of a text, as pairs of where each begins and ends. */
+    static int[] sentences(String text) {
+        var bounds = new ArrayList<Integer>();
+        var ends = SENTENCE_END.matcher(text);
+        int start = 0;
+        while (ends.find()) {
+            if (ends.start() > start) { bounds.add(start); bounds.add(ends.start()); }
+            start = ends.end();
         }
-        return out.toString();
+        if (start < text.length()) { bounds.add(start); bounds.add(text.length()); }
+        return bounds.stream().mapToInt(Integer::intValue).toArray();
+    }
+
+    /**
+     * Whether a trigger's words are all in one sentence of the text, in their order. Each word is
+     * looked for once per sentence, after the one before it: if the first place a word is found
+     * leaves no room for the next, no later place does. So the work grows with the text's length
+     * and no faster -- one regex for the whole trigger, with a gap between its words, tried every
+     * start against every end, and a pasted log of a few hundred kilobytes on one line held a
+     * task's start for a minute.
+     */
+    static boolean inOneSentence(String trigger, String text, int[] sentences) {
+        List<Pattern> words = words(trigger);
+        var matchers = new java.util.regex.Matcher[words.size()];
+        for (int i = 0; i < matchers.length; i++) {
+            // Transparent: a word at the very start of what is searched still sees what is before it.
+            matchers[i] = words.get(i).matcher(text).useTransparentBounds(true);
+        }
+        for (int s = 0; s < sentences.length; s += 2) {
+            int at = sentences[s];
+            boolean all = true;
+            for (var matcher : matchers) {
+                if (!matcher.region(at, sentences[s + 1]).find()) { all = false; break; }
+                at = matcher.end();
+            }
+            if (all) return true;
+        }
+        return false;
     }
 }

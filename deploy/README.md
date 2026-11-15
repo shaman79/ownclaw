@@ -84,7 +84,7 @@ sudo nano /opt/ownclaw/.env
 | `JAVA_OPTS` | No | JVM tuning, e.g. `-Xmx512m` |
 | `BRAVE_SEARCH_API_KEY` | No | Brave Search API key for the MCP `brave-search` server. Get one at [brave.com/search/api](https://brave.com/search/api/) |
 
-**Upgrading an install that uses OpenAI.** The default provider used to be OpenAI and is now Anthropic. If `.env` holds only `OPENAI_API_KEY` and the provider was never chosen on the settings page or in `/setup`, add `OWNCLAW_MENTOR_PROVIDER=openai` to `.env`; without it OwnClaw starts with no cloud model and runs every task on the local one.
+**Upgrading an install that uses OpenAI.** The default provider used to be OpenAI and is now Anthropic. An install that has only an OpenAI key and never chose a provider goes on with OpenAI. One that has both keys and never chose moves to Anthropic: to stay on OpenAI, choose it on the settings page or add `OWNCLAW_MENTOR_PROVIDER=openai` to `.env`.
 
 **With no internet**, OwnClaw keeps working on the local model: a task whose cloud model cannot be reached goes on there by itself, and says so in the chat. The page needs nothing from the internet, so open it on the LAN at `http://<server>:8080` (the server's own address and `OWNCLAW_SERVER_PORT`) when the public name does not resolve. Telegram, web pages and package installs need the internet and fail until it is back.
 
@@ -219,6 +219,11 @@ sudo systemctl start ownclaw-update.timer
 The updater still takes the newer build for the installed one, so it deploys nothing until the
 next push to `main` -- and that push brings the change to the database back, unless it takes it
 out.
+
+A copy from before credential grants were checked has no grants in it. The first start of a build
+that checks them makes the one-time grant again: every skill on disk then is granted the
+credentials it declares, for each account that holds them -- the skills made since the copy
+included. `/grants` shows the result, and `/revoke` takes back what should not be there.
 
 ### View application logs
 

@@ -733,17 +733,11 @@ public class ThinkingEngine {
      * In that state an answer is a plan, not an answer — "I'll fetch today's news digest first"
      * — and delivering it ends the task COMPLETED having done nothing. Asked of every channel the
      * model can finish through, in {@link #unlessAnsweredBeforeWork}.
-     * <p>
-     * The skill the loop makes at step 1 for the capability resolver is not something that ran:
-     * no model chose it, and counted, it let the model's very first reply -- "I made a scanner
-     * and will run it" -- end a scheduled run with nothing run ({@link AgentLoop#BY_THE_RESOLVER}).
      */
     private static boolean nothingRanYet(AgentContext context, StepMode mode) {
         // Unattended only: on a chat, a question that needs no skill is answered at once.
         return mode.localFirst() && context.isUnattended() && context.trajectory().turns().stream()
-                .noneMatch(t -> t.observation() != null && t.observation().success()
-                        && (t.observation().structured() == null
-                                || !Boolean.TRUE.equals(t.observation().structured().get(AgentLoop.BY_THE_RESOLVER))));
+                .noneMatch(t -> t.observation() != null && t.observation().success());
     }
 
     /**

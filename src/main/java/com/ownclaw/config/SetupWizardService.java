@@ -306,6 +306,32 @@ public class SetupWizardService {
         getSetting("mentor_model").ifPresent(model -> config.getMentor().setModel(model));
         getSetting("telegram_bot_token").ifPresent(token -> config.getTelegram().setBotToken(token));
         getSetting("telegram_enabled").ifPresent(v -> config.getTelegram().setEnabled(Boolean.parseBoolean(v)));
+        keepOpenAiWhereItWasTheDefault();
+    }
+
+    /** How the environment is read: the process's, and a test's own in a test. */
+    java.util.function.Function<String, String> environment = System::getenv;
+
+    /**
+     * An install from before Anthropic became the default, which never chose a provider: it ran
+     * on OpenAI because OpenAI was the default, and has its key and no Anthropic one. It goes on
+     * with OpenAI. Left to the new default it had a provider with no key, so every task went to
+     * the local model -- or failed, with none -- and nothing but a line in the log said why.
+     * A provider that was chosen, in the settings, by /setup or in the environment, is left alone,
+     * and so is an install with both keys or none: there the default decides, as it says.
+     */
+    private void keepOpenAiWhereItWasTheDefault() {
+        var mentor = config.getMentor();
+        if (getSetting("cloud_provider").isPresent()) return;
+        String chosen = environment.apply("OWNCLAW_MENTOR_PROVIDER");
+        if (chosen != null && !chosen.isBlank()) return;
+        boolean anthropicKey = mentor.getAnthropicApiKey() != null && !mentor.getAnthropicApiKey().isBlank();
+        boolean openAiKey = mentor.getApiKey() != null && !mentor.getApiKey().isBlank();
+        if (!anthropicKey && openAiKey && !"openai".equals(mentor.getProvider())) {
+            mentor.setProvider("openai");
+            log.info("No cloud provider was chosen and the only key set is OpenAI's: OpenAI is used, as while it "
+                    + "was the default. Choose a provider in Settings or with OWNCLAW_MENTOR_PROVIDER to change that.");
+        }
     }
 
     // ── Wizard state machine (used by ChatWebSocketHandler) ─────────────

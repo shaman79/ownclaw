@@ -77,7 +77,7 @@ class CapabilityResolverTest {
                 "Retrace the route we took last summer.")) {
             assertNull(bare().resolve(message), message);
         }
-        // Mutation: asWords returning the trigger as written -> each of these asks for a skill.
+        // Mutation: words() without WORD_START -> each of these asks for a skill.
     }
 
     @Test
@@ -86,7 +86,7 @@ class CapabilityResolverTest {
         assertNull(bare().resolve("Check the weather for tomorrow. Then send it to my email."));
         assertNull(bare().resolve("Scan this page for typos!\nOur network team will review it."));
         assertNotNull(bare().resolve("Please scan the 192.168.5.0/24 network for me."), "a dot inside a word ends no sentence");
-        // Mutation: SAME_SENTENCE as ".*" -> the first two ask for a skill.
+        // Mutation: sentences() returning the whole text as one -> the first two ask for a skill.
     }
 
     @Test
@@ -96,6 +96,16 @@ class CapabilityResolverTest {
                 "Scan my network and find devices with open ports",
                 "check my email please",
                 "Do I have any unread mail?",
+                "Do I have any unread emails?",
+                "any new email?",
+                "Any new emails today?",
+                "rescan the network please",
+                "do a portscan of my network",
+                "turn this html into a pdf",
+                "Zkontroluj emaily",
+                "P\u0159e\u010dti mi emaily",
+                "st\u00e1hni emaily z imapu",
+                "Naskenuj mi s\u00ed\u0165",
                 "Give me a summary of my emails",
                 "convert this video to mp4",
                 "Run a traceroute to example.org",
@@ -109,5 +119,25 @@ class CapabilityResolverTest {
             assertNotNull(bare().resolve(message), message);
         }
         // Mutation: WORD_START also put after each word (whole words only) -> "emails", "records" fail.
+    }
+
+    @Test
+    @DisplayName("mail to send is no mailbox to read: \"new\" is the word, not the start of \"news\"")
+    void newsIsNotNewMail() {
+        assertNull(bare().resolve("send me an email with the news"));
+        assertNotNull(bare().resolve("is there new mail?"));
+    }
+
+    @Test
+    @DisplayName("a long pasted line with no sentence end is read in time that grows with its length: it does not hold the task's start")
+    void aLongLineIsLinear() {
+        // A word that begins many triggers, every 66 characters, and never the word after it:
+        // one regex per trigger, with a gap between its words, took over a minute on this.
+        var line = new StringBuilder();
+        while (line.length() < 400_000) line.append("open the valve a little and wait for the pressure to settle down ");
+        String text = line.toString();
+        var resolver = bare();
+        org.junit.jupiter.api.Assertions.assertTimeoutPreemptively(java.time.Duration.ofSeconds(20),
+                () -> assertNull(resolver.resolve(text)));
     }
 }
