@@ -16,7 +16,7 @@ Auto-updates are handled by a cron job that polls GitHub for new commits.
 │   ├── generated/       # Skill directories (SKILL.yaml + skill.py)
 │   └── _envs/           # Python virtual environments
 ├── logs/                # Deploy log
-├── backups/             # Last 5 JARs for rollback
+├── backups/             # Last 5 JARs for rollback; the database from before each of the last 5 builds that changed it
 ├── repo/                # Git checkout (build workspace)
 └── deploy/              # (symlink or copy from repo)
 ```
@@ -166,6 +166,25 @@ Avoid running deploy as root (plain `sudo /opt/ownclaw/repo/deploy/deploy.sh`). 
 ```bash
 sudo -u ownclaw /opt/ownclaw/repo/deploy/deploy.sh --rollback
 ```
+
+### Put the database back as it was before a build
+
+A build makes its changes to the database at its first start, and rolling the JAR back does not
+undo them. Before a build that changes the database is put in place, `deploy.sh` copies the
+database to `backups/ownclaw-db-<time>.db` (the last 5 are kept), and does not deploy the build
+if the copy cannot be made. Nothing puts a copy back by itself. By hand:
+
+```bash
+sudo systemctl stop ownclaw
+cd /opt/ownclaw
+sudo rm -f data/ownclaw.db-wal data/ownclaw.db-shm      # or the newer changes come back from them
+sudo cp backups/ownclaw-db-<time>.db data/ownclaw.db
+sudo chown ownclaw:ownclaw data/ownclaw.db
+```
+
+Then roll the JAR back to the build from before (above), which starts the service.
+
+What was written between the copy and the new build's first start is not in it.
 
 ### View application logs
 
