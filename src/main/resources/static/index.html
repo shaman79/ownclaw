@@ -4641,8 +4641,8 @@
             '<div class="settings-field">' +
                 '<label>Active Provider</label>' +
                 '<select id="settings-provider">' +
-                    '<option value="openai"' + (provider === 'openai' ? ' selected' : '') + '>OpenAI</option>' +
                     '<option value="anthropic"' + (provider === 'anthropic' ? ' selected' : '') + '>Anthropic (Claude)</option>' +
+                    '<option value="openai"' + (provider === 'openai' ? ' selected' : '') + '>OpenAI</option>' +
                 '</select>' +
             '</div>';
         view.appendChild(cloudSection);
@@ -4669,7 +4669,6 @@
                 '<input type="text" id="settings-openai-model" value="' + escapeHtml(data.openai_model || '') + '" placeholder="gpt-4o">' +
                 '<div class="field-hint">e.g. gpt-4o, gpt-4o-mini, o3-mini</div>' +
             '</div>';
-        view.appendChild(openaiSection);
 
         // ── Anthropic section ──
         var anthropicSection = document.createElement('div');
@@ -4693,7 +4692,9 @@
                 '<input type="text" id="settings-anthropic-model" value="' + escapeHtml(data.anthropic_model || '') + '" placeholder="claude-opus-5-5">' +
                 '<div class="field-hint">e.g. claude-opus-5-5, claude-sonnet-4-5</div>' +
             '</div>';
+        // Anthropic's section first: it is the default provider, OpenAI the alternative.
         view.appendChild(anthropicSection);
+        view.appendChild(openaiSection);
 
         // ── Ollama section ──
         var ollamaSection = document.createElement('div');

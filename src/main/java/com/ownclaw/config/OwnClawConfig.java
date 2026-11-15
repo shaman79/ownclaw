@@ -120,7 +120,11 @@ public class OwnClawConfig {
     }
 
     public static class Mentor {
-        private String provider = "openai";
+        /**
+         * The cloud provider: "anthropic", or "openai" as the alternative, whose model and key
+         * are {@code model} and {@code apiKey}.
+         */
+        private String provider = "anthropic";
         private String model = "gpt-4o";
         private String apiKey;
         private String anthropicApiKey;

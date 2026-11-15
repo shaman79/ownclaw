@@ -18,6 +18,7 @@ class SetupWizardSecretTest {
     @DisplayName("a key pasted at the provider step is neither kept as the provider nor repeated")
     void keyPastedEarlyIsNotRepeated(@TempDir Path tmp) throws Exception {
         var config = new OwnClawConfig();
+        config.getMentor().setProvider("openai");
         var wizard = new SetupWizardService(MigratedDatabase.at(tmp.resolve("t.db")), config,
                 new ObjectMapper(), null, null, null);
         String key = "sk-ant-api03-PastedEarly";
@@ -27,7 +28,7 @@ class SetupWizardSecretTest {
         assertEquals(Optional.empty(), wizard.getSetting("cloud_provider"));
         assertEquals("openai", config.getMentor().getProvider(), "the provider in use is unchanged");
 
-        assertTrue(wizard.processStep(1, "2").message().contains("`anthropic`"));
+        assertTrue(wizard.processStep(1, "1").message().contains("`anthropic`"));
         assertEquals(Optional.of("anthropic"), wizard.getSetting("cloud_provider"));
     }
 }

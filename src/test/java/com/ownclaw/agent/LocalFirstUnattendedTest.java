@@ -145,7 +145,7 @@ class LocalFirstUnattendedTest {
     @DisplayName("on a non-Anthropic provider too: the catalogue once, and no text protocol")
     void theOtherProviderGetsTheSameRule() {
         // Every earlier fix to this landed in buildDynamicContext, which only the Anthropic path
-        // uses. The other provider -- the default in application.yaml -- builds its own system
+        // uses. The other provider -- then the default in application.yaml -- builds its own system
         // prompt, and it rendered the full manifest into it unconditionally: the catalogue a
         // second time, the very skills the array withholds advertised as callable, and the
         // "Output: {reasoning, tool, params}" instruction the array exists to replace. The

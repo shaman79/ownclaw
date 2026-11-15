@@ -27,7 +27,7 @@ import jakarta.annotation.PostConstruct;
  * it writes, the analysis of the skill library.
  *
  * <p>Cloud provider is selected based on {@code ownclaw.mentor.provider}:
- * openai (default) or anthropic. The active cloud provider is resolved at startup
+ * anthropic (default) or openai. The active cloud provider is resolved at startup
  * and whenever the config changes (e.g. via /setup wizard).
  */
 @Component

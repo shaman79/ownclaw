@@ -23,7 +23,7 @@ import java.util.concurrent.TimeUnit;
  * settings in the system_settings table, and applies overrides to OwnClawConfig.
  *
  * Wizard flow (via WebSocket chat):
- *   1. Run diagnostics (Ollama, Python, OpenAI key, skills dir)
+ *   1. Run diagnostics (Ollama, Python, the cloud API keys, skills dir)
  *   2. Report findings, ask user for missing config
  *   3. Store answers in system_settings
  *   4. Mark setup complete
@@ -347,10 +347,10 @@ public class SetupWizardService {
         sb.append("Type `-` to skip a step and keep the current value.\n\n");
         sb.append("**Diagnostics**\n");
         sb.append("- Cloud provider: `").append(d.cloudProvider).append("`\n");
-        sb.append("- ").append(d.openAiKeySet ? "✅" : "❌").append(" OpenAI API key: ")
-            .append(d.openAiKeySet ? "configured" : "not set").append('\n');
         sb.append("- ").append(d.anthropicKeySet ? "✅" : "❌").append(" Anthropic API key: ")
             .append(d.anthropicKeySet ? "configured" : "not set").append('\n');
+        sb.append("- ").append(d.openAiKeySet ? "✅" : "❌").append(" OpenAI API key: ")
+            .append(d.openAiKeySet ? "configured" : "not set").append('\n');
         sb.append("- ").append(d.ollamaReachable ? "✅" : "❌").append(" Ollama: `")
             .append(d.ollamaUrl).append("` — ")
             .append(d.ollamaReachable ? "reachable" : "not reachable")
@@ -380,8 +380,8 @@ public class SetupWizardService {
         sb.append("\n---\n\n");
         sb.append("**Step 1/5 — Cloud LLM Provider**\n");
         sb.append("Which cloud LLM do you want to use?\n");
-        sb.append("1) `openai` — OpenAI (GPT models)\n");
-        sb.append("2) `anthropic` — Anthropic (Claude models)\n\n");
+        sb.append("1) `anthropic` — Anthropic (Claude models)\n");
+        sb.append("2) `openai` — OpenAI (GPT models)\n\n");
         sb.append("Current: `").append(config.getMentor().getProvider()).append("`\n");
         sb.append("Enter `1`, `2`, provider name, or `-` to keep current:");
         return new WizardResponse(sb.toString(), false);
@@ -392,10 +392,10 @@ public class SetupWizardService {
         if (!isSkip(input)) {
             String choice = input.strip().toLowerCase();
             String provider;
-            if ("1".equals(choice) || "openai".equals(choice)) {
-                provider = "openai";
-            } else if ("2".equals(choice) || "anthropic".equals(choice) || "claude".equals(choice)) {
+            if ("1".equals(choice) || "anthropic".equals(choice) || "claude".equals(choice)) {
                 provider = "anthropic";
+            } else if ("2".equals(choice) || "openai".equals(choice)) {
+                provider = "openai";
             } else {
                 // Not a provider -- Settings accepts these two only -- so the setting is kept, and
                 // the text is not repeated below: it can be the API key pasted one step early, and
@@ -411,7 +411,7 @@ public class SetupWizardService {
         String currentProvider = config.getMentor().getProvider();
         var sb = new StringBuilder();
         if (unknown) {
-            sb.append("⚠️ That is not one of the providers (`openai`, `anthropic`), so it was not used. ")
+            sb.append("⚠️ That is not one of the providers (`anthropic`, `openai`), so it was not used. ")
               .append("Run `/setup` again to change it.\n\n");
         }
         sb.append("☁️ Cloud provider: `").append(currentProvider).append("`\n\n");
@@ -629,8 +629,8 @@ public class SetupWizardService {
         sb.append("### Setup complete ✅\n\n");
         sb.append("**Final configuration**\n");
         sb.append("- Cloud provider: `").append(d.cloudProvider).append("`\n");
-        sb.append("- OpenAI API key: ").append(d.openAiKeySet ? "configured" : "not set").append('\n');
         sb.append("- Anthropic API key: ").append(d.anthropicKeySet ? "configured" : "not set").append('\n');
+        sb.append("- OpenAI API key: ").append(d.openAiKeySet ? "configured" : "not set").append('\n');
         if ("anthropic".equalsIgnoreCase(d.cloudProvider)) {
             sb.append("- Claude model: `").append(config.getMentor().getAnthropicModel()).append("`\n");
         } else {
