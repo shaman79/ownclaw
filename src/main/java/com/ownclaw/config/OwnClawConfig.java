@@ -122,7 +122,7 @@ public class OwnClawConfig {
     public static class Mentor {
         /**
          * The cloud provider: "anthropic", or "openai" as the alternative, whose model and key
-         * are {@code model} and {@code apiKey}.
+         * are {@code model} and {@code apiKey}. Always one of the two names ({@link #setProvider}).
          */
         private String provider = "anthropic";
         private String model = "gpt-4o";
@@ -191,7 +191,18 @@ public class OwnClawConfig {
         public void setNativeTools(boolean v) { this.nativeTools = v; }
 
         public String getProvider() { return provider; }
-        public void setProvider(String provider) { this.provider = provider; }
+
+        /**
+         * "openai", in any case, chooses OpenAI. Anything else is Anthropic, the default: its own
+         * name, and a setting left blank or mistyped. What is kept is always one of the two names,
+         * so every reader -- the gateway, the wizard, the settings page -- agrees on the provider
+         * in use; kept as written, a name that was neither chose OpenAI, which is not the default.
+         */
+        public void setProvider(String provider) {
+            this.provider = provider != null && "openai".equalsIgnoreCase(provider.strip())
+                    ? "openai" : "anthropic";
+        }
+
         public String getModel() { return model; }
         public void setModel(String model) { this.model = model; }
         public String getApiKey() { return apiKey; }

@@ -83,8 +83,9 @@ ownclaw:
     capture-facts: ${OWNCLAW_EXECUTOR_CAPTURE_FACTS:true}
 
   mentor:
-    # The cloud provider: anthropic, or openai as the alternative. The settings page and /setup
-    # change it too (saved, so it survives a restart). model and api-key are OpenAI's.
+    # The cloud provider: anthropic, or openai as the alternative; anything else is read as
+    # anthropic. The settings page and /setup change it too (saved, so it survives a restart).
+    # model and api-key are OpenAI's.
     provider: ${OWNCLAW_MENTOR_PROVIDER:anthropic}
     model: gpt-5.2
     api-key: ${OPENAI_API_KEY:}

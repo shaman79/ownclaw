@@ -39,6 +39,26 @@ class DefaultModelTest {
         // Mutation: either default back to openai -> this names it.
     }
 
+    @Test
+    @DisplayName("a provider setting that names neither provider -- left blank, mistyped -- is the default, not OpenAI; openai in any case is OpenAI")
+    void aProviderThatIsNeitherIsTheDefault() throws Exception {
+        for (String neither : new String[] {"", "  ", "claude", "open ai", "Anthropic"}) {
+            assertEquals("anthropic", mentor(java.util.Map.of("OWNCLAW_MENTOR_PROVIDER", neither)).getProvider(),
+                    "OWNCLAW_MENTOR_PROVIDER='" + neither + "'");
+        }
+        for (String openai : new String[] {"openai", "OpenAI", " OPENAI "}) {
+            assertEquals("openai", mentor(java.util.Map.of("OWNCLAW_MENTOR_PROVIDER", openai)).getProvider(),
+                    "OWNCLAW_MENTOR_PROVIDER='" + openai + "'");
+        }
+        // A stored setting is applied through the same setter (SetupWizardService#applyOverrides).
+        var stored = new OwnClawConfig().getMentor();
+        stored.setProvider("openai");
+        stored.setProvider(null);
+        assertEquals("anthropic", stored.getProvider());
+        // Mutation: the setter keeps what it is given -> "claude" stays, and the gateway, which
+        // asks only whether the name is "anthropic", calls OpenAI.
+    }
+
     /** application.yaml's {@code ownclaw.mentor}, bound as the application binds it in this environment. */
     private static OwnClawConfig.Mentor mentor(java.util.Map<String, Object> environment) throws Exception {
         var sources = new java.util.ArrayList<org.springframework.core.env.PropertySource<?>>();
