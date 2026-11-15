@@ -84,7 +84,7 @@ sudo nano /opt/ownclaw/.env
 | `JAVA_OPTS` | No | JVM tuning, e.g. `-Xmx512m` |
 | `BRAVE_SEARCH_API_KEY` | No | Brave Search API key for the MCP `brave-search` server. Get one at [brave.com/search/api](https://brave.com/search/api/) |
 
-**Upgrading an install that uses OpenAI.** The default provider used to be OpenAI and is now Anthropic. An install that never chose a provider runs on the one it has a key for: with only an OpenAI key it goes on with OpenAI, and with both keys -- from the moment an Anthropic key is added -- on Anthropic. To stay on OpenAI whatever keys are set, choose it on the settings page or add `OWNCLAW_MENTOR_PROVIDER=openai` to `.env`.
+**Upgrading an install that uses OpenAI.** The default provider used to be OpenAI and is now Anthropic. An install that never chose a provider runs on the one it has a key for: with only an OpenAI key it goes on with OpenAI, and with both keys -- from the moment an Anthropic key is added -- on Anthropic. To stay on OpenAI whatever keys are set, add `OWNCLAW_MENTOR_PROVIDER=openai` to `.env` -- or save the settings page while it shows OpenAI: the provider shown is stored with whatever is saved there, so a key added on that page does not move it.
 
 **With no internet**, OwnClaw keeps working on the local model: a task whose cloud model cannot be reached goes on there by itself, and says so in the chat. The page needs nothing from the internet, so open it on the LAN at `http://<server>:8080` (the server's own address and `OWNCLAW_SERVER_PORT`) when the public name does not resolve. Telegram, web pages and package installs need the internet and fail until it is back.
 

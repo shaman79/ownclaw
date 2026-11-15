@@ -4855,6 +4855,10 @@
             showSettingsToast('No changes to save', false);
             return;
         }
+        // The provider shown goes with whatever is saved: it is the one its owner saw and left.
+        // On an install that never chose one the keys decide it, so a key saved without it
+        // moved the install to the other provider while the page showed this one.
+        payload.cloud_provider = provider;
 
         var btn = document.getElementById('settings-save');
         btn.disabled = true;

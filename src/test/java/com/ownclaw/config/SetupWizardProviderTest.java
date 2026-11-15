@@ -120,6 +120,20 @@ class SetupWizardProviderTest {
         chose.save(java.util.Map.of("cloud_provider", "openai"));
         chose.save(java.util.Map.of("anthropic_api_key", "sk-ant-test"));
         assertEquals("openai", chose.config.getMentor().getProvider(), "a choice stands, whatever the keys");
+        // What the page sends: the provider it shows with whatever is saved. An install on OpenAI
+        // that never chose, shown "openai", stays there when an Anthropic key is added.
+        var shown = new Settings(tmp.resolve("e.db"));
+        shown.save(java.util.Map.of("openai_api_key", "sk-test-openai"));
+        var keyAndProviderShown = new java.util.LinkedHashMap<String, String>();
+        keyAndProviderShown.put("anthropic_api_key", "sk-ant-test");
+        keyAndProviderShown.put("cloud_provider", "openai");
+        shown.save(keyAndProviderShown);
+        assertEquals("openai", shown.config.getMentor().getProvider(), "the page showed OpenAI, and its owner left it");
+        assertEquals("openai", shown.wizard.getSetting("cloud_provider").orElse(null));
+        String page = java.nio.file.Files.readString(Path.of("src/main/resources/static/index.html"));
+        String save = page.substring(page.indexOf("function saveSettings(originalData)"), page.indexOf("function accountsRequest("));
+        assertTrue(save.lastIndexOf("payload.cloud_provider = provider;") > save.indexOf("'No changes to save'"),
+                "the settings page sends the provider it shows with every save that changes something");
         var choseAnthropic = new Settings(tmp.resolve("d.db"));
         choseAnthropic.save(java.util.Map.of("cloud_provider", "anthropic"));
         choseAnthropic.save(java.util.Map.of("openai_api_key", "sk-test-openai"));

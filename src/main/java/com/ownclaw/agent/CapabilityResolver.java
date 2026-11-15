@@ -66,10 +66,14 @@ public class CapabilityResolver {
     /**
      * The word for mail in a trigger: mail, e-mail, email, gmail, webmail, and what they are stems
      * of ("emails", "e-maily"). Not the same letters inside an address or a host's name --
-     * "someone@gmail.com", "https://webmail.example.org", "mail.example.org": a task that sends
-     * something to an address asks for no mailbox to be read.
+     * "someone@gmail.com", "mail@example.org", "https://webmail.example.org", "mail.example.org":
+     * a task that sends something to an address asks for no mailbox to be read. So not after an
+     * @ or a dot, not before a dot and a letter, and not where an @ follows within what an
+     * address's own name can be long (64 characters: looked for no further, so a long line of
+     * such words costs no more than its length).
      */
-    private static final String MAIL = "(?<![@./:])(?:e-?|g|web)?mail(?!\\.[\\p{L}\\p{N}])";
+    private static final String MAIL =
+            "(?<![@.])(?:e-?|g|web)?mail(?![\\p{L}\\p{N}._-]{0,64}@)(?!\\.[\\p{L}\\p{N}])";
 
     /**
      * Known capability categories. Each maps user-intent patterns to the
@@ -550,8 +554,11 @@ public class CapabilityResolver {
             "approx", "incl", "excl", "eg", "ie", "cf", "vs",
             "např", "tj", "tzn", "tzv", "resp", "popř", "příp", "cca", "mj");
 
-    /** Titles before a name -- when written with a capital, as a title is: "Mr. Smith", not "for 20 ms." */
-    private static final java.util.Set<String> TITLES = java.util.Set.of("mr", "mrs", "ms", "dr", "prof");
+    /** Titles before a name that are no word of their own: "mr. smith" in small letters too. */
+    private static final java.util.Set<String> TITLES = java.util.Set.of("mr", "mrs", "dr");
+
+    /** Titles that are also a unit or a noun: a title when written with a capital -- "Ms. Smith", not "for 20 ms." */
+    private static final java.util.Set<String> TITLES_WITH_A_CAPITAL = java.util.Set.of("ms", "prof");
 
     /** Short forms of "number": they end no sentence before the number itself ("the no. 3 email"). */
     private static final java.util.Set<String> BEFORE_A_NUMBER = java.util.Set.of("no", "nr");
@@ -636,7 +643,7 @@ public class CapabilityResolver {
 
     /**
      * Whether the one dot at {@code dot} is an abbreviation's and no sentence's end: after a word
-     * of {@link #ABBREVIATIONS}; after one of {@link #TITLES} written with a capital; after one
+     * of {@link #ABBREVIATIONS} or {@link #TITLES}; after one of {@link #TITLES_WITH_A_CAPITAL} so written; after one
      * of {@link #BEFORE_A_NUMBER}, or a single letter ("č. 3"), when a number follows; after a
      * single letter that itself follows a dot ("e.g.", "i.e."). Any other single letter ends its
      * sentence -- "Check plan B. Email me the result" is two. Looks back over that one word, and
@@ -652,7 +659,8 @@ public class CapabilityResolver {
         }
         String word = text.substring(from, dot).toLowerCase(java.util.Locale.ROOT);
         if (ABBREVIATIONS.contains(word)) return true;
-        if (TITLES.contains(word)) return Character.isUpperCase(text.charAt(from));
+        if (TITLES.contains(word)) return true;
+        if (TITLES_WITH_A_CAPITAL.contains(word)) return Character.isUpperCase(text.charAt(from));
         return BEFORE_A_NUMBER.contains(word) && aNumberFollows(text, after);
     }
 

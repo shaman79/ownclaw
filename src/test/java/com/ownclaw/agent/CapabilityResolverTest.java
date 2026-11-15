@@ -162,7 +162,9 @@ class CapabilityResolverTest {
                 "run a portscan on 192.0.2.10", "do a portscan of the router", "scan the subnetwork",
                 "přeskenuj síť", "rerun the command", "check the openssl cert", "rediscover hosts",
                 "check Mr. Smith's email", "Fetch approx. 10 emails", "Zkontroluj např. e-maily od Jany",
-                "check e.g. the email from Bob", "read the no. 3 email", "Scan e.g. the home network")) {
+                "check e.g. the email from Bob", "read the no. 3 email", "Scan e.g. the home network",
+                "check mr. smith's email", "check Dr. Novak's email", "check my calendar/email for today",
+                "check slack/mail", "check my email, cc someone@example.org")) {
             assertNotNull(bare().resolve(message), message);
         }
         // Mutation: WORD_START also put after each word (whole words only) -> "emails", "records" fail.
@@ -181,6 +183,9 @@ class CapabilityResolverTest {
                 "Read the changelog and post it to https://webmail.example.org/compose",
                 "Fetch the report and upload it to mail.example.org",
                 "Check the build and tell someone@mail.example.org",
+                "Send the new price list to mail@example.org",
+                "Read this and forward it to e-mail@example.org",
+                "Check the build and tell email.alerts@example.org",
                 // Two sentences, a trigger's words in each
                 "Check plan B. Email me the result",
                 "Scan page A. Network diagram is on page B",
@@ -191,9 +196,10 @@ class CapabilityResolverTest {
                 "Convert it for Dr. X. The video is fine as it is")) {
             assertNull(bare().resolve(message), message);
         }
-        // Mutations: the mail word found after an @, a dot or a slash, or before a dot and a
-        // letter -> the first nine ask for a mailbox reader; the abbreviation rule as it was
-        // first written (any single letter, "doc", "ms", "prof" in small letters) -> the rest ask.
+        // Mutations: the mail word found after an @ or a dot, before a dot and a letter, or as
+        // an address's own name -> the first twelve ask for a mailbox reader; the abbreviation
+        // rule as it was first written (any single letter, "doc", "ms", "prof" in small letters)
+        // -> the rest ask.
     }
 
     @Test
@@ -227,7 +233,9 @@ class CapabilityResolverTest {
                 ("." .repeat(999) + letter).repeat(400),              // many such runs
                 ". ".repeat(200_000),                                 // nothing but ends
                 "open. ".repeat(60_000) + "scan? ".repeat(60_000),    // a trigger's first word in every sentence, never its second
-                "no. 3 ".repeat(60_000) + "mr. ".repeat(60_000))) {   // every dot an abbreviation's: one long sentence
+                "no. 3 ".repeat(60_000) + "mr. ".repeat(60_000),      // every dot an abbreviation's: one long sentence
+                "mail-".repeat(80_000) + letter,                      // a mail word at every hyphen, and never an @
+                "check " + "mail.".repeat(80_000) + letter)) {        // ... at every dot
             org.junit.jupiter.api.Assertions.assertTimeoutPreemptively(java.time.Duration.ofSeconds(20),
                     () -> assertNull(resolver.resolve(text)), () -> "a text of " + text.length() + " characters beginning " + text.substring(0, 12));
         }
