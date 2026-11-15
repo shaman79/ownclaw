@@ -1,5 +1,6 @@
 package com.ownclaw.users;
 
+import com.ownclaw.conversation.MigratedDatabase;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -321,5 +322,10 @@ class CredentialGrantsTest {
         assertEquals(List.of("ann mailer SMTP_PASS permanent"), GrantsKit.rows(jdbc));
         assertEquals(List.of("SMTP_PASS"), grants.revoke("ann", "mailer", List.of("SMTP_PASS")));
         assertEquals(List.of(), GrantsKit.rows(jdbc));
+
+        // The control: through a connection opened without the pragma, as the tests' usual helper
+        // opens one, the same grant for nobody is written and nothing says so.
+        new CredentialGrantService(MigratedDatabase.at(tmp.resolve("t.db"))).grant("nobody", "mailer", List.of("SMTP_PASS"));
+        assertEquals(List.of("nobody mailer SMTP_PASS permanent"), GrantsKit.rows(jdbc));
     }
 }
