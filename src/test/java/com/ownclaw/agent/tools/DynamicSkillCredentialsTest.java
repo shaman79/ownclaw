@@ -9,6 +9,7 @@ import com.ownclaw.sandbox.SandboxManager;
 import com.ownclaw.sandbox.SandboxResult;
 import com.ownclaw.skills.PythonEnvironmentService;
 import com.ownclaw.users.CredentialVault;
+import com.ownclaw.users.GrantsKit;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -35,9 +36,12 @@ class DynamicSkillCredentialsTest {
 
     private final ObjectMapper mapper = new ObjectMapper();
 
-    /** A vault holding these, whoever asks. */
+    /**
+     * A vault holding these, whoever asks, each granted to every skill: what is tested here is
+     * how the values travel, not who may read them (SkillGrantRunTest).
+     */
     private static CredentialVault vault(Map<String, String> values) {
-        return new CredentialVault(null) {
+        return new CredentialVault(null, GrantsKit.everythingGranted()) {
             @Override
             public Map<String, String> getCredentials(String userId, List<String> keys) {
                 return values;
