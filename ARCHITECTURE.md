@@ -974,8 +974,8 @@ Every Python process OwnClaw starts on the host for skills -- a skill's run, its
 │    runner puts them in the skill's own env   │
 │  • Never in bwrap's or the runtime CLI's env │
 │  • Never written to disk unencrypted         │
-│  • Every credential the skill declares;      │
-│    grants are not checked (§8.3)             │
+│  • Only credentials its user granted the     │
+│    skill; all it declares, or none (§8.3)    │
 │                                              │
 │  I/O Protocol:                               │
 │  • Java writes JSON params to skill's stdin  │
@@ -992,91 +992,44 @@ Every Python process OwnClaw starts on the host for skills -- a skill's run, its
 - **Encryption**: AES-256-GCM, per-user encryption key
 - **Key derivation**: PBKDF2-HMAC-SHA256 (100,000 iterations) from a system master key and a per-user salt. The master key is generated at first start and kept in the database (`system_settings`), so the database is what must stay out of a skill's reach: the jail hides it (§8.1), and the ops API refuses to query `system_settings` and `credential_vault`.
 - **Storage**: Encrypted blob in SQLite
-- **Access**: Skills declare required credentials in SKILL.yaml; a skill receives every vault credential its SKILL.yaml declares. Grants (§8.3) are not enforced
+- **Access**: Skills declare required credentials in SKILL.yaml; a skill is handed a credential only when the user it runs for granted that skill that credential (§8.3), and it is handed all it declares or none
 - **Audit**: Each run that is given credentials is logged: the skill, the user and the key names, never a value
 
-### 8.3 Credential Grant Approval
+### 8.3 Credential Grants
 
-**Not implemented.** Nothing checks a grant before a run: `CredentialGrantService.checkGrant` and `allGranted` have no callers, and `/grant` and `/revoke` only write the rows the ops view lists. A skill receives every vault credential its SKILL.yaml declares. What follows is the design.
+A skill is code the agent wrote, and declaring a credential in SKILL.yaml is not being allowed to read it. The vault hands a skill a credential only when the user the run is for **granted that skill that credential**. One it was not granted is not decrypted, and with one refused the skill is handed nothing and is not started: a skill does not run on half of what it declares.
 
-Skills must not silently access credentials. Every credential access requires explicit user approval.
+**Where it is decided.** `CredentialVault.forSkill` is the one place a skill's credentials are read, and it asks `CredentialGrantService` (table `credential_grants`: user, skill name, credential name). Whoever calls a skill asks first (`Tool.ungranted`: the cloud model's own call in `AgentLoop`, a delegated call in `LocalExecutor`), so a refused call runs nothing and records no result, and is not taken for a failure of the skill to repair.
 
-**Grant types**:
-- **`permanent`**: User approves once, skill can always use this credential. Stored in `credential_grants.json`.
-- **`one-time`**: User approves for this execution only. Not stored.
-- **`declined`**: User refuses. Stored so the system doesn't ask again (until user resets).
+**Who grants.** Only the user, in a command they send in a chat. No tool or action a model can call makes a grant, and the answers a model offers to click never hold a command.
 
-**Flow**:
+| Command | What it does |
+|---------|--------------|
+| `/grant <skill> [KEY ...]` | Lets the skill read the credentials named, or every one it declares. Only what the skill declares can be granted |
+| `/revoke <skill> [KEY ...]` | Takes that back: the ones named, or all of them |
+| `/grants` | What each skill may read, and which skills wait for a grant |
+
+**How the user is asked.** A task that could not run a skill says so at its end, in a line OwnClaw writes itself, and offers the granting command to click:
+
 ```
-SkillRunner about to execute "send_email"
-  → needs SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS
-        │
-        ▼
-Check credential_grants.json for this user:
-  SMTP_HOST: permanent ✓ (approved 2026-02-01)
-  SMTP_PORT: permanent ✓ (approved 2026-02-01)
-  SMTP_USER: permanent ✓ (approved 2026-02-01)
-  SMTP_PASS: permanent ✓ (approved 2026-02-01)
-        │
-  All approved → inject and execute
+🔑 send_report was not run: you have not allowed it to read SMTP_HOST, SMTP_PASSWORD
+   from your vault. To allow it, send: /grant send_report SMTP_HOST SMTP_PASSWORD
 ```
 
-**First-time use (no grant exists)**:
-```
-SkillRunner about to execute "send_email"
-  → needs SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS
-        │
-        ▼
-No grant found for SMTP_* with skill "send_email"
-        │
-        ▼
-Chat message to user:
-  "🔑 Skill 'send_email' requests access to your SMTP credentials.
-   (SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS)
-   
-   Allow? [Always] [Once] [Deny]"
-        │
-User responds: "Always"
-        │
-        ▼
-credential_grants.json updated:
-  {"skill":"send_email", "credentials":["SMTP_*"], 
-   "grant":"permanent", "granted_at":"2026-02-22T14:30:00Z"}
-        │
-        ▼
-Credentials injected → skill executes
-```
+**What a grant covers.** A skill's name and a credential's name, for one user. A skill rewritten under its name keeps what it was granted — a repair must leave it working — so a grant is trust in the skill as it will be, not in one version of its code. A credential a skill declares later is not granted with the rest, and until its user grants it the skill is not run.
 
-**New skill requesting credentials the user hasn't seen before**:
-```
-Mentor-generated skill "api_check_stocks" requests BROKERAGE_API_KEY
-        │
-        ▼
-Chat: "⚠️ New skill 'api_check_stocks' (generated by Mentor) 
-       requests access to BROKERAGE_API_KEY.
-       This skill was just created and has not been used before.
-       Allow? [Always] [Once] [Deny]"
-```
+**Skills that existed before grants were checked.** They keep the credentials they were being handed: at the first start of that release each registered skill was granted, once, the credentials it declares, for every user whose vault held them. A skill made since is granted by its user or not at all.
 
-**Grants stored in** `credential_grants.json`:
-```json
-{
-  "grants": [
-    {"skill": "send_email", "credentials": ["SMTP_*"], "type": "permanent", "granted_at": "2026-02-01"},
-    {"skill": "browse_web", "credentials": [], "type": "permanent", "granted_at": "2026-02-01"},
-    {"skill": "api_check_stocks", "credentials": ["BROKERAGE_API_KEY"], "type": "declined", "declined_at": "2026-02-22"}
-  ]
-}
-```
+**Never handed to any skill**: `GUARDIAN_LINK_SECRET`, which signs the links that open the chat as verified (§8.2).
 
 ### 8.4 Threat Model
 
 | Threat | Mitigation |
 |--------|-----------|
 | Malicious skill code | SkillJail (bubblewrap), once bubblewrap is installed: the host read-only, the service's state hidden, only its own directory and its account's /tmp writable (§8.1); until then the systemd unit's limits |
-| Credential exfiltration | A skill receives every vault credential its SKILL.yaml declares -- grants (§8.3) are not enforced; with the jail on, the database and .env are hidden from it (§8.1); the network is shared, not filtered |
-| Unauthorized credential access | Not enforced: /grant and /revoke record grants, but nothing checks them before a run (§8.3) |
-| Mentor generating credential-grabbing skills | Not mitigated: a new skill gets every credential it declares, with no warning (§8.3) |
+| Credential exfiltration | A skill reads only the credentials its user granted it (§8.3); with the jail on, the database and .env are hidden from it (§8.1). A skill that was granted a credential can send it anywhere its code chooses: the network is shared, not filtered |
+| Unauthorized credential access | A credential a skill was not granted is never decrypted for it, and the skill is not run (§8.3) |
+| Mentor generating credential-grabbing skills | A new skill reads no credential until its user grants it, in a command only they can send (§8.3). Not covered: a skill that already holds a grant, rewritten under its own name, keeps it |
 | Prompt injection via user input | Executor uses structured I/O, not raw string interpolation |
 | Mentor generating harmful skills | A new skill is checked for its syntax and that it imports and defines run(), inside the jail; what it does is not judged. The critic blocks duplicates of existing skills |
 | Token budget exhaustion | Per-user hard limits, automatic cutoff |
@@ -1339,7 +1292,7 @@ ownclaw/
 │       │   │   ├── UserProfile.java               # User data model
 │       │   │   ├── UserRepository.java            # SQLite persistence
 │       │   │   ├── CredentialVault.java           # Encrypted credential store
-│       │   │   ├── CredentialGrantService.java    # Manages permanent/one-time/declined grants
+│       │   │   ├── CredentialGrantService.java    # Which skill may read which credential (asked by the vault)
 │       │   │   └── TokenBudget.java               # Budget tracking model
 │       │   │
 │       │   ├── conversation/
