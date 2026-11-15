@@ -172,6 +172,9 @@ class SkillGrantRunTest {
 
         assertTrue(GrantsKit.run(mailer, "ann").success());
         assertEquals(Map.of("SMTP_PASS", PASS), skills.launches.runs().get(0).credentials());
+        String handed = skills.launches.runs().get(0).stdin();
+        assertFalse(handed.contains(USER) || handed.contains(LINK) || handed.contains(BOBS),
+                "what the skill does not declare is not handed over, whatever its account's vault holds: " + handed);
 
         grants.grant("bob", "mailer", List.of("SMTP_PASS"));
         assertTrue(GrantsKit.run(mailer, "bob").success());
