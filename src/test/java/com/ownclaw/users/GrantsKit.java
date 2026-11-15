@@ -191,8 +191,9 @@ public final class GrantsKit {
         public final SkillManager manager;
         /** The packages a self-heal installed, each call's. */
         public final List<List<String>> installed = new CopyOnWriteArrayList<>();
+        /** An environment service that sets nothing up: every skill runs on "python3", and an install is only kept. */
+        public final PythonEnvironmentService python;
         private final CredentialVault vault;
-        private final PythonEnvironmentService python;
 
         /** @param root where the skills directory is; made by the first skill, not before */
         public Skills(Path root, ToolRegistry tools, CredentialVault vault) {
@@ -221,6 +222,11 @@ public final class GrantsKit {
                 @Override
                 public String getSystemPython() {
                     return "python3";
+                }
+
+                @Override
+                public boolean removeEnvironments(String skillName) {
+                    return true;
                 }
             };
             registry = registry();
