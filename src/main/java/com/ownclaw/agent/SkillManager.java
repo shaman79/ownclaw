@@ -330,13 +330,16 @@ public class SkillManager {
             SkillJail.writeAuthored(yamlFile,
                     buildSkillYaml(name, author, description, parametersDef, requiresNetwork, hasSideEffects,
                             timeout, credentials, systemPackagesStr, containerImage));
-            SkillJail.writeAuthored(codeFile, code);
             // A skill that declares nothing still gets requirements.txt -- empty, which resolves
             // to system Python exactly as a missing one did, so the old venv is not used. It is
             // bound read-only into the jail with the other two; a missing one would be a name the
             // skill could create itself, for the JVM to read and pip to install from.
             SkillJail.writeAuthored(reqFile, requirements != null && !requirements.isBlank()
                     ? requirements.strip() + "\n" : "");
+            // The code last: a write that fails before it leaves the code there was, which is the
+            // code the skill is registered and granted as. Written before the requirements, a
+            // failure there left the new code under the grants of the old.
+            SkillJail.writeAuthored(codeFile, code);
 
             // Does it actually load? py_compile above proves the file parses, which is a much
             // weaker claim than it sounds: it never executes a single import, so a skill that

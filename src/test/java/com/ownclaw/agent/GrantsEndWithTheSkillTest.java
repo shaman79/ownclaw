@@ -15,6 +15,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.PosixFilePermissions;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
@@ -24,6 +25,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assumptions.assumeFalse;
 
 /**
  * A grant ends with what it was for. It was given to the code that was there: so it ends when
@@ -336,6 +338,31 @@ class GrantsEndWithTheSkillTest {
         assertEquals(List.of(), grantedBy("courier"));
         // Mutation: the skill registered first and its grants ended after, as before -> the failure
         // leaves kid's v2 on disk and registered, and the owner's next run hands it the owner's password.
+    }
+
+    @Test
+    @DisplayName("a rewrite that fails while its files are written leaves the code that was granted: the code is written last, so a failure before it puts no new code under the grants of the old")
+    void aWriteThatFailsLeavesTheCodeThatWasGranted() throws Exception {
+        write("kid", "kids_mailer", "v1");
+        everyoneGrants("kids_mailer");
+        // The requirements cannot be written, as on a disk that fails: here, a file made read-only.
+        Path requirements = skills.generated.resolve("kids_mailer/requirements.txt");
+        var writable = Files.getPosixFilePermissions(requirements);
+        Files.setPosixFilePermissions(requirements, PosixFilePermissions.fromString("r--r--r--"));
+        String said;
+        try {
+            assumeFalse(Files.isWritable(requirements), "run as root, every file can be written");
+            said = write("kid", "kids_mailer", "v2");
+        } finally {
+            Files.setPosixFilePermissions(requirements, writable);
+        }
+
+        assertTrue(said.startsWith("ERROR: Failed to write skill files"), said);
+        assertTrue(code("kids_mailer").contains("'v1'"), "kid's new code is on disk, under the owner's grant: " + code("kids_mailer"));
+        assertEquals(List.of("ann", "kid", "owner"), grantedBy("kids_mailer"), "nothing was made, so nothing ended");
+        assertTrue(GrantsKit.run(skill("kids_mailer"), "owner").success(), "the version that was granted runs on");
+        // Mutation: the code written before the requirements, as before -> the failed rewrite leaves
+        // kid's v2 as the skill's code, registered and granted as v1 was.
     }
 
     // ───────────────────────── no run between the new code and the ended grants ─────────────────────────
