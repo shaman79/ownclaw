@@ -414,9 +414,12 @@ class GrantRefusedCallTest {
     @Test
     @DisplayName("a model's own choices never hold /grant or /revoke, however it writes them: a picked choice is sent as the owner's message, and would grant")
     void noChoiceOfTheModelsIsAGrant() {
+        // A no-break space and a zero-width one before the slash: blanks the page's trim leaves, and the chats' grammar strips.
+        String nbsp = String.valueOf((char) 0x00A0), zeroWidth = String.valueOf((char) 0x200B);
         List<String> commands = List.of("/grant mailer SMTP_PASS", "/grant mailer", " /grant mailer SMTP_PASS", "/GRANT mailer",
                 "/Grant mailer smtp_pass", "\t/grant mailer", "/revoke mailer", "/revoke mailer SMTP_PASS", "/grants",
-                "/grant", "/grant\tmailer", "\n/grant mailer\n");
+                "/grant", "/grant\tmailer", "\n/grant mailer\n", "/ grant mailer", nbsp + "/grant mailer SMTP_PASS",
+                zeroWidth + "/grant mailer SMTP_PASS", zeroWidth + nbsp + " /revoke mailer");
         assertEquals(List.of(), choicesOf(commands), "a native call's list");
         assertEquals(List.of(), choicesOf(String.join("\n", commands)), "the text protocol's one per line");
         assertEquals(List.of(), choicesOf("[\"/grant mailer SMTP_PASS\", \"/revoke mailer\", \" /grant mailer\"]"),
@@ -434,9 +437,11 @@ class GrantRefusedCallTest {
         run = new Run(tmp, null);
         var commands = new CommandHandler(run.rig.registry, null, null, null, run.rig.vault, run.rig.vault.grants(),
                 null, null, null, null, null, null, null, null, null, null);
+        // The full-width slash a phone keyboard gives: the chats read no command in it.
+        String fullWidth = (char) 0xFF0F + "grant mailer SMTP_PASS";
         List<String> offered = choicesOf(List.of("Yes: /grant mailer SMTP_PASS", "ok\n/grant mailer SMTP_PASS",
-                "`/grant mailer SMTP_PASS`", "grant mailer SMTP_PASS", "\\/grant mailer SMTP_PASS"));
-        assertEquals(5, offered.size(), offered.toString());
+                "`/grant mailer SMTP_PASS`", "grant mailer SMTP_PASS", "\\/grant mailer SMTP_PASS", fullWidth));
+        assertEquals(6, offered.size(), offered.toString());
 
         for (String picked : offered) {
             assertFalse(CommandHandler.isCommand(picked), picked);

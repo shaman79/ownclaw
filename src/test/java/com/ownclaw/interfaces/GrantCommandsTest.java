@@ -127,7 +127,8 @@ class GrantCommandsTest {
         for (String command : List.of("/grant mailer WIFI_PSK", "/grant mailer SMTP_PASS WIFI_PSK",
                 "/grant mailer WIFI_PSK SMTP_PASS", "/grant mailer IMAP_PASS", "/grant mailer SMTP_%", "/grant mailer %",
                 "/grant mailer SMTP_PASS_2", "/grant mailer SMTP", "/grant mailer *", "/grant mailer SMTP_PASS,SMTP_USER",
-                "/grant mailer [SMTP_PASS, SMTP_USER]", "/grant mailer SMTP_PASS' OR '1'='1")) {
+                "/grant mailer [SMTP_PASS, SMTP_USER]", "/grant mailer SMTP_PASS' OR '1'='1",
+                "/grant mailer SMTP_PASS\n/grant mail_digest")) {
             String said = say("ann", command);
             assertTrue(said.startsWith("Not granted: 'mailer' does not declare "), command + " -> " + said);
             assertTrue(said.endsWith("It declares SMTP_USER, SMTP_PASS."), command + " -> " + said);
@@ -199,6 +200,17 @@ class GrantCommandsTest {
         assertTrue(said.contains("Not in your vault yet: IMAP_PASS"), said);
         assertTrue(said.contains("`/cred set <KEY> <VALUE>`"), said);
         assertEquals(List.of("ann mail_digest IMAP_PASS permanent"), rows());
+    }
+
+    @Test
+    @DisplayName("a grant is a command sent on its own: inside another command, or after words, it grants nothing")
+    void onlyOnItsOwn() {
+        assertEquals(CommandHandler.COMMAND_AS_TASK, say("ann", "/bg /grant mailer SMTP_PASS"));
+        for (String text : List.of("/queue /grant mailer SMTP_PASS", "please /grant mailer SMTP_PASS", "grant mailer SMTP_PASS",
+                "/grantmailer SMTP_PASS", "/grants mailer", "/granted mailer SMTP_PASS", "//grant mailer SMTP_PASS")) {
+            assertTrue(commands.handle("ann", text).isEmpty(), "read as a command of this handler: " + text);
+        }
+        assertEquals(List.of(), rows());
     }
 
     // ───────────────────────── an account's own (R6), foreign keys on (R8) ─────────────────────────
