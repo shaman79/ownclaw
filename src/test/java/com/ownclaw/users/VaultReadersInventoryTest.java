@@ -279,8 +279,36 @@ class VaultReadersInventoryTest {
         ends.values().removeIf(List::isEmpty);
         assertEquals(Map.of(REGISTRY, List.of("skill, keep")), ends,
                 "CredentialGrantService#end is called by DynamicSkillRegistry#endGrants alone.");
+
+        // Whose task a skill is written or deleted for decides what ends: the loop hands on its
+        // task's account. Written for no account -- which ends nothing on a rewrite, and is refused
+        // nothing -- it is the owner's own pages, each of which lets the owner alone in.
+        var writers = new TreeMap<String, List<String>>();
+        every("skillManager\\s*\\.\\s*createSkill").forEach((file, calls) -> writers.computeIfAbsent(file, f -> new ArrayList<>())
+                .addAll(calls.stream().map(a -> "written for " + (split(a).size() >= 3 ? split(a).get(2) : "no account")).toList()));
+        every("skillManager\\s*\\.\\s*deleteSkill").forEach((file, calls) -> writers.computeIfAbsent(file, f -> new ArrayList<>())
+                .addAll(calls.stream().map(a -> "deleted for " + (split(a).size() >= 2 ? split(a).get(1) : "no account")).toList()));
+        assertEquals(Map.of(
+                LOOP, List.of("written for context.userId()", "deleted for context.userId()"),
+                "com/ownclaw/interfaces/web/SkillController.java", List.of("written for no account", "deleted for no account"),
+                "com/ownclaw/interfaces/web/DebugController.java", List.of("deleted for no account")),
+                writers, "Who writes or deletes a skill, and for which account: a caller that names none must be the owner's.");
+        for (String page : List.of("com/ownclaw/interfaces/web/SkillController.java", "com/ownclaw/interfaces/web/DebugController.java")) {
+            String src = code(MAIN.resolve(page), true);
+            for (String change : List.of("createSkill", "deleteSkill")) {
+                Matcher call = Pattern.compile("skillManager\\s*\\.\\s*" + change + "\\s*\\(").matcher(src);
+                while (call.find()) {
+                    // The nearest check above the call, in the same method: the owner, or nothing is done.
+                    int method = src.lastIndexOf("Mapping(", call.start());
+                    assertTrue(src.substring(method, call.start()).contains("if (!authService.isOwner(userId)) return ownerOnly();"),
+                            page + " calls " + change + " for no account without letting the owner alone in");
+                }
+            }
+        }
         // Mutations: a retirement ends the skill's grants -> a second endGrants in the registry;
-        // deleting a credential ends grants by itself (grants.end(...) in the vault) -> listed, and not allowed.
+        // deleting a credential ends grants by itself (grants.end(...) in the vault) -> listed, and
+        // not allowed; the loop writing a skill for no account -> listed as such; the Skills page
+        // deleting for any account that asks -> the call stands under no check of the owner.
     }
 
     @Test
