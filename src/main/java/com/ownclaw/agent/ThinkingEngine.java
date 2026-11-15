@@ -956,7 +956,8 @@ public class ThinkingEngine {
         // NOTE: CapabilityResolver hints are handled deterministically in AgentLoop.runLoop()
         // at step 0 — the hint bypasses the ThinkingEngine entirely and synthesizes the
         // skill_create action without any LLM call. By the time the ThinkingEngine runs
-        // (step 1+), the skill is already created and visible in the trajectory.
+        // (step 1+), the skill is already created and visible in the trajectory -- or was not
+        // made at all: the duplicate gate kept it from being, and the model takes step 1.
 
         // Special actions (static — tool descriptions never change).
         //

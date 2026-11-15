@@ -1009,12 +1009,6 @@ public class AgentLoop {
             if (step == 0 && context.capabilityHint() != null) {
                 CapabilityResolver.CapabilityHint hint = context.capabilityHint();
 
-                log.info("Task {} step 1: deterministic skill_create from CapabilityResolver → '{}'",
-                        context.taskId(), hint.suggestedName());
-
-                statusEmitter.emitForTask(context.userId(), context.taskId(), StatusMessage.Type.STEP,
-                        "Creating skill '" + hint.suggestedName() + "' (auto-detected)...");
-
                 // Build skill_create params directly from the hint
                 Map<String, Object> skillParams = new HashMap<>();
                 skillParams.put("name", hint.suggestedName());
@@ -1035,6 +1029,27 @@ public class AgentLoop {
                         AgentAction.SKILL_CREATE, skillParams,
                         "CapabilityResolver detected missing " + hint.category()
                                 + " capability — creating skill deterministically");
+
+                // The resolver's skill passes the gate a model's skill_create passes (critique):
+                // this step never reaches the critique below. One the gate blocks -- a skill that
+                // exists covers it by name, so the resolver saw a gap where there is none -- is not
+                // made and not recorded: no model asked for it, so the model takes the task's
+                // first step itself, with every skill there to find.
+                CriticAgent.Verdict gate = critique(action, context);
+                if (!gate.allowed()) {
+                    log.info("Task {}: no deterministic skill_create of '{}' -- {}", context.taskId(),
+                            hint.suggestedName(), gate.blockReason());
+                    context.setCapabilityHint(null);
+                    step--; // the same step, taken by the model
+                    continue;
+                }
+
+                log.info("Task {} step 1: deterministic skill_create from CapabilityResolver → '{}'",
+                        context.taskId(), hint.suggestedName());
+
+                statusEmitter.emitForTask(context.userId(), context.taskId(), StatusMessage.Type.STEP,
+                        "Creating skill '" + hint.suggestedName() + "' (auto-detected)...");
+
                 // No model chose this step, so nothing was written beside it; its code is written
                 // on the cloud, or on the local model when the cloud is not available.
                 context.chat().step(step + 1, action, null, llmRouter.isLocal(llmRouter.selectProvider(context)));
