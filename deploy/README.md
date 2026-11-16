@@ -449,6 +449,15 @@ The systemd service runs with these hardening options:
 - `ProtectHome=true`
 - `PrivateTmp=true`
 - Only `/opt/ownclaw/data`, `/opt/ownclaw/skills`, `/opt/ownclaw/logs` and `/opt/ownclaw/backups` are writable.
+- `UMask=0077`: what the service creates -- the database and its WAL, uploads, logs, skills and
+  their environments -- is readable by the service's user alone. Under systemd's default (022)
+  the database, which holds every conversation and the key to the vault, was readable by every
+  account on the host. The unit is synced by the updater; the umask applies from the restart
+  after it.
+- At every start the application takes any permission of the group and of other accounts off
+  the database, its `-wal` and `-shm` files and the directory they are in (`data/`, uploads
+  included), and says so in its log: that closes what an earlier umask left open.
+  `/api/ops/health` shows the database file's mode (`checks.database.fileMode`, `rw-------`).
 
 With `bubblewrap` installed and its self-check passed (`/api/ops/health` shows the jail ON),
 every skill also runs in its own jail, which hides OwnClaw's data, `.env`, logs and other skills

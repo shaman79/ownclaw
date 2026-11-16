@@ -162,6 +162,8 @@ public class OpsService {
             m.put("ok", Integer.valueOf(1).equals(one));
             m.put("path", config.getDatabase().getPath());
             m.put("sizeBytes", fileSize(Path.of(config.getDatabase().getPath())));
+            // Whether another account on the host can read it: rw------- is its owner's alone.
+            m.put("fileMode", fileMode(Path.of(config.getDatabase().getPath())));
             m.put("journalMode", jdbc.queryForObject("PRAGMA journal_mode", String.class));
             m.put("foreignKeys", jdbc.queryForObject("PRAGMA foreign_keys", Integer.class));
             return m;
@@ -1334,6 +1336,16 @@ public class OpsService {
             return Files.isReadable(p) ? Files.readString(p) : null;
         } catch (IOException e) {
             return "«unreadable: " + e.getMessage() + "»";
+        }
+    }
+
+    /** A file's POSIX permissions as ls shows them -- "rw-------" -- or null where there are none to read. */
+    private static String fileMode(Path p) {
+        try {
+            return java.nio.file.attribute.PosixFilePermissions.toString(
+                    Files.getPosixFilePermissions(p, java.nio.file.LinkOption.NOFOLLOW_LINKS));
+        } catch (IOException | UnsupportedOperationException e) {
+            return null;
         }
     }
 

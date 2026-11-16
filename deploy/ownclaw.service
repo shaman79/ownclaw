@@ -15,6 +15,14 @@ ExecStop=/bin/kill -SIGTERM $MAINPID
 # Environment
 EnvironmentFile=-/opt/ownclaw/.env
 
+# What the service creates is its own: the database and its WAL, uploads, logs, skills and their
+# environments. systemd's default umask (022) made each readable by every account on the host --
+# the database holds every conversation and the key to the vault. Nothing else needs to read
+# them: skills run as this user in their jail, and no container runtime works under this unit
+# (NoNewPrivileges, below). The application also closes, at every start, what an earlier umask
+# left open in the database's directory.
+UMask=0077
+
 # Graceful shutdown (30s)
 TimeoutStopSec=30
 KillSignal=SIGTERM
