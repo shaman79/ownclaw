@@ -69,20 +69,23 @@ public class CapabilityResolver {
     /**
      * Before a word for mail, what makes it where something goes or how: "to my email", "to my
      * work email"; "by email", "via e-mail" after a verb of sending -- "send it by email", but
-     * not "what arrived by email", and "let me know by email"; "as an email", "as email", "put
-     * it in an email", "reply with an email"; and an email being made, with its article and one
-     * word before it -- "send me an email", "send Bob a short new email", "write an email", but
-     * not "send me my unread emails". Looked for no further back than that, so it costs the same
-     * at every word.
+     * not "what arrived by email", and after a verb of telling -- "let us know by email", "reply
+     * by email", "keep me posted by email"; "as an email", and "as email" after a verb of sending
+     * -- not "such as email"; "put it in an email", "summarize it in an email", "reply with an
+     * email"; and an email being made, with its article and up to two words before it -- "send me
+     * an email", "send my boss a short new email", "write an email", but not "send me my unread
+     * emails". Looked for no further back than that, so it costs the same at every word.
      */
     private static final String SENT_BEFORE = "(?<!(?:"
             + "\\bto\\s{1,3}(?:my|your|his|her|our|their)(?:\\s{1,3}\\p{L}{1,12})?"
-            + "|\\b(?:send|deliver|notify|share|forward|tell|inform|let\\s{1,3}me\\s{1,3}know)" + UP_TO_TWO_WORDS
-            + "\\s{1,3}(?:by|via|per)"
-            + "|\\bas(?:\\s{1,3}an?)?"
-            + "|\\bput\\s{1,3}(?:it|them|this|that|everything)\\s{1,3}in\\s{1,3}an?"
+            + "|\\b(?:send|deliver|notify|share|forward|tell|inform|alert|reply|respond|answer|report"
+            + "|let\\s{1,3}(?:me|us)\\s{1,3}know|keep\\s{1,3}(?:me|us)\\s{1,3}posted|get\\s{1,3}back\\s{1,3}to\\s{1,3}(?:me|us))"
+            + UP_TO_TWO_WORDS + "\\s{1,3}(?:by|via|per)"
+            + "|\\bas\\s{1,3}an?"
+            + "|\\b(?:send|forward|share|deliver)" + UP_TO_TWO_WORDS + "\\s{1,3}as"
+            + "|\\b(?:put|write|summari[sz]e|tell)\\s{1,3}(?:it|them|this|that|everything|me|us)\\s{1,3}in\\s{1,3}an?"
             + "|\\breply\\s{1,3}with\\s{1,3}an?"
-            + "|\\b(?:send|write|compose|draft|drop|shoot)(?:\\s{1,3}\\p{L}{1,20})?\\s{1,3}(?:an?|another)"
+            + "|\\b(?:send|write|compose|draft|drop|shoot)" + UP_TO_TWO_WORDS + "\\s{1,3}(?:an?|another)"
             + "(?:\\s{1,3}(?:new|short|quick|brief))?(?:\\s{1,3}(?:new|short|quick|brief))?"
             + ")\\s{1,3})";
 
@@ -92,18 +95,30 @@ public class CapabilityResolver {
      * text's start (a look-behind sees past the sentence it is matched in, so its ^ is the
      * text's) -- and followed by what is sent, who it goes to or when: "and email it to me",
      * "then mail me", "and email the result to Bob", "email Jana the menu", "and email when it is
-     * down". "the email her manager sent" is none: the word is not where a clause begins.
+     * down" -- "to" after a conjunction alone: "Mail to Bob bounced" opens a sentence with a
+     * noun. "the email her manager sent" is none: the word is not where a clause begins.
      */
-    private static final String SENT_AS_A_VERB = "(?!(?<=(?:^|[.!?\\n\\r,;:]|\\b(?:and|then|please|pls|also|or|you))"
-            + "\\s{0,3})(?:e-?|g|web)?mail\\s{1,8}(?:(?:it|me|them|us|him|her|you|everyone|everybody|the|a|an|this|that"
-            + "|these|those|my|our|your|his|their|its|to|when|if|once)\\b|(?-i:\\p{Lu})))";
+    private static final String SENT_AS_A_VERB = "(?!(?<=(?:[,;:]|\\b(?:and|then|please|pls|also|or|you))\\s{0,3})"
+            + "(?:e-?|g|web)?mail\\s{1,8}(?:(?:it|me|them|us|him|her|you|everyone|everybody|the|a|an|this|that"
+            + "|these|those|my|our|your|his|their|its|to|when|if|once)\\b|(?-i:\\p{Lu})))"
+            // Where a sentence begins, "to" follows a noun as often: "Mail to Bob bounced".
+            + "(?!(?<=(?:^|[.!?\\n\\r])\\s{0,3})"
+            + "(?:e-?|g|web)?mail\\s{1,8}(?:(?:it|me|them|us|him|her|you|everyone|everybody|the|a|an|this|that"
+            + "|these|those|my|our|your|his|their|its|when|if|once)\\b|(?-i:\\p{Lu})))";
+
+    /**
+     * Not right after a Czech verb of arriving -- "přišlo", "nepřišlo", "došel", "dorazila" --
+     * and the blanks after it: what arrives by mail, or at it, is mail to read.
+     */
+    private static final String NOT_ARRIVED = "(?<!\\b(?:ne)?(?:přiš|doš|dorazi)\\p{L}{0,4}\\s{1,3})";
 
     /**
      * The Czech "to the mail" -- "pošli to na mail", "na můj pracovní e-mail" -- is somewhere to
-     * send to; "na mailu", with its ending, is where mail is read: "co mám na mailu".
+     * send to; "na mailu", with its ending, is where mail is read: "co mám na mailu", and so is
+     * what arrived there: "co mi přišlo na mail".
      */
-    private static final String TO_THE_MAIL = "(?!(?<=\\bna\\s{1,3}(?:\\p{L}{1,12}\\s{1,3})?(?:\\p{L}{1,12}\\s{1,3})?)"
-            + "(?:e-?|g|web)?mail(?!\\p{L}))";
+    private static final String TO_THE_MAIL = "(?!(?<=" + NOT_ARRIVED + "\\bna\\s{1,3}(?:\\p{L}{1,12}\\s{1,3})?"
+            + "(?:\\p{L}{1,12}\\s{1,3})?)(?:e-?|g|web)?mail(?!\\p{L}))";
 
     /**
      * A Czech verb of sending with one mail after it -- "pošli mi e-mail", "napiš nový mail" --
@@ -112,8 +127,12 @@ public class CapabilityResolver {
     private static final String SENT_IN_CZECH = "(?!(?<=\\b(?:pošli|pošlete|napiš|napište|odešli|odešlete)\\s{1,3}"
             + "(?:(?:mi|mu|jí|jim|nám|vám)\\s{1,3})?(?:(?:nový|krátký|další)\\s{1,3})?)(?:e-?|g|web)?mail(?!\\p{L}))";
 
-    /** After a word for mail: the Czech instrumental, "by mail" -- "mailem", "e-mailem". */
-    private static final String SENT_AFTER = "(?!em(?!\\p{L}))";
+    /**
+     * After a word for mail: the Czech instrumental, "by mail" -- "pošli mi to e-mailem" -- unless
+     * it says how something arrived: "přišlo mi to e-mailem" is mail to read.
+     */
+    private static final String SENT_AFTER = "(?:(?<=\\b(?:ne)?(?:přiš|doš|dorazi)\\p{L}{0,4}(?:\\s{1,3}\\p{L}{1,12})?"
+            + "(?:\\s{1,3}\\p{L}{1,12})?\\s{1,3}(?:e-?|g|web)?mail)|(?!em(?!\\p{L})))";
 
     /**
      * The word for mail in a trigger: mail, e-mail, email, gmail, webmail, and what they are stems

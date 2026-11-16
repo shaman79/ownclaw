@@ -174,7 +174,10 @@ class CapabilityResolverTest {
                 "Pošli mi nepřečtené e-maily", "anything new by email?", "Check what Bob sent me by email",
                 "summarize everything that arrived by email today", "read what came via email",
                 "check the email her manager sent", "read the email you got from Bob",
-                "check mail it should have arrived", "check my work-email")) {
+                "check mail it should have arrived", "check my work-email",
+                "check my messages such as email and SMS", "check notifications as well as email",
+                "Mail to Bob bounced, check why", "Zkontroluj, co mi přišlo na mail",
+                "zkontroluj, jestli mi něco nepřišlo na můj mail", "Zkontroluj, co mi přišlo e-mailem")) {
             assertNotNull(bare().resolve(message), message);
         }
         // Mutation: WORD_START also put after each word (whole words only) -> "emails", "records" fail.
@@ -271,7 +274,16 @@ class CapabilityResolverTest {
                 "check the website and email when it's down",
                 "read the PDF and email its summary",
                 "check the logs and send Bob a short new email",
-                "zkontroluj web a pošli upozornění na můj pracovní mail")) {
+                "zkontroluj web a pošli upozornění na můj pracovní mail",
+                "check the server and let us know by email",
+                "check the build and keep me posted by email",
+                "check the logs and report back by email",
+                "check the logs and get back to me by email",
+                "check the logs and reply by email",
+                "check the logs and alert me by email",
+                "check the logs and send my boss a short email",
+                "check the logs and send the boss an email",
+                "read the doc and summarize it in an email")) {
             assertNull(bare().resolve(message), message);
         }
         // Mutations: SENT_AS_A_VERB left out -> "email it", "mail me", "email the result" ask for a

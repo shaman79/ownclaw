@@ -246,6 +246,10 @@ class DynamicSkillSelfHealNameTest {
         assertEquals(Set.of("yaml"), DynamicSkill.importedBy("x = rf'{d[\"k\"]:>{w}}'; import yaml\n"));
         assertEquals(Set.of(), DynamicSkill.importedBy("s = 'abc \\\r\nimport evilpkg'\r\n"));
         assertEquals(Set.of("os"), DynamicSkill.importedBy("s = f'{{import evil}}'\nimport os\n"));
+        // A quote in a format spec is its fill character, not a string.
+        assertEquals(Set.of("yaml"), DynamicSkill.importedBy("title = f\"{name:'^30}\"\nimport yaml\n"));
+        assertEquals(Set.of("yaml"), DynamicSkill.importedBy("title = f'{name:\"^{width}}'\nimport yaml\n"));
+        assertEquals(Set.of("yaml"), DynamicSkill.importedBy("x = f'{a[1:2]}{ {\"k\": 1}[\"k\"]}'\nimport yaml\n"));
         assertEquals(Set.of(), DynamicSkill.importedBy(null));
         assertEquals(Set.of(), DynamicSkill.importedBy("x = 'important'\nprint('imports')\n"));
     }

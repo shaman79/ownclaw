@@ -1062,7 +1062,11 @@ public class DynamicSkill implements Tool {
         return n;
     }
 
-    /** Just past the closing brace of an f-string's replacement field whose expression starts at {@code from}. */
+    /**
+     * Just past the closing brace of an f-string's replacement field whose expression starts at
+     * {@code from}. A colon outside every bracket begins its format spec, whose text is literal --
+     * a quote there is a fill character, {@code f"{name:'^30}"} -- with fields nested in it.
+     */
     private static int fieldEnd(String s, int from) {
         int n = s.length();
         int depth = 0;
@@ -1072,6 +1076,14 @@ public class DynamicSkill implements Tool {
             if (c == '\'' || c == '"') {
                 i = stringEnd(s, i, hasFields(s, i));
                 continue;
+            }
+            if (depth == 0 && c == ':' && !(i + 1 < n && s.charAt(i + 1) == '=')) {
+                for (i++; i < n; i++) {
+                    char d = s.charAt(i);
+                    if (d == '}') return i + 1;
+                    if (d == '{') i = fieldEnd(s, i + 1) - 1;
+                }
+                return n;
             }
             if (c == '{' || c == '[' || c == '(') {
                 depth++;
