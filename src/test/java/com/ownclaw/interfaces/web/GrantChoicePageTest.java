@@ -40,6 +40,26 @@ class GrantChoicePageTest {
     }
 
     @Test
+    @DisplayName("a delivered result -- a scheduled run, /bg -- is drawn when it arrives as its saved row is after a reload, with its choices: the command is a button at once, in the chat a click sends it into")
+    void aDeliveredResultsChoicesAreDrawnWhenItArrives() {
+        String result = page.substring(page.indexOf("if (type === 'result') {"));
+        result = result.substring(0, result.indexOf("return; }") + "return; }".length());
+        assertTrue(result.contains("if (currentView === 'chat' && data.sessionId === displayedSessionId) { drawRow({ "
+                        + "role: 'assistant', content: content, task_id: data.taskId, timestamp: data.timestamp, "
+                        + "choices: data.choices }, null); } else { markUnread(data.sessionId); }"),
+                "a result that arrives is drawn without the choices it came with: " + result);
+        assertFalse(result.contains("addMsg("), "drawn by a rule of its own, it is drawn otherwise than after a reload: " + result);
+        // drawRow is how a saved row is drawn: the newest page, and an earlier one.
+        assertTrue(page.contains("drawRow(m, thinkingEl);"));
+        assertTrue(page.contains("msgs.forEach(function(m) { drawRow(m, oldest); });"));
+        // Drawn with no row to go before, it goes where a frame's row goes, and the chat follows it.
+        assertTrue(page.contains("messagesEl.insertBefore(div, before || thinkingEl); if (before) return div;"));
+        // Its buttons are in the chat on screen, the result's own: a click sends into that chat.
+        assertTrue(page.contains("if (displayedSessionId) payload.sessionId = displayedSessionId;"));
+        // Mutation: the result drawn with addMsg alone, as before -> its command is text until the page is reloaded.
+    }
+
+    @Test
     @DisplayName("a saved row whose only offers are commands is drawn as an answer, and a command's button is not done by the owner's next message")
     void commandsAreNoAnswers() {
         // Only an offer that is no command makes a saved row a question.

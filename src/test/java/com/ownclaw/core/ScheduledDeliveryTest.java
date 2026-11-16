@@ -282,6 +282,46 @@ class ScheduledDeliveryTest {
     }
 
     @Test
+    @DisplayName("a run's result offers what its task's ending offered -- the command that grants a skill -- saved, sent and read back with the pinned chat: a run that finished, one that did not, and one whose schedule was deleted as it ran")
+    void aRunsChoicesAreDelivered(@TempDir Path tmp) throws Exception {
+        start(tmp);
+        String command = "/grant mailer SMTP_PASS";
+        String line = "_🔑 mailer was not run: you have not allowed it to read SMTP_PASS from your vault. "
+                + "To allow it, send:_ `" + command + "`";
+        queue.result = AgentResult.completed("It waits for you.\n\n" + line, new AgentTrajectory(), 3)
+                .withChoices(List.of(command)).withTaskId("a1b2c3d4");
+        due("mail me the report");
+        scheduler.pollDueTasks();
+        // Refused three times in a row, it ended without an answer.
+        queue.result = AgentResult.failureLimit("**Stopped:** steps in a row ran nothing.\n\n" + line,
+                new AgentTrajectory(), 3).withChoices(List.of(command)).withTaskId("b2c3d4e5");
+        due("mail me the digest");
+        scheduler.pollDueTasks();
+        // Its run count cannot be kept: it is delivered all the same.
+        queue.result = AgentResult.completed("It still waits for you.\n\n" + line, new AgentTrajectory(), 3)
+                .withChoices(List.of(command)).withTaskId("c3d4e5f6");
+        queue.duringRun = () -> jdbc.update("DELETE FROM scheduled_tasks");
+        due("mail me the summary");
+        scheduler.pollDueTasks();
+
+        String pinned = conversations.scheduledSession(USER);
+        var rows = conversations.getSessionMessages(USER, pinned, null, null).messages();
+        assertEquals(3, rows.size(), String.valueOf(rows));
+        for (var row : rows) {
+            assertEquals("[\"" + command + "\"]", String.valueOf(row.get("choices")), "drawn again after a reload: " + row);
+            assertTrue(String.valueOf(row.get("content")).endsWith(line), String.valueOf(row.get("content")));
+        }
+        var results = emitted.stream().filter(m -> m.type() == StatusMessage.Type.RESULT).toList();
+        assertEquals(3, results.size());
+        for (var result : results) {
+            assertEquals(List.of(command), ResultDelivery.choicesOf(result), "sent with it: " + result.data());
+            assertEquals(pinned, result.data().get("sessionId"));
+        }
+        // Mutations: onTaskCompleted's delivery offering nothing -> the first run's row and event have
+        // none; onTaskFailed's -> the second's; the delivery when the run count fails -> the third's.
+    }
+
+    @Test
     @DisplayName("a run the privacy check stopped is delivered with the owner's private text, and recorded partial")
     void aStoppedRunDeliversThePrivateText(@TempDir Path tmp) throws Exception {
         start(tmp);

@@ -6,6 +6,7 @@ import com.ownclaw.agent.TaskChat;
 import com.ownclaw.config.SetupWizardService;
 import com.ownclaw.conversation.ChatOptions;
 import com.ownclaw.conversation.ConversationService;
+import com.ownclaw.core.ResultDelivery;
 import com.ownclaw.core.TaskCancellationService;
 import com.ownclaw.core.TaskQueue;
 import com.ownclaw.core.UserMessage;
@@ -181,6 +182,11 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
                 if (msg.data() != null && msg.data().get("timestamp") != null) {
                     payload.put("timestamp", msg.data().get("timestamp"));
                 }
+                // What a result offers to click -- the command its task's ending wrote for a skill
+                // that waits for a grant -- for buttons under it, as an answer's "choices" are:
+                // drawn at once, and again after a reload from the saved row.
+                List<String> choices = ResultDelivery.choicesOf(msg);
+                if (!choices.isEmpty()) payload.put("choices", choices);
                 send(session, payload);
             } else {
                 // Include the raw status sub-type so the frontend can detect terminal statuses

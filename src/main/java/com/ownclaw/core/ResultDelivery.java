@@ -8,6 +8,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.function.Supplier;
 
 /**
@@ -29,11 +31,20 @@ import java.util.function.Supplier;
  * Which chat it is saved into is the caller's to say: the one {@code /bg} was typed in, or the
  * pinned chat of scheduled results. It used to be whichever chat was open when the work finished,
  * so a morning digest landed in the middle of an unrelated conversation.
+ * <p>
+ * A task's result goes with what it offers to click ({@link AgentResult#choices}), as an attended
+ * answer does: saved with the message and sent with it, for the page's buttons and Telegram's
+ * keys. Delivered without them, the command a task's ending offers for a skill that waits for a
+ * grant -- {@code /grant <skill> <KEYS>}, written by code -- reached the owner of a scheduled run
+ * or {@code /bg} as text to type.
  */
 @Service
 public class ResultDelivery {
 
     private static final Logger log = LoggerFactory.getLogger(ResultDelivery.class);
+
+    /** The key of a delivered result's data that holds what it offers to click ({@link #choicesOf}). */
+    public static final String CHOICES = "choices";
 
     private final ConversationService conversations;
     private final ChatStatusEmitter statusEmitter;
@@ -53,7 +64,7 @@ public class ResultDelivery {
      * the header named the reason the ending's first line gives.
      *
      * @param chat  the chat it is saved into, as {@link #deliver(String, Supplier, String, String,
-     *              String, String)} takes it
+     *              String, String, List)} takes it
      * @param label what the task was, for a header — the result arrives long after the request,
      *              so it has to say what it is answering
      */
@@ -68,7 +79,7 @@ public class ResultDelivery {
         }
         String withheld = result.success() ? withheldLine(result) : "";
         deliver(userId, chat, header, result.response() + withheld, result.taskId(),
-                result.ownerText() == null ? null : result.ownerText() + withheld);
+                result.ownerText() == null ? null : result.ownerText() + withheld, result.choices());
     }
 
     /**
@@ -112,6 +123,15 @@ public class ResultDelivery {
     }
 
     /**
+     * {@link #deliver(String, Supplier, String, String, String, String, List)}, offering nothing
+     * to click: for a caller that has no task's result to deliver, only text of its own.
+     */
+    public void deliver(String userId, Supplier<String> chat, String header, String text, String taskId,
+                        String ownerText) {
+        deliver(userId, chat, header, text, taskId, ownerText, List.of());
+    }
+
+    /**
      * Deliver text as a real assistant message in the chat the caller names.
      *
      * @param chat      the chat it is saved into, looked up here as part of saving it: finding the
@@ -126,22 +146,28 @@ public class ResultDelivery {
      *                  Telegram -- or null. Saved as the row's private text and sent only in the
      *                  message's data; the message's text stays the safe one, and that is what
      *                  history, search and later prompts read.
+     * @param choices   what the task's result offers to click ({@link AgentResult#choices}), passed
+     *                  on as it has them and never made here: saved with the message, as an
+     *                  attended answer's are, and sent in its data ({@link #choicesOf}) -- the page
+     *                  draws them under it, now and after a reload, and Telegram as keys. A click
+     *                  only sends one as the owner's own message.
      */
     public void deliver(String userId, Supplier<String> chat, String header, String text, String taskId,
-                        String ownerText) {
+                        String ownerText, List<String> choices) {
         if (text == null || text.isBlank()) {
             // Nothing useful to show. Saying so beats an empty bubble, which reads like a bug.
             text = "(the task produced no output)";
         }
         String message = withHeader(header, text);
         String owner = ownerText == null ? null : withHeader(header, ownerText);
+        List<String> offered = choices == null ? List.of() : List.copyOf(choices);
 
         String sessionId = null;
         String savedAt = null;
         try {
             sessionId = chat.get();
-            savedAt = conversations.timestampOf(conversations.saveMessage(userId, sessionId, "assistant", message,
-                    java.util.List.of(), taskId, owner));
+            savedAt = conversations.timestampOf(conversations.saveResult(userId, sessionId, message, taskId, owner,
+                    offered));
         } catch (Exception e) {
             // Persisting is the more important half, but failing it must not also lose the push.
             log.warn("Could not persist a background result for {}: {}", userId, e.getMessage());
@@ -151,8 +177,26 @@ public class ResultDelivery {
         // When it was saved, so the page shows the time a reload of the chat will.
         if (savedAt != null) data.put("timestamp", savedAt);
         if (owner != null) data.put("ownerText", owner);
+        if (!offered.isEmpty()) data.put(CHOICES, offered);
         if (taskId == null) statusEmitter.emit(userId, StatusMessage.Type.RESULT, message, data);
         else statusEmitter.emitForTask(userId, taskId, StatusMessage.Type.RESULT, message, data);
+    }
+
+    /**
+     * What a delivered result offers to click, as {@link #deliver} sent it in the result's data:
+     * none for a status of any other kind, and none for a result that offers nothing. The one
+     * reader of it -- the web chat's frame and Telegram's keys both take theirs from here.
+     */
+    public static List<String> choicesOf(StatusMessage msg) {
+        if (msg == null || msg.type() != StatusMessage.Type.RESULT || msg.data() == null
+                || !(msg.data().get(CHOICES) instanceof List<?> offered)) {
+            return List.of();
+        }
+        var choices = new ArrayList<String>();
+        for (Object choice : offered) {
+            if (choice instanceof String c) choices.add(c);
+        }
+        return List.copyOf(choices);
     }
 
     private static String withHeader(String header, String text) {

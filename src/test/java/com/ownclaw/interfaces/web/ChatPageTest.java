@@ -27,8 +27,10 @@ class ChatPageTest {
     @Test
     @DisplayName("a delivered result is appended only in its own chat; otherwise that chat is marked unread")
     void resultsGoToTheirChat() {
+        // Drawn as its saved row is (drawRow), with what it offers to click (GrantChoicePageTest).
         assertTrue(page.contains("if (type === 'result') { if (currentView === 'chat' && data.sessionId === "
-                + "displayedSessionId) { addMsg('response', content, data.taskId, null, data.timestamp); } else { "
+                + "displayedSessionId) { drawRow({ role: 'assistant', content: content, task_id: data.taskId, "
+                + "timestamp: data.timestamp, choices: data.choices }, null); } else { "
                 + "markUnread(data.sessionId); } return; }"), "the routing of a result");
         assertTrue(page.contains("(s.kind === 'scheduled' ? ' pinned' : '') + (unreadSessions[s.id] ? ' unread' : '')"),
                 "the pinned chat and an unread one are marked in the list");

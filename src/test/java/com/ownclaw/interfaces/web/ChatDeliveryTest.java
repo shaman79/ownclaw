@@ -295,6 +295,39 @@ class ChatDeliveryTest {
     }
 
     @Test
+    @DisplayName("a /bg result that offers a command -- the one its task's ending wrote for a skill that waits for a grant -- reaches the page with it in its frame, for its own chat, and the saved row keeps it for a reload; one that offers nothing has none")
+    void aDeliveredResultsChoiceReachesThePage(@TempDir Path tmp) throws Exception {
+        connect(tmp);
+        String typedIn = conversations.getCurrentSession(USER);
+        type("/bg mail me the report");
+        String openNow = conversations.createSession(USER, "Something else");
+
+        queue.futures.getLast().complete(AgentResult.completed("It waits for you.\n\n_mailer was not run: you have not "
+                + "allowed it to read SMTP_PASS from your vault. To allow it, send:_ `/grant mailer SMTP_PASS`",
+                new AgentTrajectory(), 1).withChoices(List.of("/grant mailer SMTP_PASS")));
+
+        var result = frames("result").getLast();
+        assertEquals(List.of("/grant mailer SMTP_PASS"),
+                mapper.convertValue(result.path("choices"), new com.fasterxml.jackson.core.type.TypeReference<List<String>>() {}),
+                "a result, with what it offers to click: " + result);
+        assertEquals(typedIn, result.path("sessionId").asText(),
+                "drawn only while its chat is on screen, which a click sends into");
+        var saved = conversations.getSessionMessages(USER, typedIn, null, null).messages().getLast();
+        assertEquals("[\"/grant mailer SMTP_PASS\"]", String.valueOf(saved.get("choices")), "drawn again after a reload");
+        assertTrue(conversations.getSessionMessages(USER, openNow, null, null).messages().isEmpty());
+
+        type("/bg check the weather");
+        queue.futures.getLast().complete(AgentResult.completed("Sunny, 21 degrees.", new AgentTrajectory(), 1));
+        assertTrue(frames("result").getLast().path("choices").isMissingNode(), frames("result").getLast().toString());
+
+        // A progress message is drawn in its chat as a result is, and is never a set of buttons.
+        emitter.emitForTask(USER, "abcd1234", ChatStatusEmitter.StatusMessage.Type.PROGRESS_MESSAGE,
+                "☁️ Step 1 · ping · 2.0s · $0.01", Map.of("sessionId", typedIn, "choices", List.of("/grant mailer SMTP_PASS")));
+        assertTrue(frames("progress").getLast().path("choices").isMissingNode(), frames("progress").getLast().toString());
+        // Mutation: the result's frame without its choices -> no button until the page is reloaded.
+    }
+
+    @Test
     @DisplayName("an answer whose sending breaks with an Error is kept once, and nothing says the task failed")
     void anErrorWhileSendingAddsNoFailure(@TempDir Path tmp) throws Exception {
         connect(tmp);

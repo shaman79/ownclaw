@@ -3231,7 +3231,9 @@
 
     /**
      * Draw a saved row of the chat before the given element: the thinking dots for the newest
-     * page, the oldest row on screen for an earlier one.
+     * page, the oldest row on screen for an earlier one. Or, with none, a row as it arrives: the
+     * result of work nobody was waiting for, which a reload draws again from its saved row, so it
+     * is drawn the same both times.
      */
     function drawRow(m, before) {
         if (m.role === 'progress') { addProgress(m.content, m.progress, before, m.timestamp); return; }
@@ -6455,9 +6457,13 @@
                     // typed in -- and appended only while that chat is on screen; otherwise that
                     // chat is marked unread. Appended to whatever was open, a morning digest
                     // turned up in the middle of an unrelated conversation.
+                    // Drawn as its saved row is drawn after a reload (drawRow), with what it offers
+                    // to click: the command its task's ending wrote for a skill that waits for a
+                    // grant is a button under it, as under an answer -- it was text alone, to type.
                     if (type === 'result') {
                         if (currentView === 'chat' && data.sessionId === displayedSessionId) {
-                            addMsg('response', content, data.taskId, null, data.timestamp);
+                            drawRow({ role: 'assistant', content: content, task_id: data.taskId,
+                                      timestamp: data.timestamp, choices: data.choices }, null);
                         } else {
                             markUnread(data.sessionId);
                         }
