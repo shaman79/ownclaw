@@ -140,7 +140,7 @@ class DynamicSkillMountTest {
                                                    Map<String, String> extraVolumes) {
                 runs.add(extraVolumes);
                 return runs.size() == 1
-                        ? new SandboxResult(1, "", "ModuleNotFoundError: No module named 'pdfplumber'", 1, false)
+                        ? DynamicSkillSelfHealNameTest.missing("pdfplumber")
                         : new SandboxResult(0, "{\"success\": true, \"output\": \"read it\"}", "", 1, false);
             }
         };
@@ -150,7 +150,7 @@ class DynamicSkillMountTest {
             }
         };
         Path skillDir = Files.createDirectories(tmp.resolve("skills/pdf_text"));
-        Files.writeString(skillDir.resolve("skill.py"), "def run(params):\n    return {}\n");
+        Files.writeString(skillDir.resolve("skill.py"), "import pdfplumber\ndef run(params):\n    return {}\n");
         var skill = new DynamicSkill("pdf_text", "reads a pdf", Map.of(), skillDir, false, false, 30,
                 HOST, installs, List.of(), null, List.of("poppler-utils"), null, container, files);
 

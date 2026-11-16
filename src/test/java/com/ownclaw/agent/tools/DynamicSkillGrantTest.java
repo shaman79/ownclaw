@@ -111,7 +111,7 @@ class DynamicSkillGrantTest {
     private DynamicSkill skill(Path skillDir, SandboxManager sandbox, PythonEnvironmentService env,
                                FileStorageService files) throws Exception {
         Files.createDirectories(skillDir);
-        Files.writeString(skillDir.resolve("skill.py"), "def run(params):\n    return {}\n");
+        Files.writeString(skillDir.resolve("skill.py"), "import pdfplumber\ndef run(params):\n    return {}\n");
         return new DynamicSkill("pdf_text", "reads a pdf", Map.of(), skillDir, false, false, 30,
                 sandbox, env, List.of(), null, List.of(), null, null, files);
     }
@@ -134,8 +134,7 @@ class DynamicSkillGrantTest {
 
         Path envDir = Files.createDirectories(tmp.resolve("skills/_envs/pdf_text"));
         var installs = new ArrayList<List<String>>();
-        var sandbox = new Recording(
-                new SandboxResult(1, "", "ModuleNotFoundError: No module named 'pdfplumber'\n", 1, false));
+        var sandbox = new Recording(DynamicSkillSelfHealNameTest.missing("pdfplumber"));
         var skill = skill(tmp.resolve("skills/generated/pdf_text"), sandbox, environment(envDir, installs), s.files());
 
         var result = skill.execute(Map.of(), new ToolExecutionContext("u1", "t1", null, () -> false,

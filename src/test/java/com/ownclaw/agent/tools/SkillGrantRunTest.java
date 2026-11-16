@@ -338,10 +338,12 @@ class SkillGrantRunTest {
 
     @Test
     @DisplayName("a self-healed retry is the run again: handed exactly what the run was handed, the vault read once -- and a refused skill has neither an install nor a retry")
-    void aSelfHealedRetry() {
+    void aSelfHealedRetry() throws Exception {
         DynamicSkill mailer = skills.create("mailer", List.of("SMTP_PASS"));
+        // Its code imports what the runner then reports missing: the heal installs only such a module.
+        Files.writeString(skills.generated.resolve("mailer/skill.py"), "import requests\ndef run(params):\n    return {}\n");
         skills.launches.answer = launch -> skills.launches.runs().size() == 1
-                ? new SandboxResult(1, "", "ModuleNotFoundError: No module named 'requests'\n", 1, false)
+                ? DynamicSkillSelfHealNameTest.missing("requests")
                 : new SandboxResult(0, "{\"success\": true, \"output\": \"sent\"}", "", 1, false);
 
         assertFalse(GrantsKit.run(mailer, "ann").success());

@@ -55,10 +55,16 @@ public class DynamicSkill implements Tool {
     private static final ObjectMapper mapper = new ObjectMapper();
     private static final SecureRandom NONCES = new SecureRandom();
 
-    /** Detect ModuleNotFoundError / ImportError in Python output. */
-    private static final Pattern MODULE_NOT_FOUND = Pattern.compile(
-            "ModuleNotFoundError: No module named ['\"]([^'\"]+)['\"]" +
-            "|ImportError: No module named ([A-Za-z0-9_.]+)");
+    /**
+     * The key of the runner's result that names a module the skill's code failed to import: what
+     * the runner sets from an uncaught {@code ModuleNotFoundError}, and takes out of a result the
+     * skill returned itself. The self-heal reads this and nothing else ({@link #toHeal}).
+     */
+    static final String MISSING_MODULE = "_missing_module";
+
+    /** An import statement of skill.py: at a line's start, or after a colon or a semicolon ("try: import ujson"). */
+    private static final Pattern IMPORT = Pattern.compile("(?:^|[:;])\\s*import\\s+([^#;]+)");
+    private static final Pattern FROM_IMPORT = Pattern.compile("(?:^|[:;])\\s*from\\s+([A-Za-z_]\\w*)[\\w.]*\\s+import\\b");
 
     /** Module name → pip package name (only when they differ). */
     private static final Map<String, String> MODULE_TO_PACKAGE = Map.ofEntries(
@@ -207,16 +213,27 @@ public class DynamicSkill implements Tool {
      * The module is in {@code sys.modules} as {@code skill} before it runs, as an import would
      * put it there. A function it defines is pickled by that name, so a skill can hand one to a
      * multiprocessing worker under any start method: one started by spawn or forkserver imports
-     * skill.py by the name, from the skill's directory, which is on its sys.path as on the
-     * runner's.
+     * skill.py by the name, through the finder the loader puts first on {@code sys.meta_path},
+     * which answers for {@code skill} alone.
      * <p>
-     * This does not pin what runs against the skill itself. Its directory is writable and first
-     * on sys.path, so a module it leaves there -- a json.py, say -- is imported before skill.py
-     * is, as it always was; the jail bounds what such a module can do.
+     * Nothing else in the skill's directory is ever imported. Python puts a script's directory
+     * first on {@code sys.path}, and the runner is written into the skill's directory, which is
+     * the skill's own and writable by every run of it. A module one run left there -- a json.py,
+     * a requests.py -- was imported by the next run, with that run's credentials, ahead of the
+     * standard library and the skill's packages: code nobody wrote with skill_create, and nobody
+     * granted. The loader takes the directory off {@code sys.path} before it imports anything
+     * that could be found there; {@code sys} and {@code os} are in before its first line runs. So
+     * what runs is skill.py and the packages its environment holds -- read-only to a run -- and a
+     * file a run leaves is data to the next, never its code, unless skill.py itself runs it.
      */
     public static final String SKILL_LOADER = String.join("\n",
-        "import sys, os, json, builtins, traceback, inspect, importlib.util",
+        "import sys, os",
         "_skill_dir = os.path.dirname(os.path.abspath(__file__))",
+        "# Nothing in the skill's directory is imported but skill.py: it is off sys.path before",
+        "# anything that could be found there is imported. sys and os are in already.",
+        "_real_skill_dir = os.path.realpath(_skill_dir)",
+        "sys.path[:] = [p for p in sys.path if os.path.realpath(p or os.curdir) != _real_skill_dir]",
+        "import json, builtins, traceback, inspect, importlib.util, importlib.machinery",
         "",
         "# --- Progress reporting API for long-running skills ---",
         "# Skills call report_progress('Scanning host 12/255', percent=5)",
@@ -244,14 +261,30 @@ public class DynamicSkill implements Tool {
         "",
         "builtins.report_progress = report_progress",
         "",
+        "class _SkillSource(importlib.machinery.SourceFileLoader):",
+        "    \"\"\"skill.py, compiled from its source each time: never a __pycache__ entry.\"\"\"",
+        "    def exec_module(self, mod):",
+        "        with open(self.path, 'rb') as f:",
+        "            source = f.read()",
+        "        mod.report_progress = report_progress",
+        "        exec(compile(source, self.path, 'exec', dont_inherit=True), mod.__dict__)",
+        "",
+        "class _SkillOnly:",
+        "    \"\"\"`import skill` finds skill.py, and nothing else is looked for in its directory.\"\"\"",
+        "    @staticmethod",
+        "    def find_spec(name, path=None, target=None):",
+        "        if name != 'skill':",
+        "            return None",
+        "        path = os.path.join(_skill_dir, 'skill.py')",
+        "        return importlib.util.spec_from_file_location('skill', path, loader=_SkillSource('skill', path))",
+        "",
+        "sys.meta_path.insert(0, _SkillOnly)",
+        "",
         "def _load_skill():",
-        "    path = os.path.join(_skill_dir, 'skill.py')",
-        "    with open(path, 'rb') as f:",
-        "        source = f.read()",
-        "    mod = importlib.util.module_from_spec(importlib.util.spec_from_file_location('skill', path))",
-        "    mod.report_progress = report_progress",
+        "    spec = _SkillOnly.find_spec('skill')",
+        "    mod = importlib.util.module_from_spec(spec)",
         "    sys.modules['skill'] = mod",
-        "    exec(compile(source, path, 'exec', dont_inherit=True), mod.__dict__)",
+        "    spec.loader.exec_module(mod)",
         "    return mod",
         ""
     );
@@ -355,9 +388,13 @@ public class DynamicSkill implements Tool {
         "            result = {'output': str(result) if result is not None else ''}",
         "        if 'success' not in result:",
         "            result['success'] = True",
+        "        result.pop('" + MISSING_MODULE + "', None)",
         "        _result(result)",
         "    except Exception as e:",
-        "        _result({'success': False, 'output': f'Skill error: {e}\\n{traceback.format_exc()}'})",
+        "        failed = {'success': False, 'output': f'Skill error: {e}\\n{traceback.format_exc()}'}",
+        "        if isinstance(e, ModuleNotFoundError) and isinstance(e.name, str):",
+        "            failed['" + MISSING_MODULE + "'] = e.name",
+        "        _result(failed)",
         ""
     );
 
@@ -536,9 +573,14 @@ public class DynamicSkill implements Tool {
             // Self-heal: ModuleNotFoundError → install missing package → retry once. What the
             // retry returns is the answer, failure included: the package is in by then, and the
             // error it hits next is the one that matters. A package that cannot be installed
-            // fails with pip's own account of why, beside the error that asked for it.
-            String missingModule = toolResult.success() || result.timedOut()
-                    ? null : extractMissingModule(toolResult.output());
+            // fails with pip's own account of why, beside the error that asked for it. Which
+            // module is the runner's to say, and only one skill.py imports is installed (toHeal).
+            String missingModule = null;
+            if (!toolResult.success() && !result.timedOut()) {
+                Heal heal = toHeal(result.stdout());
+                missingModule = heal.module();
+                if (heal.notHealed() != null) toolResult = failedWith(toolResult, "not installed", heal.notHealed());
+            }
             if (missingModule != null) {
                 String pkg = MODULE_TO_PACKAGE.getOrDefault(missingModule, missingModule);
                 log.warn("SELF-HEAL: skill '{}' missing module '{}' → installing pip package '{}'",
@@ -782,6 +824,8 @@ public class DynamicSkill implements Tool {
         }
 
         if (asksForInput(parsed)) return ToolResult.failure(NEED_INPUT_UNSUPPORTED);
+        // The runner's own word to the self-heal (toHeal), no part of what the skill returned.
+        parsed.remove(MISSING_MODULE);
         boolean success = BooleanNode.TRUE.equals(parsed.get("success"));
         JsonNode returned = parsed.get("output");
         // Everything the skill returned. Taking "output" alone dropped every other key -- a
@@ -866,23 +910,95 @@ public class DynamicSkill implements Tool {
     }
 
     /**
-     * Extract the missing module name from a Python error message, or null.
-     * <p>
-     * The message is the skill's own output, so the skill decides what it says: a crafted
-     * "No module named '-e git+https://...'" or "'../../some/dir'" would otherwise reach pip as
-     * an option, a URL or a path to build. Only a plain name survives -- the same test
-     * installPackages applies before pip starts.
+     * What the self-heal does with a failed run: the module to install, by its top-level name, or
+     * none -- with, when it says something the run's caller can act on, why it was not installed.
      */
-    static String extractMissingModule(String outputText) {
-        if (outputText == null || outputText.isBlank()) return null;
-        Matcher m = MODULE_NOT_FOUND.matcher(outputText);
-        if (!m.find()) return null;
-        String mod = m.group(1) != null ? m.group(1) : m.group(2);
-        if (mod == null || mod.isBlank()) return null;
-        // Top-level package only (e.g. "bs4.element" → "bs4")
-        int dot = mod.indexOf('.');
-        if (dot > 0) mod = mod.substring(0, dot);
-        mod = mod.strip();
-        return PythonEnvironmentService.isPlainName(mod) ? mod : null;
+    record Heal(String module, String notHealed) {
+        static final Heal NONE = new Heal(null, null);
+    }
+
+    /**
+     * Which module a failed run is healed with.
+     * <p>
+     * Read from the runner's result alone ({@link #MISSING_MODULE}, from an uncaught
+     * {@code ModuleNotFoundError}), and only for a module skill.py itself imports. The heal read
+     * any "No module named '...'" in what the run wrote, and a run writes what it was given: a
+     * web page, a mail, a file that said so had pip install the package it named into the
+     * skill's environment and the skill run again on it, with the same credentials -- a package
+     * that can run code at every start of the skill's Python, whoever runs it next. Now the
+     * name is one the skill's own code names, as its requirements would: what the owner reads
+     * before granting it. A module only another package imports, or only importlib names, is not
+     * healed: the run fails with its error, and a skill_create with requirements fixes it.
+     * <p>
+     * Nor is a module of the skill's own directory installed: nothing there is imported but
+     * skill.py ({@link #SKILL_LOADER}), and pip would install whatever an index holds under that
+     * name instead.
+     */
+    Heal toHeal(String stdout) {
+        String reported = reportedMissingModule(stdout);
+        if (reported == null) return Heal.NONE;
+        int dot = reported.indexOf('.');
+        String module = (dot > 0 ? reported.substring(0, dot) : reported).strip();
+        if (!PythonEnvironmentService.isPlainName(module)) {
+            log.warn("Skill '{}': the module reported missing is no plain name; not healed", name);
+            return Heal.NONE;
+        }
+        if (Files.exists(skillDir.resolve(module + ".py"), java.nio.file.LinkOption.NOFOLLOW_LINKS)
+                || Files.isDirectory(skillDir.resolve(module), java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
+            log.warn("Skill '{}': module '{}' is in the skill's own directory, where nothing is imported from; not healed",
+                    name, module);
+            return new Heal(null, "'" + module + "' is a module in the skill's own directory, and nothing there is "
+                    + "imported but skill.py. Put what it holds into skill.py (skill_create with the SAME name).");
+        }
+        String code;
+        try {
+            code = SkillJail.readAuthored(skillDir.resolve("skill.py"));
+        } catch (IOException e) {
+            log.warn("Skill '{}': skill.py could not be read to check the missing module against it: {}", name,
+                    e.getMessage());
+            return Heal.NONE;
+        }
+        if (!importedBy(code).contains(module)) {
+            log.warn("Skill '{}': module '{}' was missing, and skill.py does not import it; not healed", name, module);
+            return new Heal(null, "'" + module + "' is not installed automatically: skill.py does not import it "
+                    + "itself. If a package it uses needs it, add it to the skill's requirements (skill_create with "
+                    + "the SAME name).");
+        }
+        return new Heal(module, null);
+    }
+
+    /** The {@link #MISSING_MODULE} of the runner's result line -- the last line of stdout -- or null. */
+    static String reportedMissingModule(String stdout) {
+        if (stdout == null || stdout.isBlank()) return null;
+        String text = stdout.strip();
+        ObjectNode result = ToolResult.jsonObject(text.substring(text.lastIndexOf('\n') + 1).strip());
+        JsonNode module = result == null ? null : result.get(MISSING_MODULE);
+        return module != null && module.isTextual() && !module.asText().isBlank() ? module.asText() : null;
+    }
+
+    /**
+     * The top-level names of the modules a skill's source imports in its import statements:
+     * {@code import a.b as c, d} gives a and d, {@code from e.f import g} gives e. A relative
+     * import gives nothing, and neither does {@code __import__} or {@code importlib}: what is
+     * healed is what the code names as an import does.
+     */
+    static java.util.Set<String> importedBy(String source) {
+        var out = new java.util.LinkedHashSet<String>();
+        if (source == null) return out;
+        for (String line : source.split("\\R")) {
+            Matcher from = FROM_IMPORT.matcher(line);
+            while (from.find()) out.add(from.group(1));
+            Matcher plain = IMPORT.matcher(line);
+            while (plain.find()) {
+                for (String part : plain.group(1).split(",")) {
+                    String[] words = part.strip().split("\\s+");
+                    String module = words[0];
+                    int dot = module.indexOf('.');
+                    if (dot > 0) module = module.substring(0, dot);
+                    if (!module.isEmpty()) out.add(module);
+                }
+            }
+        }
+        return out;
     }
 }

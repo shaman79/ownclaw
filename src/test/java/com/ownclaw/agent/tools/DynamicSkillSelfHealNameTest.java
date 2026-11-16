@@ -1,5 +1,6 @@
 package com.ownclaw.agent.tools;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.ownclaw.config.OwnClawConfig;
 import com.ownclaw.sandbox.JailTestKit;
 import com.ownclaw.sandbox.SandboxManager;
@@ -14,30 +15,57 @@ import org.junit.jupiter.params.provider.ValueSource;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
- * The self-heal reads the name of a missing module out of the skill's own output and hands it to
- * pip. The skill decides what that output says, so a name pip would read as an option, a URL or
- * a path must never get as far as installPackages.
+ * Which module the self-heal installs. A run writes what it was given -- a web page, a mail, a
+ * file -- so a "No module named '...'" in its output is the input's to choose, and it once had
+ * pip install the package it named into the skill's environment and the skill run again on it,
+ * with the same credentials. The heal now reads the runner's own word alone (an uncaught
+ * ModuleNotFoundError, in the result's {@code _missing_module}), and installs only a module the
+ * skill's source imports in its own import statements -- never one of its own directory, and
+ * never a name pip would read as an option, a URL or a path.
  */
 class DynamicSkillSelfHealNameTest {
 
     @TempDir Path tmp;
 
-    private static final String JSON_FAILURE = "{\"success\": false, \"output\": \"%s\"}";
+    private static final ObjectMapper JSON = new ObjectMapper();
+
+    /** The line the runner prints for a run whose skill raised a ModuleNotFoundError for {@code module}. */
+    static String runnerSaysMissing(String module) {
+        var result = new LinkedHashMap<String, Object>();
+        result.put("success", false);
+        result.put("output", "Skill error: No module named '" + module + "'\nTraceback (most recent call last): ...");
+        result.put(DynamicSkill.MISSING_MODULE, module);
+        try {
+            return JSON.writeValueAsString(result);
+        } catch (Exception e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
+    /** A run of the skill that failed as {@link #runnerSaysMissing} says, exited as the runner does. */
+    static SandboxResult missing(String module) {
+        return new SandboxResult(0, runnerSaysMissing(module), "", 1, false);
+    }
+
+    /** What the last run returned, for the tests that read it. */
+    private ToolResult last;
 
     /**
-     * Run a skill whose sandbox answers with {@code result}, and return every install the
-     * self-heal asked for.
+     * Run a skill of this code whose sandbox answers with {@code result}, and return every install
+     * the self-heal asked for.
      */
-    private List<List<String>> installsAfter(SandboxResult result) throws Exception {
+    private List<List<String>> installsAfter(String code, SandboxResult result) throws Exception {
         Path skillDir = Files.createDirectories(tmp.resolve("skills/pdf_text"));
-        Files.writeString(skillDir.resolve("skill.py"), "def run(params):\n    return {}\n");
+        Files.writeString(skillDir.resolve("skill.py"), code);
         var asked = new ArrayList<List<String>>();
         var pythonEnv = new PythonEnvironmentService(new OwnClawConfig(), JailTestKit.off()) {
             @Override public void installPackages(Path dir, String name, List<String> packages, java.util.function.BooleanSupplier stopped, Runnable waiting) throws java.io.IOException {
@@ -59,18 +87,13 @@ class DynamicSkillSelfHealNameTest {
         };
         var skill = new DynamicSkill("pdf_text", "reads a pdf", Map.of(), skillDir, false, false, 30,
                 sandbox, pythonEnv, List.of(), null, List.of(), null, null, null);
-        skill.execute(Map.of(), new ToolExecutionContext("u1", "t1", null, () -> false));
+        last = skill.execute(Map.of(), new ToolExecutionContext("u1", "t1", null, () -> false));
         return asked;
     }
 
-    private static SandboxResult onStderr(String module) {
-        return new SandboxResult(1, "", "Traceback (most recent call last):\n"
-                + "ModuleNotFoundError: No module named '" + module + "'\n", 1, false);
-    }
-
-    private static SandboxResult inOutput(String module) {
-        return new SandboxResult(0, String.format(JSON_FAILURE,
-                "Skill error: ModuleNotFoundError: No module named '" + module + "'"), "", 1, false);
+    private List<List<String>> installsAfter(SandboxResult result) throws Exception {
+        return installsAfter("import pdfplumber\nimport bs4.element\nfrom dateutil import parser\nimport yaml\n"
+                + "def run(params):\n    return {}\n", result);
     }
 
     @ParameterizedTest
@@ -87,20 +110,97 @@ class DynamicSkillSelfHealNameTest {
             "..",
             "a b",
             "requests==2.0"})
-    @DisplayName("a crafted module name never reaches installPackages")
+    @DisplayName("a crafted module name never reaches installPackages, even when the runner reports it")
     void craftedNamesAreRefused(String crafted) throws Exception {
-        assertNull(DynamicSkill.extractMissingModule("ModuleNotFoundError: No module named '" + crafted + "'"));
-        assertEquals(List.of(), installsAfter(onStderr(crafted)), "from stderr");
-        assertEquals(List.of(), installsAfter(inOutput(crafted)), "from the skill's JSON output");
+        assertEquals(List.of(), installsAfter("import " + crafted + "\ndef run(params):\n    return {}\n", missing(crafted)));
     }
 
     @Test
-    @DisplayName("a real missing module still self-heals, by its top-level package")
-    void realNamesStillHeal() throws Exception {
-        assertEquals(List.of(List.of("pdfplumber")), installsAfter(onStderr("pdfplumber")));
-        assertEquals(List.of(List.of("beautifulsoup4")), installsAfter(onStderr("bs4.element")));
-        assertEquals(List.of(List.of("python-dateutil")), installsAfter(inOutput("dateutil.parser")));
-        assertEquals(List.of(List.of("pyyaml")), installsAfter(new SandboxResult(1, "",
-                "ImportError: No module named yaml", 1, false)), "the Python 2 wording");
+    @DisplayName("a module the skill imports, reported missing by the runner, is healed by its top-level package")
+    void aModuleTheSkillImportsIsHealed() throws Exception {
+        assertEquals(List.of(List.of("pdfplumber")), installsAfter(missing("pdfplumber")));
+        assertEquals(List.of(List.of("beautifulsoup4")), installsAfter(missing("bs4.element")));
+        assertEquals(List.of(List.of("python-dateutil")), installsAfter(missing("dateutil.parser")));
+        assertEquals(List.of(List.of("pyyaml")), installsAfter(missing("yaml")));
+        // Mutation: the reported name not cut to its top-level package -> pip is asked for bs4.element.
+    }
+
+    @Test
+    @DisplayName("what a run printed is never a module to install: \"No module named\" on stderr, in the skill's own result, in its output -- a page the skill read can say so")
+    void whatARunPrintedHealsNothing() throws Exception {
+        String said = "ModuleNotFoundError: No module named 'pdfplumber'";
+        assertEquals(List.of(), installsAfter(new SandboxResult(1, "", "Traceback (most recent call last):\n" + said + "\n", 1, false)),
+                "on stderr, as a crash");
+        assertEquals(List.of(), installsAfter(new SandboxResult(0,
+                "{\"success\": false, \"output\": \"Skill error: " + said + "\"}", "", 1, false)), "in the skill's result");
+        assertEquals(List.of(), installsAfter(new SandboxResult(0,
+                "The page said: " + said + "\n{\"success\": false, \"output\": \"could not read it\"}", "", 1, false)),
+                "printed before the result");
+        assertEquals(List.of(), installsAfter(new SandboxResult(1, "", "ImportError: No module named yaml", 1, false)),
+                "the Python 2 wording");
+        // Mutation: the heal reading the output for "No module named", as it did -> each of these installs pdfplumber or pyyaml.
+    }
+
+    @Test
+    @DisplayName("a module the skill's source does not import is not installed, though the runner reports it: one only another package imports, or only importlib names -- and the run is told why")
+    void aModuleTheSkillDoesNotImportIsNotHealed() throws Exception {
+        String code = "import importlib\nimport pdfplumber\ndef run(params):\n"
+                + "    return importlib.import_module(params.get('name', 'evil_pkg'))\n";
+        assertEquals(List.of(), installsAfter(code, missing("evil_pkg")));
+        assertFalse(last.success());
+        assertTrue(last.output().contains("'evil_pkg' is not installed automatically: skill.py does not import it itself"),
+                last.output());
+        assertEquals(List.of(), installsAfter("\"\"\"pdfplumber is used upstream.\"\"\"\ndef run(params):\n    return {}\n",
+                missing("pdfplumber")), "named in a docstring, not imported");
+        // Mutation: any name the runner reports installed -> evil_pkg is installed.
+    }
+
+    @Test
+    @DisplayName("a module of the skill's own directory is never installed from an index under its name: nothing there is imported, and the run is told to put it into skill.py")
+    void aModuleOfItsOwnDirectoryIsNotHealed() throws Exception {
+        Path skillDir = Files.createDirectories(tmp.resolve("skills/pdf_text"));
+        Files.writeString(skillDir.resolve("helper_mod.py"), "VALUE = 1\n");
+        Files.createDirectories(skillDir.resolve("helper_pkg"));
+
+        assertEquals(List.of(), installsAfter("import helper_mod\nimport helper_pkg\ndef run(params):\n    return {}\n",
+                missing("helper_mod")));
+        assertTrue(last.output().contains("'helper_mod' is a module in the skill's own directory"), last.output());
+        assertEquals(List.of(), installsAfter("import helper_mod\nimport helper_pkg\ndef run(params):\n    return {}\n",
+                missing("helper_pkg.sub")));
+        // Mutation: the skill's own directory not looked at -> pip is asked for helper_mod, whatever an index holds under it.
+    }
+
+    @Test
+    @DisplayName("the runner's key is no part of what the skill returned: the output reads as it did before the key was added")
+    void theRunnersKeyIsNotInTheOutput() throws Exception {
+        installsAfter(missing("pdfplumber"));
+        assertFalse(last.output().contains(DynamicSkill.MISSING_MODULE), last.output());
+        assertTrue(last.output().startsWith("Skill error: No module named 'pdfplumber'"), last.output());
+        // Mutation: parseOutput leaving the key in -> the whole result object is the output.
+    }
+
+    @Test
+    @DisplayName("what a skill's source imports: every form of import statement, at a line's start or after a colon, by top-level name")
+    void whatASourceImports() {
+        String source = """
+                import os, sys as system
+                import google.cloud.storage
+                from bs4.element import Tag
+                from . import sibling
+                from .rel import thing
+                try: import ujson as json
+                except ImportError: import json
+                if True: from yaml import safe_load
+                def run(params):
+                    import pdfplumber  # lazily
+                    x = 1; import requests
+                    s = "this import is text"
+                    return {}
+                # import commented_out
+                """;
+        assertEquals(Set.of("os", "sys", "google", "bs4", "ujson", "json", "yaml", "pdfplumber", "requests"),
+                DynamicSkill.importedBy(source));
+        assertEquals(Set.of(), DynamicSkill.importedBy(null));
+        assertEquals(Set.of(), DynamicSkill.importedBy("x = 'important'\nprint('imports')\n"));
     }
 }

@@ -30,10 +30,11 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  * What runs is skill.py as its source says, not a {@code __pycache__/skill.*.pyc} left in the
  * skill's writable directory -- and the load check judges the same source the run executes. The
  * plant is first shown to work on plain Python -- otherwise "it did not change what ran" would
- * prove nothing -- and then run through the real harness. Apart from that the skill loads as it
- * always did: a module importlib made, its own directory first on sys.path. What the harness
- * gives it besides is here too: report_progress while it loads, check and run alike, its own
- * functions for worker processes, and a result read from the line the runner prints last.
+ * prove nothing -- and then run through the real harness. The same for a module a run leaves in
+ * the directory: nothing there is imported but skill.py. Apart from that the skill loads as a
+ * module importlib made. What the harness gives it besides is here too: report_progress while
+ * it loads, check and run alike, its own functions for worker processes, a module it misses
+ * reported in the runner's own key, and a result read from the line the runner prints last.
  */
 class RunnerHarnessRegressionTest {
 
@@ -47,11 +48,9 @@ class RunnerHarnessRegressionTest {
         skillDir = Files.createDirectories(tmp.resolve("generated/harness_probe"));
         Files.writeString(skillDir.resolve("skill.py"), """
                 import json
-                import helper_mod
                 def run(params):
-                    return {'output': 'source|' + json.dumps([1]) + '|' + helper_mod.VALUE}
+                    return {'output': 'source|' + json.dumps([1])}
                 """);
-        Files.writeString(skillDir.resolve("helper_mod.py"), "VALUE = 'sibling ok'\n");
     }
 
     private record Ran(int exit, String out) {}
@@ -80,10 +79,26 @@ class RunnerHarnessRegressionTest {
     /** The whole of the last run's stdout, as the sandbox returned it. */
     private String lastStdout;
 
+    /** Every install the self-heal asked for, in order. */
+    private final List<List<String>> installs = new ArrayList<>();
+
     private String runSkill() {
+        ToolResult result = run();
+        assertTrue(result.success(), result.output());
+        return result.output();
+    }
+
+    private ToolResult run() {
         var cfg = new OwnClawConfig();
         cfg.getSandbox().setPythonPath("python3");
-        var env = new PythonEnvironmentService(cfg, JailTestKit.off());
+        var env = new PythonEnvironmentService(cfg, JailTestKit.off()) {
+            @Override
+            public void installPackages(Path dir, String name, List<String> packages,
+                                        java.util.function.BooleanSupplier stopped, Runnable waiting) throws java.io.IOException {
+                installs.add(packages);
+                throw new java.io.IOException("not installed here: no index is reached from a test");
+            }
+        };
         var real = new ProcessSandbox(JailTestKit.off());
         SandboxManager recording = new SandboxManager() {
             @Override
@@ -101,9 +116,7 @@ class RunnerHarnessRegressionTest {
         };
         var skill = new DynamicSkill("harness_probe", "probe", Map.of(), skillDir, false, false, 30,
                 recording, env, List.of(), null, List.of(), null, null, null);
-        var result = skill.execute(Map.of(), new ToolExecutionContext("u1", "t1", null, () -> false));
-        assertTrue(result.success(), result.output());
-        return result.output();
+        return skill.execute(Map.of(), new ToolExecutionContext("u1", "t1", null, () -> false));
     }
 
     /**
@@ -128,7 +141,7 @@ class RunnerHarnessRegressionTest {
     @DisplayName("a planted __pycache__/skill.*.pyc does not replace skill.py")
     void aPlantedPycDoesNotRun() throws Exception {
         plantPyc(skillDir.resolve("skill.py"));
-        assertEquals("source|[1]|sibling ok", runSkill());
+        assertEquals("source|[1]", runSkill());
     }
 
     @Test
@@ -191,22 +204,95 @@ class RunnerHarnessRegressionTest {
     }
 
     @Test
-    @DisplayName("the skill loads as it always did: __spec__ and importlib.util are there, its own modules come first")
-    void theSkillLoadsAsItAlwaysDid() throws Exception {
-        // A sibling named like a library module is what the skill imports, as it was before the
-        // harness compiled skill.py itself.
+    @DisplayName("the skill loads as a module importlib made -- __spec__, a source loader, importlib.util -- and a sibling named like a library module is not what it gets")
+    void theSkillLoadsAsAModuleAndNoSiblingIsImported() throws Exception {
         Files.writeString(skillDir.resolve("email.py"), "X = 'sibling'\n");
         String code = """
                 import email, importlib, os
                 ORIGIN = os.path.basename(__spec__.origin)
                 def run(params):
-                    return {'output': '|'.join([__spec__.name, ORIGIN, type(__loader__).__name__,
-                            str(importlib.util.find_spec('json') is not None), email.X])}
+                    return {'output': '|'.join([__spec__.name, ORIGIN, str(isinstance(__loader__,
+                            importlib.machinery.SourceFileLoader)), str(importlib.util.find_spec('json') is not None),
+                            str(hasattr(email, 'X')), os.path.basename(os.path.dirname(email.__file__))])}
                 """;
         // The load check makes the module the same way, so reading __spec__ on import passes it.
         String created = skillManager().createSkill(skill("harness_probe", code));
         assertFalse(created.startsWith("ERROR"), created);
-        assertEquals("skill|skill.py|SourceFileLoader|True|sibling", runSkill());
+        assertEquals("skill|skill.py|True|True|False|email", runSkill());
+        // Mutation: the skill's directory left first on sys.path, as it was -> email is the sibling, with X.
+    }
+
+    @Test
+    @DisplayName("a module a run leaves in the skill's directory is not imported by the next run: not by the runner, which imports json before skill.py does, and not by skill.py")
+    void aModuleLeftInTheDirectoryIsNotImported() throws Exception {
+        // What a run can leave: the directory is the skill's own, and writable by it.
+        Files.writeString(skillDir.resolve("json.py"), "raise SystemExit('planted json ran')\n");
+        Files.writeString(skillDir.resolve("requests.py"), "raise SystemExit('planted requests ran')\n");
+        Files.writeString(skillDir.resolve("helper_mod.py"), "raise SystemExit('planted helper ran')\n");
+        Path probe = Files.writeString(skillDir.resolve("_probe.py"), "import json\n");
+        Ran control = python(probe.toString());
+        assertTrue(control.out.contains("planted json ran"), "the plant must work on plain Python, or this test proves nothing: "
+                + control.out);
+        Files.delete(probe);
+
+        Files.writeString(skillDir.resolve("skill.py"), """
+                import json
+                def run(params):
+                    got = []
+                    for name in ('requests', 'helper_mod'):
+                        try:
+                            got.append(name + ' from ' + __import__(name).__file__)
+                        except ModuleNotFoundError:
+                            got.append('no ' + name)
+                    return {'output': json.dumps([1]) + '|' + '|'.join(got)}
+                """);
+        String out = runSkill();
+
+        assertTrue(out.startsWith("[1]|"), out);
+        assertFalse(out.contains(skillDir.getFileName().toString()), "a module came from the skill's directory: " + out);
+        assertTrue(out.endsWith("|no helper_mod"), out);
+        // Mutation: the skill's directory left on sys.path -> the runner's import json is the plant,
+        // and the run ends with "planted json ran".
+    }
+
+    @Test
+    @DisplayName("an uncaught ModuleNotFoundError is reported in the runner's own key, which a skill cannot set in what it returns -- and a module named only through importlib is not installed")
+    void aMissingModuleIsReportedInTheRunnersKey() throws Exception {
+        Files.writeString(skillDir.resolve("skill.py"), """
+                import importlib
+                def run(params):
+                    importlib.import_module('nowhere_xyz.sub')
+                """);
+        ToolResult failed = run();
+
+        assertFalse(failed.success());
+        String line = lastStdout.strip().lines().reduce((a, b) -> b).orElse("");
+        assertTrue(line.contains("\"" + DynamicSkill.MISSING_MODULE + "\": \"nowhere_xyz\""), line);
+        assertFalse(failed.output().contains(DynamicSkill.MISSING_MODULE), failed.output());
+        assertTrue(failed.output().contains("'nowhere_xyz' is not installed automatically"), failed.output());
+        assertEquals(List.of(), installs, "named through importlib, not imported by skill.py: nothing is installed");
+
+        Files.writeString(skillDir.resolve("skill.py"), """
+                def run(params):
+                    return {'success': False, 'output': 'no', '%s': 'chosen_by_the_skill'}
+                """.formatted(DynamicSkill.MISSING_MODULE));
+        run();
+        assertFalse(lastStdout.contains("chosen_by_the_skill"), lastStdout);
+        // Mutations: the runner not setting the key -> nothing names nowhere_xyz; not taking it out of
+        // what the skill returned -> chosen_by_the_skill is in the result line.
+    }
+
+    @Test
+    @DisplayName("a module skill.py imports from its own directory fails the run, and is never installed from an index under that name")
+    void aSiblingModuleIsNotInstalled() throws Exception {
+        Files.writeString(skillDir.resolve("helper_mod.py"), "VALUE = 'sibling'\n");
+        Files.writeString(skillDir.resolve("skill.py"), "import helper_mod\ndef run(params):\n    return {'output': helper_mod.VALUE}\n");
+
+        ToolResult failed = run();
+
+        assertFalse(failed.success(), failed.output());
+        assertTrue(failed.output().contains("'helper_mod' is a module in the skill's own directory"), failed.output());
+        assertEquals(List.of(), installs);
     }
 
     @Test

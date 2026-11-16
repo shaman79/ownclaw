@@ -53,7 +53,8 @@ class DynamicSkillOutputTest {
 
     private ToolResult run(PythonEnvironmentService env, SandboxResult... results) throws Exception {
         Path dir = Files.createDirectories(tmp.resolve("skills/net_scan"));
-        Files.writeString(dir.resolve("skill.py"), "def run(params):\n    return {}\n");
+        // It imports scapy, so a run whose runner reports scapy missing is healed with it.
+        Files.writeString(dir.resolve("skill.py"), "import scapy\ndef run(params):\n    return {}\n");
         var skill = new DynamicSkill("net_scan", "scans the network", Map.of(), dir, false, false, 30,
                 null, env, List.of(), null, List.of("nmap"), null, new Runs(results), null);
         return skill.execute(Map.of(), new ToolExecutionContext("u1", "t1", null, () -> false,
@@ -359,7 +360,7 @@ class DynamicSkillOutputTest {
             }
         };
         var r = run(installs,
-                exited(1, "", "ModuleNotFoundError: No module named 'scapy'"),
+                exited(0, DynamicSkillSelfHealNameTest.runnerSaysMissing("scapy"), ""),
                 exited(1, "", "PermissionError: raw sockets need root"));
         assertFalse(r.success());
         assertTrue(r.output().startsWith("PermissionError: raw sockets need root"),
