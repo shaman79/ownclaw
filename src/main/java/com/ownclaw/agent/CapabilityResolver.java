@@ -69,36 +69,41 @@ public class CapabilityResolver {
     /**
      * Before a word for mail, what makes it where something goes or how: "to my email", "to my
      * work email"; "by email", "via e-mail" after a verb of sending -- "send it by email", but
-     * not "what arrived by email"; "as an email", "put it in an email", "reply with an email";
-     * and an email being made, with its article -- "send me an email", "write an email", "drop
-     * me a new email", but not "send me my unread emails". Looked for no further back than that,
-     * so it costs the same at every word.
+     * not "what arrived by email", and "let me know by email"; "as an email", "as email", "put
+     * it in an email", "reply with an email"; and an email being made, with its article and one
+     * word before it -- "send me an email", "send Bob a short new email", "write an email", but
+     * not "send me my unread emails". Looked for no further back than that, so it costs the same
+     * at every word.
      */
     private static final String SENT_BEFORE = "(?<!(?:"
             + "\\bto\\s{1,3}(?:my|your|his|her|our|their)(?:\\s{1,3}\\p{L}{1,12})?"
-            + "|\\b(?:send|deliver|notify|share|forward)" + UP_TO_TWO_WORDS + "\\s{1,3}(?:by|via|per)"
-            + "|\\bas\\s{1,3}an?"
+            + "|\\b(?:send|deliver|notify|share|forward|tell|inform|let\\s{1,3}me\\s{1,3}know)" + UP_TO_TWO_WORDS
+            + "\\s{1,3}(?:by|via|per)"
+            + "|\\bas(?:\\s{1,3}an?)?"
             + "|\\bput\\s{1,3}(?:it|them|this|that|everything)\\s{1,3}in\\s{1,3}an?"
             + "|\\breply\\s{1,3}with\\s{1,3}an?"
-            + "|\\b(?:send|write|compose|draft|drop|shoot)(?:\\s{1,3}(?:me|him|her|them|us|you))?\\s{1,3}(?:an?|another)"
-            + "(?:\\s{1,3}(?:new|short|quick|brief))?"
+            + "|\\b(?:send|write|compose|draft|drop|shoot)(?:\\s{1,3}\\p{L}{1,20})?\\s{1,3}(?:an?|another)"
+            + "(?:\\s{1,3}(?:new|short|quick|brief))?(?:\\s{1,3}(?:new|short|quick|brief))?"
             + ")\\s{1,3})";
 
     /**
-     * A word for mail that is the verb of sending: where a clause begins -- a sentence's start, a
-     * comma, "and", "then", "please", "also", "or", "you" -- and followed by what is sent or who
-     * it goes to: "and email it to me", "then mail me", "and email the result to Bob", "email
-     * Jana the menu". "the email her manager sent" is none: the word is not where a clause begins.
+     * A word for mail that is the verb of sending: where a clause begins -- after the mark that
+     * ended the sentence before, a comma, "and", "then", "please", "also", "or", "you", or at the
+     * text's start (a look-behind sees past the sentence it is matched in, so its ^ is the
+     * text's) -- and followed by what is sent, who it goes to or when: "and email it to me",
+     * "then mail me", "and email the result to Bob", "email Jana the menu", "and email when it is
+     * down". "the email her manager sent" is none: the word is not where a clause begins.
      */
-    private static final String SENT_AS_A_VERB = "(?!(?<=(?:^|[,;:]|\\b(?:and|then|please|pls|also|or|you))\\s{0,3})"
-            + "(?:e-?|g|web)?mail\\s{1,8}(?:(?:it|me|them|us|him|her|you|everyone|everybody|the|a|an|this|that|these"
-            + "|those|my|our|your|his|their)\\b|(?-i:\\p{Lu})))";
+    private static final String SENT_AS_A_VERB = "(?!(?<=(?:^|[.!?\\n\\r,;:]|\\b(?:and|then|please|pls|also|or|you))"
+            + "\\s{0,3})(?:e-?|g|web)?mail\\s{1,8}(?:(?:it|me|them|us|him|her|you|everyone|everybody|the|a|an|this|that"
+            + "|these|those|my|our|your|his|their|its|to|when|if|once)\\b|(?-i:\\p{Lu})))";
 
     /**
-     * The Czech "to the mail" -- "pošli to na mail", "na pracovní e-mail" -- is somewhere to send
-     * to; "na mailu", with its ending, is where mail is read: "co mám na mailu".
+     * The Czech "to the mail" -- "pošli to na mail", "na můj pracovní e-mail" -- is somewhere to
+     * send to; "na mailu", with its ending, is where mail is read: "co mám na mailu".
      */
-    private static final String TO_THE_MAIL = "(?!(?<=\\bna\\s{1,3}(?:\\p{L}{1,12}\\s{1,3})?)(?:e-?|g|web)?mail(?!\\p{L}))";
+    private static final String TO_THE_MAIL = "(?!(?<=\\bna\\s{1,3}(?:\\p{L}{1,12}\\s{1,3})?(?:\\p{L}{1,12}\\s{1,3})?)"
+            + "(?:e-?|g|web)?mail(?!\\p{L}))";
 
     /**
      * A Czech verb of sending with one mail after it -- "pošli mi e-mail", "napiš nový mail" --

@@ -32,11 +32,12 @@ import java.util.function.Supplier;
  * pinned chat of scheduled results. It used to be whichever chat was open when the work finished,
  * so a morning digest landed in the middle of an unrelated conversation.
  * <p>
- * A task's result goes with what it offers to click ({@link AgentResult#choices}), as an attended
- * answer does: saved with the message and sent with it, for the page's buttons and Telegram's
- * keys. Delivered without them, the command a task's ending offers for a skill that waits for a
- * grant -- {@code /grant <skill> <KEYS>}, written by code -- reached the owner of a scheduled run
- * or {@code /bg} as text to type.
+ * A task's result goes with the commands it offers to click ({@link AgentResult#choices}): saved
+ * with the message and sent with it, for the page's buttons and Telegram's keys. Delivered
+ * without them, the command a task's ending offers for a skill that waits for a grant --
+ * {@code /grant <skill> <KEYS>}, written by code -- reached the owner of a scheduled run or
+ * {@code /bg} as text to type. Commands alone: see {@link #deliver(String, Supplier, String,
+ * String, String, String, List)}.
  */
 @Service
 public class ResultDelivery {
@@ -146,11 +147,16 @@ public class ResultDelivery {
      *                  Telegram -- or null. Saved as the row's private text and sent only in the
      *                  message's data; the message's text stays the safe one, and that is what
      *                  history, search and later prompts read.
-     * @param choices   what the task's result offers to click ({@link AgentResult#choices}), passed
-     *                  on as it has them and never made here: saved with the message, as an
-     *                  attended answer's are, and sent in its data ({@link #choicesOf}) -- the page
-     *                  draws them under it, now and after a reload, and Telegram as keys. A click
-     *                  only sends one as the owner's own message.
+     * @param choices   what the task's result offers to click ({@link AgentResult#choices}), never
+     *                  made here. Its commands are offered -- what code wrote for this account to
+     *                  send, a {@code /grant}: saved with the message, as an attended answer's
+     *                  choices are, and sent in its data ({@link #choicesOf}), so the page draws
+     *                  them under it, now and after a reload, and Telegram as keys. A command is
+     *                  read the same in whatever chat it is sent. Its answers to a question the
+     *                  task asked are not: nobody was there when it asked, and a key tapped in
+     *                  Telegram goes into the chat open there, not this one -- "Yes, delete them"
+     *                  read with another conversation for its context. A click only ever sends one
+     *                  as the owner's own message.
      */
     public void deliver(String userId, Supplier<String> chat, String header, String text, String taskId,
                         String ownerText, List<String> choices) {
@@ -160,7 +166,8 @@ public class ResultDelivery {
         }
         String message = withHeader(header, text);
         String owner = ownerText == null ? null : withHeader(header, ownerText);
-        List<String> offered = choices == null ? List.of() : List.copyOf(choices);
+        List<String> offered = choices == null ? List.of()
+                : choices.stream().filter(com.ownclaw.interfaces.CommandHandler::isCommand).toList();
 
         String sessionId = null;
         String savedAt = null;

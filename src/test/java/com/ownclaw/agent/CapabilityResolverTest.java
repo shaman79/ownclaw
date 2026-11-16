@@ -260,7 +260,18 @@ class CapabilityResolverTest {
                 "Check the logs and shoot me a quick email",
                 "Check the logs and forward it to my work email",
                 "Fetch the menu and notify me via e-mail",
-                "Zkontroluj logy a pošli mi zprávu na pracovní e-mail")) {
+                "Zkontroluj logy a pošli mi zprávu na pracovní e-mail",
+                "check the server and let me know by email",
+                "check the stock and send Bob an email",
+                "read the report and write Bob a short email about it",
+                "read the article and send it as email",
+                "Fetch the news. Email Bob the summary and check his reply.",
+                "Fetch the news.\nEmail Bob the summary and check his reply.",
+                "fetch the report and email to me",
+                "check the website and email when it's down",
+                "read the PDF and email its summary",
+                "check the logs and send Bob a short new email",
+                "zkontroluj web a pošli upozornění na můj pracovní mail")) {
             assertNull(bare().resolve(message), message);
         }
         // Mutations: SENT_AS_A_VERB left out -> "email it", "mail me", "email the result" ask for a

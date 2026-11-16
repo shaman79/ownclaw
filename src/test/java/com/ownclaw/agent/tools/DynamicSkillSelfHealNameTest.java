@@ -241,6 +241,11 @@ class DynamicSkillSelfHealNameTest {
                 """;
         assertEquals(Set.of("os", "sys", "google", "bs4", "ujson", "json", "yaml", "pdfplumber", "requests"),
                 DynamicSkill.importedBy(source));
+        // A quote inside an f-string's field (3.12) does not end the string; a backslash before CRLF continues it.
+        assertEquals(Set.of("yaml"), DynamicSkill.importedBy("x = f\"{'\"'}\"; import yaml\n"));
+        assertEquals(Set.of("yaml"), DynamicSkill.importedBy("x = rf'{d[\"k\"]:>{w}}'; import yaml\n"));
+        assertEquals(Set.of(), DynamicSkill.importedBy("s = 'abc \\\r\nimport evilpkg'\r\n"));
+        assertEquals(Set.of("os"), DynamicSkill.importedBy("s = f'{{import evil}}'\nimport os\n"));
         assertEquals(Set.of(), DynamicSkill.importedBy(null));
         assertEquals(Set.of(), DynamicSkill.importedBy("x = 'important'\nprint('imports')\n"));
     }

@@ -994,7 +994,9 @@ public class DynamicSkill implements Tool {
      * Python source with every comment and every string literal blanked -- each character a
      * space, line breaks kept -- so what is left is code. Strings of any quote, single or
      * triple, with any prefix: a backslash escapes the next character in every one of them, as
-     * far as where a string ends goes.
+     * far as where a string ends goes, and a backslash before a line break continues the line,
+     * CRLF included. An f- or t-string's replacement fields are read as the code they are, so a
+     * quote inside one ({@code f"{'"'}"}, Python 3.12) does not end the string.
      */
     static String codeOnly(String source) {
         var out = new StringBuilder(source.length());
@@ -1002,46 +1004,86 @@ public class DynamicSkill implements Tool {
         int i = 0;
         while (i < n) {
             char c = source.charAt(i);
+            int end;
             if (c == '#') {
-                while (i < n && source.charAt(i) != '\n' && source.charAt(i) != '\r') {
-                    out.append(' ');
-                    i++;
-                }
-                continue;
-            }
-            if (c != '\'' && c != '"') {
+                end = i;
+                while (end < n && source.charAt(end) != '\n' && source.charAt(end) != '\r') end++;
+            } else if (c == '\'' || c == '"') {
+                end = stringEnd(source, i, hasFields(source, i));
+            } else {
                 out.append(c);
                 i++;
                 continue;
             }
-            boolean triple = i + 2 < n && source.charAt(i + 1) == c && source.charAt(i + 2) == c;
-            int open = triple ? 3 : 1;
-            for (int k = 0; k < open; k++) out.append(' ');
-            i += open;
-            while (i < n) {
-                char d = source.charAt(i);
-                if (d == '\\' && i + 1 < n) {
-                    out.append(blank(d)).append(blank(source.charAt(i + 1)));
-                    i += 2;
-                    continue;
-                }
-                if (d == c && (!triple || (i + 2 < n && source.charAt(i + 1) == c && source.charAt(i + 2) == c))) {
-                    for (int k = 0; k < open; k++) out.append(' ');
-                    i += open;
-                    break;
-                }
-                if (!triple && (d == '\n' || d == '\r')) break;   // not closed on its line: no string
-                out.append(blank(d));
-                i++;
+            for (int k = i; k < end; k++) {
+                char d = source.charAt(k);
+                out.append(d == '\n' || d == '\r' ? d : ' ');
             }
+            i = end;
         }
         return out.toString();
     }
 
-    /** A character of a comment or a string, as {@link #codeOnly} leaves it: a line break stays one. */
-    private static char blank(char c) {
-        return c == '\n' || c == '\r' ? c : ' ';
+    /** Whether the string whose opening quote is at {@code quote} is an f- or t-string, by the prefix right before it. */
+    private static boolean hasFields(String s, int quote) {
+        int p = quote;
+        while (p > 0 && quote - p < 2 && Character.isLetter(s.charAt(p - 1))) p--;
+        if (p > 0 && (Character.isLetterOrDigit(s.charAt(p - 1)) || s.charAt(p - 1) == '_')) return false;
+        String prefix = s.substring(p, quote).toLowerCase(java.util.Locale.ROOT);
+        return prefix.chars().allMatch(ch -> "rbuft".indexOf(ch) >= 0) && (prefix.contains("f") || prefix.contains("t"));
     }
+
+    /** Just past the closing quote of the string whose opening quote is at {@code start}; a one-line string not closed ends at its line's end. */
+    private static int stringEnd(String s, int start, boolean fields) {
+        int n = s.length();
+        char q = s.charAt(start);
+        boolean triple = start + 2 < n && s.charAt(start + 1) == q && s.charAt(start + 2) == q;
+        int i = start + (triple ? 3 : 1);
+        while (i < n) {
+            char d = s.charAt(i);
+            if (d == '\\') {
+                i += i + 2 < n && s.charAt(i + 1) == '\r' && s.charAt(i + 2) == '\n' ? 3 : 2;
+                continue;
+            }
+            if (fields && d == '{') {
+                if (i + 1 < n && s.charAt(i + 1) == '{') {
+                    i += 2;
+                } else {
+                    i = fieldEnd(s, i + 1);
+                }
+                continue;
+            }
+            if (d == q && (!triple || (i + 2 < n && s.charAt(i + 1) == q && s.charAt(i + 2) == q))) {
+                return i + (triple ? 3 : 1);
+            }
+            if (!triple && (d == '\n' || d == '\r')) return i;
+            i++;
+        }
+        return n;
+    }
+
+    /** Just past the closing brace of an f-string's replacement field whose expression starts at {@code from}. */
+    private static int fieldEnd(String s, int from) {
+        int n = s.length();
+        int depth = 0;
+        int i = from;
+        while (i < n) {
+            char c = s.charAt(i);
+            if (c == '\'' || c == '"') {
+                i = stringEnd(s, i, hasFields(s, i));
+                continue;
+            }
+            if (c == '{' || c == '[' || c == '(') {
+                depth++;
+            } else if (c == '}' || c == ']' || c == ')') {
+                if (depth == 0) return i + 1;
+                depth--;
+            }
+            i++;
+        }
+        return n;
+    }
+
 
     /**
      * The {@link #MISSING_MODULE} of the runner's result line -- the last line of stdout -- or

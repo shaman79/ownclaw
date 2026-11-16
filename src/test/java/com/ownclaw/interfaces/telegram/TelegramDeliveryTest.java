@@ -574,8 +574,21 @@ class TelegramDeliveryTest {
         for (String body : later) {
             assertTrue(JSON.readTree(body).path("reply_markup").isMissingNode(), body);
         }
+        // A delivered question's answers are no keys: tapped, one goes into whatever chat is open
+        // here -- not the chat of scheduled results the question is in -- and is read with another
+        // conversation for its context. Its command still is.
+        before = telegram.bodies("sendMessage").size();
+        delivery.deliver(owner, () -> conversations.scheduledSession(owner), "Scheduled task: tidy the backups",
+                com.ownclaw.agent.AgentResult.needsInput("Should I delete the 40 old backups?",
+                        new com.ownclaw.agent.AgentTrajectory(), 1)
+                        .withChoices(List.of("Yes, delete them", "No, keep them", grant)).withTaskId("c3d4e5f6"));
+        FakeTelegram.drain(bot);
+        String question = telegram.bodies("sendMessage").getLast();
+        assertEquals(before + 1, telegram.bodies("sendMessage").size());
+        assertEquals(List.of(grant), keys(question), question);
         // Mutations: the status sent without the result's choices -> no key; every result sent with
-        // its choices, none included -> a result that offers nothing takes away a question's keys.
+        // its choices, none included -> a result that offers nothing takes away a question's keys;
+        // a delivered question's answers offered -> "Yes, delete them" is a key.
     }
 
     @Test

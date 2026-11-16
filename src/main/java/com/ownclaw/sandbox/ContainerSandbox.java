@@ -830,6 +830,11 @@ public class ContainerSandbox {
     private String computeImageTag(String baseImage, List<String> systemPackages, String pipRequirements) {
         try {
             MessageDigest md = MessageDigest.getInstance("SHA-256");
+            // What the image is made with besides its packages: an image of a skill built before
+            // PYTHONSAFEPATH was among its ENV lines would go on running without it, in its
+            // WORKDIR, the skill's directory. A new tag builds it again.
+            md.update("ENV PYTHONSAFEPATH=1".getBytes(StandardCharsets.UTF_8));
+            md.update((byte) 0);
             // Include the base image in hash so different base images produce different tags.
             md.update(baseImage.getBytes(StandardCharsets.UTF_8));
             md.update((byte) 0);

@@ -139,21 +139,22 @@ class ResultDeliveryTest {
         // As self-repair tells the owner: text of its own.
         delivery.deliver("u1", () -> session, "Self-repair of mailer", "It was stopped.", "b2c3d4e5", null);
 
-        assertEquals("{\"taskId\":\"a1b2c3d4\",\"choices\":[\"Later\",\"" + GRANT + "\"]}", jdbc.queryForObject(
+        assertEquals("{\"taskId\":\"a1b2c3d4\",\"choices\":[\"" + GRANT + "\"]}", jdbc.queryForObject(
                 "SELECT metadata FROM conversations WHERE content LIKE '%Send it now or later?%'", String.class),
-                "kept in the row's metadata, as an attended answer's are");
+                "kept in the row's metadata, as an attended answer's are -- the command, not the answer");
         var rows = conversations.getSessionMessages("u1", session, null, null).messages();
-        assertEquals("[\"Later\",\"" + GRANT + "\"]", String.valueOf(rows.get(0).get("choices")),
+        assertEquals("[\"" + GRANT + "\"]", String.valueOf(rows.get(0).get("choices")),
                 "the chat's history gives them back, for the page to draw after a reload");
-        assertEquals(List.of("Later", GRANT), ResultDelivery.choicesOf(messages.get(0)), "sent with it: " + messages.get(0).data());
-        assertEquals(List.of("Later", GRANT), messages.get(0).data().get(ResultDelivery.CHOICES));
+        assertEquals(List.of(GRANT), ResultDelivery.choicesOf(messages.get(0)), "sent with it: " + messages.get(0).data());
+        assertEquals(List.of(GRANT), messages.get(0).data().get(ResultDelivery.CHOICES));
 
         assertNull(rows.get(1).get("choices"), "a caller's own text offers nothing: " + rows.get(1));
         assertFalse(messages.get(1).data().containsKey(ResultDelivery.CHOICES), messages.get(1).data().toString());
         assertEquals(List.of(), ResultDelivery.choicesOf(messages.get(1)));
         // Mutations: saveResult keeps no choices -> the metadata and the history have none; the
         // result's data without them -> the event offers none; the AgentResult overload handing on
-        // none -> neither.
+        // none -> neither; the answers delivered with the command -> "Later" is offered, and a key
+        // tapped in Telegram would send it into whatever chat is open there.
     }
 
     @Test
