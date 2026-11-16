@@ -54,7 +54,11 @@ class ChatTimesPageTest {
     void liveRowsShowTheirFramesTime() {
         assertTrue(page.contains("addMsg('input_request', content, data.taskId, null, data.timestamp)"), "a question");
         assertTrue(page.contains("addProgress(content, data.progress, null, data.timestamp);"), "a progress row");
-        assertTrue(page.contains("addMsg('response', content, data.taskId, null, data.timestamp);"), "a result");
+        // A result is drawn as its saved row is, with no row to go before: drawRow hands the time on to
+        // addMsg, and rowTime takes this page's clock for a row drawn live that says none.
+        assertTrue(page.contains("drawRow({ role: 'assistant', content: content, task_id: data.taskId, "
+                + "timestamp: data.timestamp, choices: data.choices }, null);"), "a result");
+        assertTrue(function("drawRow").contains("addMsg(type, m.content, m.task_id, before, m.timestamp);"), "a result's time");
         assertTrue(page.contains("var drawnMsg = addMsg(type, content, data.taskId, null, data.timestamp);"),
                 "an answer, a system line");
         assertTrue(function("send").contains("addMsg('user', display)"),

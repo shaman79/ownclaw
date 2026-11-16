@@ -599,7 +599,7 @@ public class ScheduledTaskService {
                         if (result.success()) {
                             onTaskCompleted(taskId, userId, taskType, description,
                                     result.response(), result.ownerText(), used, agentTaskId,
-                                    ResultDelivery.withheldLine(result));
+                                    ResultDelivery.withheldLine(result), result.choices());
                         } else if (result.terminationReason()
                                 == com.ownclaw.agent.AgentResult.TerminationReason.PRIVACY_BLOCKED) {
                             // The door refused to send. Delivered and rescheduled like a failure,
@@ -608,16 +608,16 @@ public class ScheduledTaskService {
                             // partial and says what stopped it.
                             onTaskFailed(taskId, userId, taskType, description,
                                     describeFailure(result, result.response()),
-                                    ownersFailure(result), used, agentTaskId, "partial");
+                                    ownersFailure(result), used, agentTaskId, "partial", result.choices());
                         } else {
                             onTaskFailed(taskId, userId, taskType, description,
                                     describeFailure(result, result.response()),
-                                    ownersFailure(result), used, agentTaskId, "failed");
+                                    ownersFailure(result), used, agentTaskId, "failed", result.choices());
                         }
                     })
                     .exceptionally(ex -> {
                         onTaskFailed(taskId, userId, taskType, description, ex.getMessage(), null,
-                                null, null, "failed");
+                                null, null, "failed", List.of());
                         return null;
                     });
         }
@@ -691,10 +691,14 @@ public class ScheduledTaskService {
      * @param ownerText the owner's private answer, or null. Delivered beside the response and
      *                  nowhere else: the run's record and last_result keep the response, as every
      *                  reader but the owner's chat does -- ops and the schedule list read them.
+     * @param choices   what the run's result offers to click (AgentResult#choices) -- the command
+     *                  its ending wrote for a skill that waits for a grant -- delivered with it, as
+     *                  an attended answer's are. The String overload of deliver it calls offered
+     *                  nothing, so the command reached the owner as text to type.
      */
     private void onTaskCompleted(long taskId, String userId, String taskType,
                                  String description, String response, String ownerText,
-                                 String skillsUsed, String agentTaskId, String withheld) {
+                                 String skillsUsed, String agentTaskId, String withheld, List<String> choices) {
         String owner = ownerText == null ? null : ownerText + withheld;
         // Bookkeeping must not be able to rewrite the outcome. This method used to run
         // unguarded inside the completion callback, so anything that threw here -- most easily
@@ -709,7 +713,7 @@ public class ScheduledTaskService {
             log.warn("Scheduled task #{} finished but its run count could not be updated ({}). "
                     + "Delivering the result anyway.", taskId, e.getMessage());
             resultDelivery.deliver(userId, () -> conversationService.scheduledSession(userId),
-                    "Scheduled task: " + description, response + withheld, agentTaskId, owner);
+                    "Scheduled task: " + description, response + withheld, agentTaskId, owner, choices);
             return;
         }
 
@@ -717,7 +721,7 @@ public class ScheduledTaskService {
         // went into scheduled_tasks.last_result and the user saw "Recurring task #3 completed.
         // Next run: 07:00" — so a digest was written in full every morning and read by nobody.
         resultDelivery.deliver(userId, () -> conversationService.scheduledSession(userId),
-                "Scheduled task: " + description, response + withheld, agentTaskId, owner);
+                "Scheduled task: " + description, response + withheld, agentTaskId, owner, choices);
 
         // Record full execution history
         recordRun(taskId, userId, description, taskType, "completed", response, null,
@@ -785,17 +789,20 @@ public class ScheduledTaskService {
      *                   answer is; it used to be dropped, so a failed run's private results
      *                   never reached him at all.
      * @param status     'failed', or 'partial' for a run the privacy door stopped
+     * @param choices    what the run's result offers to click, as {@link #onTaskCompleted} delivers
+     *                   them: a run refused a skill three times in a row ends here, its ending
+     *                   offering the command that grants it
      */
     private void onTaskFailed(long taskId, String userId, String taskType,
                               String description, String error, String ownerError,
-                              String skillsUsed, String agentTaskId, String status) {
+                              String skillsUsed, String agentTaskId, String status, List<String> choices) {
         // A failed scheduled run is worth as much of the user's attention as a successful one —
         // arguably more, since a silent failure is how a job stops working without anyone
         // noticing. The status emissions below say a run failed and where its report is; this
         // is the report. They used to repeat it, so Telegram, which is sent both, got every
         // ending twice, part by part.
         resultDelivery.deliver(userId, () -> conversationService.scheduledSession(userId),
-                "Scheduled task did not finish: " + description, error, agentTaskId, ownerError);
+                "Scheduled task did not finish: " + description, error, agentTaskId, ownerError, choices);
 
         // Delivered before the bookkeeping, which is guarded as onTaskCompleted guards it: a
         // schedule the owner deleted while its run was failing has no row to count the run in,

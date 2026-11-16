@@ -217,6 +217,25 @@ public class ConversationService {
     }
 
     /**
+     * Save the result of work nobody was waiting for -- a scheduled run, {@code /bg}
+     * ({@code ResultDelivery}) -- as an assistant row, as {@link #saveAnswer} saves a turn's answer:
+     * the safe text as the content, the owner's private text beside it, the task id, and what the
+     * task's result offers to click, which the page draws again after a reload. It was saved
+     * without them: the command a task's ending offers for a skill that waits for a grant was a
+     * button under an answer, and text only under a delivered result.
+     *
+     * @param content        the result as delivered, its header included: the cloud-safe text
+     * @param privateContent what only the owner's chat shows in its place, or null
+     * @param choices        what the task's result offers ({@code AgentResult#choices}), as it has them
+     * @return the new row's id
+     */
+    public String saveResult(String userId, String sessionId, String content, String taskId,
+                             String privateContent, List<String> choices) {
+        return insert(userId, sessionId, "assistant", content, List.of(),
+                metadataOf(taskId, choices == null ? List.of() : choices), privateContent);
+    }
+
+    /**
      * A chat task's context: the conversation of the session {@code messageId} was saved in,
      * oldest first, each message whole, with the task each answer came from -- every question
      * asked before that message, and every answer given so far. Not that message itself, which

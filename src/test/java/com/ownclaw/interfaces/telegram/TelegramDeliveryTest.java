@@ -72,6 +72,9 @@ class TelegramDeliveryTest {
     JdbcTemplate jdbc;
     String owner;
     TelegramBotService bot;
+    /** The command handler the bot hands a command to: one that knows none, unless a test gives another. */
+    CommandHandler commands = new CommandHandler(null, null, null, null, null, null, null, null, null, null, null,
+            null, null, null, null, null);
 
     private void start(Path tmp, String answer) throws Exception {
         start(tmp, AgentResult.completed(answer, new AgentTrajectory(), 1));
@@ -89,9 +92,7 @@ class TelegramDeliveryTest {
         config.getTelegram().setBotToken("123:test");
         queue = new Answering(answer);
         bot = new TelegramBotService(config, queue, new UserRepository(jdbc), emitter, JSON,
-                store.apply(jdbc), new SkillInteractionHandler(), null,
-                new CommandHandler(null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null),
-                null, jdbc, telegram.client);
+                store.apply(jdbc), new SkillInteractionHandler(), null, commands, null, jdbc, telegram.client);
     }
 
     @AfterEach
@@ -522,6 +523,59 @@ class TelegramDeliveryTest {
 
         assertEquals(List.of("<b>Scheduled task: digest</b>\n\nall quiet"), sentTexts());
         assertEquals(ME, JSON.readTree(telegram.bodies("sendMessage").getFirst()).path("chat_id").asLong());
+    }
+
+    @Test
+    @DisplayName("a delivered result -- a scheduled run, /bg -- offers its task's choices as keys under it, as an answer of a task asked here does; a tapped key is the owner's own message, read as one he typed; a result that offers nothing leaves the keys as they are")
+    void aDeliveredResultsChoicesAreKeys(@TempDir Path tmp) throws Exception {
+        String grant = "/grant mailer SMTP_PASS";
+        var asked = new java.util.concurrent.CopyOnWriteArrayList<String>();
+        commands = new CommandHandler(null, null, null, null, null, null, null, null, null, null, null, null, null,
+                null, null, null) {
+            @Override
+            public java.util.Optional<String> handle(String userId, String message, String sessionId) {
+                asked.add(userId + ": " + message);
+                return java.util.Optional.of("granted");
+            }
+        };
+        start(tmp, "unused");
+        jdbc.update("INSERT INTO system_settings (key, value) VALUES (?, ?)", "telegram.chat." + owner, String.valueOf(ME));
+        telegram.answer("getMe", FakeTelegram.Answer.ok("{\"username\":\"testbot\"}"));
+        telegram.otherwise.put("getUpdates", FakeTelegram.Answer.refused(502));
+        bot.start();
+        var conversations = new ConversationService(jdbc);
+        var delivery = new com.ownclaw.core.ResultDelivery(conversations, emitter);
+
+        // As the scheduler delivers a run that was refused the skill.
+        delivery.deliver(owner, () -> conversations.scheduledSession(owner), "Scheduled task: mail me the report",
+                "It waits for you. To allow it, send: `" + grant + "`", "a1b2c3d4", null, List.of(grant));
+        FakeTelegram.drain(bot);
+
+        String sent = telegram.bodies("sendMessage").getLast();
+        assertTrue(JSON.readTree(sent).path("text").asText().startsWith("<b>Scheduled task: mail me the report</b>"), sent);
+        assertEquals(List.of(grant), keys(sent), "the command, as a key to tap");
+        assertTrue(JSON.readTree(sent).path("reply_markup").path("one_time_keyboard").asBoolean(), sent);
+
+        // Tapped, a key sends its text as the owner's own message.
+        receive(grant);
+        FakeTelegram.drain(bot);
+        assertEquals(List.of(owner + ": " + grant), asked, "the command handler reads it as typed, for the account that sent it");
+        assertEquals(List.of(), queue.texts, "no task's message");
+
+        // A result that offers nothing, and a warning that carries the key, leave the keys under the box alone.
+        int before = telegram.bodies("sendMessage").size();
+        delivery.deliver(owner, () -> conversations.scheduledSession(owner), "Scheduled task: digest", "all quiet",
+                "b2c3d4e5", null);
+        emitter.emit(owner, new StatusMessage(StatusMessage.Type.WARNING, "a tool failed",
+                Map.of(com.ownclaw.core.ResultDelivery.CHOICES, List.of(grant)), "abcd1234"));
+        FakeTelegram.drain(bot);
+        var later = telegram.bodies("sendMessage").subList(before, telegram.bodies("sendMessage").size());
+        assertEquals(2, later.size(), String.valueOf(later));
+        for (String body : later) {
+            assertTrue(JSON.readTree(body).path("reply_markup").isMissingNode(), body);
+        }
+        // Mutations: the status sent without the result's choices -> no key; every result sent with
+        // its choices, none included -> a result that offers nothing takes away a question's keys.
     }
 
     @Test

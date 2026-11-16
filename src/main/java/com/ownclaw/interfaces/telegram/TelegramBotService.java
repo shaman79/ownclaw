@@ -6,6 +6,7 @@ import com.ownclaw.agent.TaskChat;
 import com.ownclaw.config.OwnClawConfig;
 import com.ownclaw.config.SetupWizardService;
 import com.ownclaw.conversation.ConversationService;
+import com.ownclaw.core.ResultDelivery;
 import com.ownclaw.core.TaskQueue;
 import com.ownclaw.core.UserMessage;
 import com.ownclaw.interfaces.CommandHandler;
@@ -365,7 +366,14 @@ public class TelegramBotService {
             // user had written from a second chat everything kept going to the first.
             Long target = userChatIds.get(userId);
             if (isOwnersChat(userId, target, id -> userRepo.findByTelegramId(id))) {
-                sendMessage(target, statusText(msg));
+                // A result of work nobody waited for -- a scheduled run, /bg -- offers what its
+                // task's result offered, as an answer of a task asked here does: the command its
+                // ending wrote for a skill that waits for a grant, as a key under it. A key sends
+                // its text as his own message, read as one he typed. It came as text alone, to
+                // be typed out.
+                List<String> choices = ResultDelivery.choicesOf(msg);
+                if (choices.isEmpty()) sendMessage(target, statusText(msg));
+                else sendMessage(target, statusText(msg), choices);
             }
         });
     }
@@ -530,7 +538,9 @@ public class TelegramBotService {
      * it goes on as one typed. Any other answer takes away, with its first part, the keys a
      * question before it left under the message box -- hidden once one is tapped, a button away.
      * Every answer, not one known to follow keys: what is known is gone with a restart, which every
-     * deploy is.
+     * deploy is. A delivered result is sent here only when it offers something ({@link #subscribe}):
+     * one that offers nothing leaves the keys under the box as they are, for a question still
+     * waiting there.
      */
     private void sendMessage(long chatId, String text, List<String> choices) {
         outbox.execute(() -> {

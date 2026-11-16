@@ -5,8 +5,10 @@ import com.ownclaw.agent.tools.DynamicSkill;
 import com.ownclaw.agent.tools.Tool;
 import com.ownclaw.conversation.ChatOptions;
 import com.ownclaw.core.ResultDelivery;
+import com.ownclaw.core.ScheduledTaskService;
 import com.ownclaw.interfaces.CommandHandler;
 import com.ownclaw.llm.LlmProvider;
+import com.ownclaw.observability.ChatStatusEmitter.StatusMessage;
 import com.ownclaw.sandbox.SandboxResult;
 import com.ownclaw.users.CredentialVault;
 import com.ownclaw.users.GrantsKit;
@@ -16,9 +18,13 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
+import java.time.Instant;
 import java.time.ZoneId;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.TimeUnit;
 
 import static com.ownclaw.agent.AssistantPartsTest.tool;
 import static com.ownclaw.agent.LoopRig.call;
@@ -625,5 +631,82 @@ class GrantRefusedCallTest {
         assertEquals(List.of(), run.disk.launches.runs());
         // Mutation: the skill asked a grant for every name it declares -> the model is told to have the
         // owner send `/grant signer GUARDIAN_LINK_SECRET`, and the ending offers it.
+    }
+
+    // ───────────────────────── delivered: work nobody was waiting for ─────────────────────────
+
+    /** Every result delivered to u1 from now on (ResultDelivery), as it comes. */
+    private static BlockingQueue<StatusMessage> delivered(LoopRig rig) {
+        var results = new LinkedBlockingQueue<StatusMessage>();
+        rig.emitter.subscribe("u1", results, m -> {
+            if (m.type() == StatusMessage.Type.RESULT) results.add(m);
+        });
+        return results;
+    }
+
+    /** The command handler the chats hand a typed text to, delivering a /bg result as the application does. */
+    private static CommandHandler commands(LoopRig rig) {
+        return new CommandHandler(rig.registry, rig.chat, null, null, rig.vault, rig.vault.grants(), rig.queue,
+                null, null, null, null, rig.cancellation, new ResultDelivery(rig.chat, rig.emitter), null, null, null);
+    }
+
+    @Test
+    @DisplayName("unattended through /bg: the result is delivered with the command among its choices -- in its event, in its saved row, in the chat's history -- and the command, sent from that chat, grants")
+    void aBackgroundResultOffersTheCommand(@TempDir Path tmp) throws Exception {
+        run = new Run(tmp, null);
+        run.rig.cloud.think.add(call("mailer", mail()));
+        run.rig.cloud.think.add(respond("I could not send it."));
+        String session = run.session();
+        var results = delivered(run.rig);
+        var commands = commands(run.rig);
+        run.rig.queue.start();
+
+        commands.handle("u1", "/bg mail me the report", session).orElseThrow();
+        StatusMessage result = results.poll(60, TimeUnit.SECONDS);
+
+        assertNotNull(result, "nothing was delivered");
+        assertTrue(result.text().startsWith("**Background task: mail me the report**"), result.text());
+        assertTrue(result.text().endsWith(ASKED), result.text());
+        assertEquals(List.of(COMMAND), ResultDelivery.choicesOf(result), "what the page and Telegram are sent: " + result.data());
+        assertEquals(session, result.data().get("sessionId"), "for the chat /bg was typed in");
+        var saved = run.rig.chat.getSessionMessages("u1", session, null, null).messages().getLast();
+        assertTrue(String.valueOf(saved.get("content")).endsWith(ASKED), String.valueOf(saved.get("content")));
+        assertEquals("[\"" + COMMAND + "\"]", String.valueOf(saved.get("choices")), "drawn again after a reload");
+        assertEquals(List.of(), run.disk.launches.runs());
+
+        // The button's text, sent as the owner's own message from the chat the result is in.
+        String said = commands.handle("u1", ResultDelivery.choicesOf(result).get(0), session).orElseThrow();
+        assertTrue(said.contains("'mailer' may now read: SMTP_PASS."), said);
+        assertEquals(List.of(), run.mailer.ungranted("u1"));
+        // Mutation: /bg's delivery handing on none of the result's choices -> its event and its saved
+        // row offer nothing, and the command is text to type.
+    }
+
+    @Test
+    @DisplayName("a scheduled run refused the skill: delivered into the pinned chat of scheduled results with the command among its choices, in its event and in the chat's history")
+    void aScheduledResultOffersTheCommand(@TempDir Path tmp) throws Exception {
+        run = new Run(tmp, null);
+        run.rig.cloud.think.add(call("mailer", mail()));
+        run.rig.cloud.think.add(respond("I could not send it."));
+        var results = delivered(run.rig);
+        var scheduler = new ScheduledTaskService(run.rig.jdbc, run.rig.queue, run.rig.emitter, run.rig.events,
+                run.rig.chat, new ResultDelivery(run.rig.chat, run.rig.emitter));
+        run.rig.queue.start();
+        scheduler.scheduleDeferred("u1", "mail me the report", Instant.now().minusSeconds(60));
+
+        scheduler.pollDueTasks();
+        StatusMessage result = results.poll(60, TimeUnit.SECONDS);
+
+        assertNotNull(result, "nothing was delivered");
+        String pinned = run.rig.chat.scheduledSession("u1");
+        assertEquals(pinned, result.data().get("sessionId"));
+        assertTrue(result.text().startsWith("**Scheduled task: mail me the report**"), result.text());
+        assertTrue(result.text().endsWith(ASKED), result.text());
+        assertEquals(List.of(COMMAND), ResultDelivery.choicesOf(result), "what the page and Telegram are sent: " + result.data());
+        var saved = run.rig.chat.getSessionMessages("u1", pinned, null, null).messages().getLast();
+        assertEquals("[\"" + COMMAND + "\"]", String.valueOf(saved.get("choices")), "drawn again after a reload");
+        assertEquals(List.of(), run.disk.launches.runs());
+        // Mutation: the scheduler delivering a finished run through the overload that offers nothing
+        // -> neither the event nor the row has the command.
     }
 }

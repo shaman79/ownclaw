@@ -118,6 +118,83 @@ class ResultDeliveryTest {
         assertEquals(asked, messages.get(0).data().get("sessionId"), "the page is told which chat it is for");
     }
 
+    /** The command a task's ending offers for a skill that waits for a grant (AgentLoop#grantsAsked). */
+    static final String GRANT = "/grant mailer SMTP_PASS";
+
+    @Test
+    @DisplayName("a task's result goes with what it offers to click -- saved with it, sent with it, read back with its chat -- as an attended answer does; text of a caller's own offers nothing")
+    void aResultsChoicesAreSavedAndSent(@TempDir Path tmp) throws Exception {
+        var jdbc = MigratedDatabase.at(tmp.resolve("t.db"));
+        var conversations = new ConversationService(jdbc);
+        String session = conversations.createSession("u1", "Where /bg was typed");
+        var emitter = new ChatStatusEmitter();
+        var messages = new ArrayList<StatusMessage>();
+        emitter.subscribe("u1", "web", messages::add);
+        var delivery = new ResultDelivery(conversations, emitter);
+
+        // As /bg delivers: the result itself. A question's answer first, then the command code wrote.
+        delivery.deliver("u1", () -> session, "Background task: mail me the report",
+                AgentResult.needsInput("Send it now or later?", new AgentTrajectory(), 1)
+                        .withChoices(List.of("Later", GRANT)).withTaskId("a1b2c3d4"));
+        // As self-repair tells the owner: text of its own.
+        delivery.deliver("u1", () -> session, "Self-repair of mailer", "It was stopped.", "b2c3d4e5", null);
+
+        assertEquals("{\"taskId\":\"a1b2c3d4\",\"choices\":[\"Later\",\"" + GRANT + "\"]}", jdbc.queryForObject(
+                "SELECT metadata FROM conversations WHERE content LIKE '%Send it now or later?%'", String.class),
+                "kept in the row's metadata, as an attended answer's are");
+        var rows = conversations.getSessionMessages("u1", session, null, null).messages();
+        assertEquals("[\"Later\",\"" + GRANT + "\"]", String.valueOf(rows.get(0).get("choices")),
+                "the chat's history gives them back, for the page to draw after a reload");
+        assertEquals(List.of("Later", GRANT), ResultDelivery.choicesOf(messages.get(0)), "sent with it: " + messages.get(0).data());
+        assertEquals(List.of("Later", GRANT), messages.get(0).data().get(ResultDelivery.CHOICES));
+
+        assertNull(rows.get(1).get("choices"), "a caller's own text offers nothing: " + rows.get(1));
+        assertFalse(messages.get(1).data().containsKey(ResultDelivery.CHOICES), messages.get(1).data().toString());
+        assertEquals(List.of(), ResultDelivery.choicesOf(messages.get(1)));
+        // Mutations: saveResult keeps no choices -> the metadata and the history have none; the
+        // result's data without them -> the event offers none; the AgentResult overload handing on
+        // none -> neither.
+    }
+
+    @Test
+    @DisplayName("every choice a result offers is saved and sent whole: no cap on how many there are, or on how long one is")
+    void everyChoiceWhole(@TempDir Path tmp) throws Exception {
+        var jdbc = MigratedDatabase.at(tmp.resolve("t.db"));
+        var conversations = new ConversationService(jdbc);
+        String session = conversations.createSession("u1", "Where /bg was typed");
+        var emitter = new ChatStatusEmitter();
+        var messages = new ArrayList<StatusMessage>();
+        emitter.subscribe("u1", "web", messages::add);
+        var offered = new ArrayList<String>();
+        for (int i = 0; i < 60; i++) offered.add("/grant skill_" + i + " KEY_" + i);
+        offered.add("/grant mailer " + "SMTP_PASS_".repeat(800) + "END");
+
+        new ResultDelivery(conversations, emitter).deliver("u1", () -> session, "Background task",
+                AgentResult.completed("Sixty-one skills wait.", new AgentTrajectory(), 1).withChoices(offered));
+
+        assertEquals(offered, ResultDelivery.choicesOf(messages.get(0)));
+        var saved = (com.fasterxml.jackson.databind.JsonNode) conversations.getSessionMessages("u1", session, null, null)
+                .messages().get(0).get("choices");
+        assertEquals(offered.size(), saved.size());
+        assertEquals(offered.getLast(), saved.get(offered.size() - 1).asText());
+    }
+
+    @Test
+    @DisplayName("only a delivered result is read for choices: a status of any other kind that carries the key offers nothing")
+    void onlyAResultOffers() {
+        var data = Map.<String, Object>of(ResultDelivery.CHOICES, List.of(GRANT));
+        for (var type : StatusMessage.Type.values()) {
+            assertEquals(type == StatusMessage.Type.RESULT ? List.of(GRANT) : List.of(),
+                    ResultDelivery.choicesOf(new StatusMessage(type, "text", data, "a1b2c3d4")), type.name());
+        }
+        assertEquals(List.of(), ResultDelivery.choicesOf(new StatusMessage(StatusMessage.Type.RESULT, "text", null)));
+        assertEquals(List.of(), ResultDelivery.choicesOf(new StatusMessage(StatusMessage.Type.RESULT, "text",
+                Map.of(ResultDelivery.CHOICES, GRANT))), "one string is no list of choices");
+        assertEquals(List.of(), ResultDelivery.choicesOf(null));
+        // Mutation: choicesOf without its test of the type -> a warning, a question's status or a
+        // progress message carrying the key offers it, and Telegram makes it a key.
+    }
+
     /** What /bg's delivery saves for {@code result}: its content row. */
     private static String deliveredAsBg(Path tmp, AgentResult result) throws Exception {
         var jdbc = MigratedDatabase.at(tmp.resolve("t.db"));
