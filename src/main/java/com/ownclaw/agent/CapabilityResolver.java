@@ -63,17 +63,55 @@ public class CapabilityResolver {
 
     // ─────────────── Capability Pattern Definitions ───────────────
 
+    /** Up to three words, each after its blanks: written out, as a look-behind needs to know how far back it reaches. */
+    private static final String UP_TO_THREE_WORDS =
+            "(?:\\s{1,3}\\p{L}{1,12})?(?:\\s{1,3}\\p{L}{1,12})?(?:\\s{1,3}\\p{L}{1,12})?";
+
+    /**
+     * Before a word for mail, what makes it the way something is sent: "to my email", "by email",
+     * "via email", "as an email", and a verb that writes or sends one with up to three words
+     * between -- "send me a new email", "write an email", "pošli mi e-mail", "napiš nový mail".
+     * Looked for no further back than that, so it costs the same at every word.
+     */
+    private static final String SENT_BEFORE = "(?<!(?:\\bto\\s{1,3}(?:my|your|his|her|our|their)|\\b(?:by|via|per)"
+            + "|\\bas\\s{1,3}an?"
+            + "|\\b(?:send|write|compose|pošli|pošlete|napiš|napište|odešli|odešlete)" + UP_TO_THREE_WORDS + ")"
+            + "\\s{1,3})";
+
+    /**
+     * After a word for mail, what makes it a verb of sending -- "email it", "mail me", "email
+     * them" -- or the Czech instrumental, "by mail": "mailem", "e-mailem".
+     */
+    private static final String SENT_AFTER = "(?!\\s{1,8}(?:it|me|them|us|him|her|you)\\b)(?!em(?!\\p{L}))";
+
+    /**
+     * The Czech "to the mail" -- "pošli to na mail", "na můj e-mail" -- is somewhere to send to;
+     * "na mailu", with its ending, is where mail is read: "co mám na mailu".
+     */
+    private static final String TO_THE_MAIL = "(?!(?<=\\bna\\s{1,3}(?:(?:můj|muj|svůj|svuj|tvůj|tvuj)\\s{1,3})?)"
+            + "(?:e-?|g|web)?mail(?!\\p{L}))";
+
     /**
      * The word for mail in a trigger: mail, e-mail, email, gmail, webmail, and what they are stems
-     * of ("emails", "e-maily"). Not the same letters inside an address or a host's name --
-     * "someone@gmail.com", "mail@example.org", "https://webmail.example.org", "mail.example.org":
-     * a task that sends something to an address asks for no mailbox to be read. So not after an
-     * @ or a dot, not before a dot and a letter, and not where an @ follows within what an
-     * address's own name can be long (64 characters: looked for no further, so a long line of
-     * such words costs no more than its length).
+     * of ("emails", "e-maily") -- as the mail to be read, never as the way something is sent.
+     * <p>
+     * Not the same letters inside an address or a host's name -- "someone@gmail.com",
+     * "mail@example.org", "https://webmail.example.org", "mail.example.org": so not after an @ or
+     * a dot, not before a dot and a letter, and not where an @ follows within what an address's
+     * own name can be long (64 characters: looked for no further, so a long line of such words
+     * costs no more than its length).
+     * <p>
+     * And not where a task says to send something by mail ({@link #SENT_BEFORE},
+     * {@link #SENT_AFTER}, {@link #TO_THE_MAIL}): "fetch the lunch menu and email it to me",
+     * "check the weather and send it to my email", "pošli mi to e-mailem" ask for no mailbox to
+     * be read, and a reader of one was made for them where none was there.
+     * <p>
+     * A word for mail begins where one begins -- never at the "mail" of "e-mail", which would
+     * pass every test of what stands before the word -- and that is looked at first, so what the
+     * look-behinds cost is spent where there is a word for mail and nowhere else.
      */
-    private static final String MAIL =
-            "(?<![@.])(?:e-?|g|web)?mail(?![\\p{L}\\p{N}._-]{0,64}@)(?!\\.[\\p{L}\\p{N}])";
+    private static final String MAIL = "(?=(?:e-?|g|web)?mail)(?<![@.-])" + SENT_BEFORE + TO_THE_MAIL
+            + "(?:e-?|g|web)?mail(?![\\p{L}\\p{N}._-]{0,64}@)(?!\\.[\\p{L}\\p{N}])" + SENT_AFTER;
 
     /**
      * Known capability categories. Each maps user-intent patterns to the
@@ -562,6 +600,11 @@ public class CapabilityResolver {
 
     /** Short forms of "number": they end no sentence before the number itself ("the no. 3 email"). */
     private static final java.util.Set<String> BEFORE_A_NUMBER = java.util.Set.of("no", "nr");
+
+    /** Every trigger of every pattern, for a test that each compiles: one that does not is matched as text, silently. */
+    static List<String> allTriggers() {
+        return CAPABILITY_PATTERNS.stream().flatMap(p -> p.triggerPatterns().stream()).toList();
+    }
 
     /** Each trigger's words, compiled once: the triggers are constants. */
     private static final Map<String, List<Pattern>> WORDS = new java.util.concurrent.ConcurrentHashMap<>();

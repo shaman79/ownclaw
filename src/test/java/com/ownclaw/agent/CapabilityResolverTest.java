@@ -164,7 +164,11 @@ class CapabilityResolverTest {
                 "check Mr. Smith's email", "Fetch approx. 10 emails", "Zkontroluj např. e-maily od Jany",
                 "check e.g. the email from Bob", "read the no. 3 email", "Scan e.g. the home network",
                 "check mr. smith's email", "check Dr. Novak's email", "check my calendar/email for today",
-                "check slack/mail", "check my email, cc someone@example.org")) {
+                "check slack/mail", "check my email, cc someone@example.org",
+                // Reading, though sending is in the sentence too.
+                "check my email and send me a summary", "Fetch emails and email the results to me",
+                "Send me a summary of my new emails", "check if Bob emailed me", "read the email the boss sent",
+                "Zkontroluj, co mám na mailu", "Zkontroluj můj e-mail")) {
             assertNotNull(bare().resolve(message), message);
         }
         // Mutation: WORD_START also put after each word (whole words only) -> "emails", "records" fail.
@@ -203,6 +207,47 @@ class CapabilityResolverTest {
     }
 
     @Test
+    @DisplayName("every trigger compiles: one that does not is matched as plain text, and nothing says so")
+    void everyTriggerCompiles() {
+        var broken = new java.util.ArrayList<String>();
+        for (String trigger : CapabilityResolver.allTriggers()) {
+            try {
+                CapabilityResolver.words(trigger);
+            } catch (java.util.regex.PatternSyntaxException e) {
+                broken.add(trigger + " -- " + e.getDescription());
+            }
+        }
+        assertEquals(List.of(), broken);
+        // Mutation: a look-behind with a repeated group, as the first SENT_BEFORE was -> every mail trigger is listed.
+    }
+
+    @Test
+    @DisplayName("a task that sends its result by mail asks for no mailbox to be read: \"email it to me\", \"send it to my email\", \"pošli mi to e-mailem\" -- the mail word is how it goes, not what is read")
+    void sendingByMailIsNoReading() {
+        for (String message : List.of(
+                "Fetch the lunch menu and email it to me",
+                "Check the weather for tomorrow and send it to my email",
+                "Summarise the news and mail it to Jana",
+                "Read the attached PDF and email me a summary",
+                "Check the disk space and mail me if it is over 90 %",
+                "Check the backups and email them to the team",
+                "Fetch the report and send it by email",
+                "Read the log and send it via e-mail",
+                "Check the prices and send them as an email",
+                "Check the build and send me a new email when it is done",
+                "Read the minutes and write an email to the board",
+                "Stáhni jídelní lístek a pošli mi ho mailem",
+                "Zkontroluj počasí a pošli mi to e-mailem",
+                "Zkontroluj zálohy a pošli to na můj e-mail",
+                "Zkontroluj ceny a pošli mi nový e-mail")) {
+            assertNull(bare().resolve(message), message);
+        }
+        // Mutations: SENT_AFTER left out -> "email it", "mail me", "mailem" ask for a mailbox reader;
+        // SENT_BEFORE left out -> "to my email", "by email", "send me a new email" do; TO_THE_MAIL
+        // left out -> "na můj e-mail" does.
+    }
+
+    @Test
     @DisplayName("mail to send is no mailbox to read: \"new\" is the word, not the start of \"news\"")
     void newsIsNotNewMail() {
         assertNull(bare().resolve("send me an email with the news"));
@@ -235,6 +280,8 @@ class CapabilityResolverTest {
                 "open. ".repeat(60_000) + "scan? ".repeat(60_000),    // a trigger's first word in every sentence, never its second
                 "no. 3 ".repeat(60_000) + "mr. ".repeat(60_000),      // every dot an abbreviation's: one long sentence
                 "mail-".repeat(80_000) + letter,                      // a mail word at every hyphen, and never an @
+                "check " + "send me a ".repeat(40_000) + "email",     // a verb of sending before every word
+                "zkontroluj " + "na můj ".repeat(50_000) + "mail",   // "to my mail", over and over
                 "check " + "mail.".repeat(80_000) + letter)) {        // ... at every dot
             org.junit.jupiter.api.Assertions.assertTimeoutPreemptively(java.time.Duration.ofSeconds(20),
                     () -> assertNull(resolver.resolve(text)), () -> "a text of " + text.length() + " characters beginning " + text.substring(0, 12));
