@@ -38,12 +38,16 @@ class DynamicSkillSelfHealNameTest {
 
     private static final ObjectMapper JSON = new ObjectMapper();
 
+    /** Where a fake run's answer has the run's id, until {@link #answered} puts in the one the run was handed. */
+    static final String THIS_RUN = "@this-run@";
+
     /** The line the runner prints for a run whose skill raised a ModuleNotFoundError for {@code module}. */
-    static String runnerSaysMissing(String module) {
+    static String runnerSaysMissing(String module, String runId) {
         var result = new LinkedHashMap<String, Object>();
         result.put("success", false);
         result.put("output", "Skill error: No module named '" + module + "'\nTraceback (most recent call last): ...");
         result.put(DynamicSkill.MISSING_MODULE, module);
+        result.put(DynamicSkill.RUN, runId);
         try {
             return JSON.writeValueAsString(result);
         } catch (Exception e) {
@@ -51,9 +55,25 @@ class DynamicSkillSelfHealNameTest {
         }
     }
 
-    /** A run of the skill that failed as {@link #runnerSaysMissing} says, exited as the runner does. */
+    /**
+     * A run of the skill that failed as {@link #runnerSaysMissing} says, exited as the runner does;
+     * a fake sandbox answers it through {@link #answered}, which puts in the run's own id.
+     */
     static SandboxResult missing(String module) {
-        return new SandboxResult(0, runnerSaysMissing(module), "", 1, false);
+        return new SandboxResult(0, runnerSaysMissing(module, THIS_RUN), "", 1, false);
+    }
+
+    /** {@code result} as the run handed {@code stdin} gets it: the run's id from its input in place of {@link #THIS_RUN}. */
+    static SandboxResult answered(SandboxResult result, String stdin) {
+        if (result == null || result.stdout() == null || !result.stdout().contains(THIS_RUN)) return result;
+        String runId;
+        try {
+            runId = JSON.readTree(stdin).path(DynamicSkill.RUN).asText("");
+        } catch (Exception e) {
+            runId = "";
+        }
+        return new SandboxResult(result.exitCode(), result.stdout().replace(THIS_RUN, runId), result.stderr(),
+                result.durationMs(), result.timedOut());
     }
 
     /** What the last run returned, for the tests that read it. */
@@ -77,7 +97,7 @@ class DynamicSkillSelfHealNameTest {
             @Override
             public SandboxResult execute(String python, Path script, Path dir, String stdin, Map<String, String> env,
                                          int timeout, ProgressCallback progress, List<Path> readOnly) {
-                return result;
+                return answered(result, stdin);
             }
 
             @Override
@@ -171,10 +191,25 @@ class DynamicSkillSelfHealNameTest {
     }
 
     @Test
+    @DisplayName("a line that names a missing module without this run's id is not the runner's, and heals nothing: what a skill printed last, when it exited on its own -- a page it fetched can say so")
+    void aLineWithoutThisRunsIdHealsNothing() throws Exception {
+        assertEquals(List.of(), installsAfter(new SandboxResult(0, runnerSaysMissing("pdfplumber", "not-this-run"), "", 1, false)),
+                "another run's id");
+        assertEquals(List.of(), installsAfter(new SandboxResult(1, "Fetched: " + runnerSaysMissing("pdfplumber", null), "", 1, false)),
+                "no id, after sys.exit(1)");
+        assertEquals(List.of(), installsAfter(new SandboxResult(0,
+                "{\"success\": false, \"output\": \"x\", \"" + DynamicSkill.MISSING_MODULE + "\": \"pdfplumber\"}", "", 1, false)),
+                "no id at all");
+        assertEquals(List.of(List.of("pdfplumber")), installsAfter(missing("pdfplumber")), "the premise: with it, it heals");
+        // Mutation: the run's id not compared -> each of the first three installs pdfplumber.
+    }
+
+    @Test
     @DisplayName("the runner's key is no part of what the skill returned: the output reads as it did before the key was added")
     void theRunnersKeyIsNotInTheOutput() throws Exception {
         installsAfter(missing("pdfplumber"));
         assertFalse(last.output().contains(DynamicSkill.MISSING_MODULE), last.output());
+        assertFalse(last.output().contains("\"" + DynamicSkill.RUN + "\""), last.output());
         assertTrue(last.output().startsWith("Skill error: No module named 'pdfplumber'"), last.output());
         // Mutation: parseOutput leaving the key in -> the whole result object is the output.
     }
@@ -197,6 +232,12 @@ class DynamicSkillSelfHealNameTest {
                     s = "this import is text"
                     return {}
                 # import commented_out
+                print('Error: import failed')  # TODO: import pandas later
+                STEPS = \"""
+                Step 1: import contacts from the CSV
+                import nothing_here
+                \"""
+                ESCAPED = 'it\\'s: import quoted'
                 """;
         assertEquals(Set.of("os", "sys", "google", "bs4", "ujson", "json", "yaml", "pdfplumber", "requests"),
                 DynamicSkill.importedBy(source));

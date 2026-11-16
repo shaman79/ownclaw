@@ -62,6 +62,16 @@ public class DynamicSkill implements Tool {
      */
     static final String MISSING_MODULE = "_missing_module";
 
+    /**
+     * The key of this run's id: handed to the runner on its stdin, taken out of the parameters
+     * before skill.py is loaded, and set beside {@link #MISSING_MODULE} by the runner alone. The
+     * result line is the last line of stdout, and a skill that exits on its own -- sys.exit,
+     * os._exit, a crash -- leaves no line of the runner's: the last line is then whatever it
+     * printed last, a fetched page's text among it. A line without this run's id names no module
+     * to install, whatever it says.
+     */
+    static final String RUN = "_run";
+
     /** An import statement of skill.py: at a line's start, or after a colon or a semicolon ("try: import ujson"). */
     private static final Pattern IMPORT = Pattern.compile("(?:^|[:;])\\s*import\\s+([^#;]+)");
     private static final Pattern FROM_IMPORT = Pattern.compile("(?:^|[:;])\\s*from\\s+([A-Za-z_]\\w*)[\\w.]*\\s+import\\b");
@@ -376,9 +386,11 @@ public class DynamicSkill implements Tool {
         "# Only when run, not when imported: a multiprocessing worker started by spawn or",
         "# forkserver -- the default from Python 3.14 -- imports this script again, as __mp_main__.",
         "if __name__ == '__main__':",
+        "    _run_id = None",
         "    try:",
         "        params = json.loads(sys.stdin.read()) if not sys.stdin.isatty() else {}",
         "        os.environ.update(params.pop('" + CREDENTIALS + "', None) or {})",
+        "        _run_id = params.pop('" + RUN + "', None)",
         "        mod = _load_skill()",
         "        if not hasattr(mod, 'run'):",
         "            _result({'success': False, 'output': 'skill.py does not define a run(params) function'})",
@@ -389,11 +401,13 @@ public class DynamicSkill implements Tool {
         "        if 'success' not in result:",
         "            result['success'] = True",
         "        result.pop('" + MISSING_MODULE + "', None)",
+        "        result.pop('" + RUN + "', None)",
         "        _result(result)",
         "    except Exception as e:",
         "        failed = {'success': False, 'output': f'Skill error: {e}\\n{traceback.format_exc()}'}",
         "        if isinstance(e, ModuleNotFoundError) and isinstance(e.name, str):",
         "            failed['" + MISSING_MODULE + "'] = e.name",
+        "            failed['" + RUN + "'] = _run_id",
         "        _result(failed)",
         ""
     );
@@ -528,6 +542,9 @@ public class DynamicSkill implements Tool {
                         context.userId() != null ? context.userId() : "NULL");
             }
             effectiveParams.put(CREDENTIALS, creds);
+            // This run's id: the runner names a missing module beside it, and only such a line is read (toHeal).
+            String runId = nonce();
+            effectiveParams.put(RUN, runId);
             String inputJson = mapper.writeValueAsString(effectiveParams);
 
             // The skill's environment: its venv on PATH, or its target on PYTHONPATH. The UTF-8
@@ -577,7 +594,7 @@ public class DynamicSkill implements Tool {
             // module is the runner's to say, and only one skill.py imports is installed (toHeal).
             String missingModule = null;
             if (!toolResult.success() && !result.timedOut()) {
-                Heal heal = toHeal(result.stdout());
+                Heal heal = toHeal(result.stdout(), runId);
                 missingModule = heal.module();
                 if (heal.notHealed() != null) toolResult = failedWith(toolResult, "not installed", heal.notHealed());
             }
@@ -678,11 +695,16 @@ public class DynamicSkill implements Tool {
      * whatever is at the name and then creates the file new.
      */
     public static Path writeHelperScript(Path dir, String prefix, String content) throws IOException {
-        byte[] nonce = new byte[16];
-        NONCES.nextBytes(nonce);
-        Path script = dir.resolve(prefix + HexFormat.of().formatHex(nonce) + ".py");
+        Path script = dir.resolve(prefix + nonce() + ".py");
         SkillJail.writeFresh(script, content);
         return script;
+    }
+
+    /** 128 random bits, as hex: a name nobody can guess, or a run's id. */
+    static String nonce() {
+        byte[] nonce = new byte[16];
+        NONCES.nextBytes(nonce);
+        return HexFormat.of().formatHex(nonce);
     }
 
     /**
@@ -826,6 +848,7 @@ public class DynamicSkill implements Tool {
         if (asksForInput(parsed)) return ToolResult.failure(NEED_INPUT_UNSUPPORTED);
         // The runner's own word to the self-heal (toHeal), no part of what the skill returned.
         parsed.remove(MISSING_MODULE);
+        parsed.remove(RUN);
         boolean success = BooleanNode.TRUE.equals(parsed.get("success"));
         JsonNode returned = parsed.get("output");
         // Everything the skill returned. Taking "output" alone dropped every other key -- a
@@ -934,8 +957,8 @@ public class DynamicSkill implements Tool {
      * skill.py ({@link #SKILL_LOADER}), and pip would install whatever an index holds under that
      * name instead.
      */
-    Heal toHeal(String stdout) {
-        String reported = reportedMissingModule(stdout);
+    Heal toHeal(String stdout, String runId) {
+        String reported = reportedMissingModule(stdout, runId);
         if (reported == null) return Heal.NONE;
         int dot = reported.indexOf('.');
         String module = (dot > 0 ? reported.substring(0, dot) : reported).strip();
@@ -967,12 +990,72 @@ public class DynamicSkill implements Tool {
         return new Heal(module, null);
     }
 
-    /** The {@link #MISSING_MODULE} of the runner's result line -- the last line of stdout -- or null. */
-    static String reportedMissingModule(String stdout) {
-        if (stdout == null || stdout.isBlank()) return null;
+    /**
+     * Python source with every comment and every string literal blanked -- each character a
+     * space, line breaks kept -- so what is left is code. Strings of any quote, single or
+     * triple, with any prefix: a backslash escapes the next character in every one of them, as
+     * far as where a string ends goes.
+     */
+    static String codeOnly(String source) {
+        var out = new StringBuilder(source.length());
+        int n = source.length();
+        int i = 0;
+        while (i < n) {
+            char c = source.charAt(i);
+            if (c == '#') {
+                while (i < n && source.charAt(i) != '\n' && source.charAt(i) != '\r') {
+                    out.append(' ');
+                    i++;
+                }
+                continue;
+            }
+            if (c != '\'' && c != '"') {
+                out.append(c);
+                i++;
+                continue;
+            }
+            boolean triple = i + 2 < n && source.charAt(i + 1) == c && source.charAt(i + 2) == c;
+            int open = triple ? 3 : 1;
+            for (int k = 0; k < open; k++) out.append(' ');
+            i += open;
+            while (i < n) {
+                char d = source.charAt(i);
+                if (d == '\\' && i + 1 < n) {
+                    out.append(blank(d)).append(blank(source.charAt(i + 1)));
+                    i += 2;
+                    continue;
+                }
+                if (d == c && (!triple || (i + 2 < n && source.charAt(i + 1) == c && source.charAt(i + 2) == c))) {
+                    for (int k = 0; k < open; k++) out.append(' ');
+                    i += open;
+                    break;
+                }
+                if (!triple && (d == '\n' || d == '\r')) break;   // not closed on its line: no string
+                out.append(blank(d));
+                i++;
+            }
+        }
+        return out.toString();
+    }
+
+    /** A character of a comment or a string, as {@link #codeOnly} leaves it: a line break stays one. */
+    private static char blank(char c) {
+        return c == '\n' || c == '\r' ? c : ' ';
+    }
+
+    /**
+     * The {@link #MISSING_MODULE} of the runner's result line -- the last line of stdout -- or
+     * null: also when the line does not carry this run's id ({@link #RUN}), and so is not the
+     * runner's.
+     */
+    static String reportedMissingModule(String stdout, String runId) {
+        if (stdout == null || stdout.isBlank() || runId == null) return null;
         String text = stdout.strip();
         ObjectNode result = ToolResult.jsonObject(text.substring(text.lastIndexOf('\n') + 1).strip());
-        JsonNode module = result == null ? null : result.get(MISSING_MODULE);
+        if (result == null) return null;
+        JsonNode run = result.get(RUN);
+        if (run == null || !run.isTextual() || !runId.equals(run.asText())) return null;
+        JsonNode module = result.get(MISSING_MODULE);
         return module != null && module.isTextual() && !module.asText().isBlank() ? module.asText() : null;
     }
 
@@ -980,12 +1063,13 @@ public class DynamicSkill implements Tool {
      * The top-level names of the modules a skill's source imports in its import statements:
      * {@code import a.b as c, d} gives a and d, {@code from e.f import g} gives e. A relative
      * import gives nothing, and neither does {@code __import__} or {@code importlib}: what is
-     * healed is what the code names as an import does.
+     * healed is what the code names as an import does. Read from the code alone: a comment
+     * ("# TODO: import pandas") or a string ("Step 1: import contacts") names nothing.
      */
     static java.util.Set<String> importedBy(String source) {
         var out = new java.util.LinkedHashSet<String>();
         if (source == null) return out;
-        for (String line : source.split("\\R")) {
+        for (String line : codeOnly(source).split("\\R")) {
             Matcher from = FROM_IMPORT.matcher(line);
             while (from.find()) out.add(from.group(1));
             Matcher plain = IMPORT.matcher(line);

@@ -2312,14 +2312,27 @@ public class SkillJail {
             "TEMPDIR", "USERPROFILE");
 
     /**
-     * UTF-8 for Python's stdin, stdout and stderr and for the files it opens, whatever the
-     * platform's encoding: skills handle Czech text, and mojibake has been a recurring source of
-     * bad output. Set for every launch, so a skill's run, its load check and pip alike.
+     * What every Python launch is set to, a skill's run, its load check and pip alike, and every
+     * Python process they start, which inherits it:
+     * <ul>
+     *   <li>UTF-8 for Python's stdin, stdout and stderr and for the files it opens, whatever the
+     *       platform's encoding: skills handle Czech text, and mojibake has been a recurring
+     *       source of bad output.</li>
+     *   <li>{@code PYTHONSAFEPATH}: no directory is put ahead of sys.path for the script, the
+     *       {@code -c} or the {@code -m} it runs. A run's working directory is its skill's
+     *       directory, which the skill can write, and the children multiprocessing starts --
+     *       spawn workers, the forkserver, the resource tracker -- run {@code python -c}, which
+     *       put the working directory first: a threading.py one run left there ran in the next
+     *       run's children, with its credentials in their environment. The runner takes its own
+     *       directory off sys.path as well (DynamicSkill.SKILL_LOADER): this is for every
+     *       process after it. Python 3.11 reads it; an older one ignores it.</li>
+     * </ul>
      */
-    static final Map<String, String> ENCODING = Map.of("PYTHONIOENCODING", "utf-8", "PYTHONUTF8", "1");
+    static final Map<String, String> PYTHON_SETTINGS = Map.of("PYTHONIOENCODING", "utf-8", "PYTHONUTF8", "1",
+            "PYTHONSAFEPATH", "1");
 
     /**
-     * Replaces the inherited environment with the allow-listed subset, the {@link #ENCODING},
+     * Replaces the inherited environment with the allow-listed subset, the {@link #PYTHON_SETTINGS},
      * and the variables the caller sets: a skill's environment (PATH or PYTHONPATH). Applied to
      * whatever is started -- bubblewrap passes its own environment to the skill, so this is the
      * skill's, and it is bubblewrap's, which runs outside the jail. A skill's credentials are
@@ -2336,7 +2349,7 @@ public class SkillJail {
         }
         env.clear();
         env.putAll(keep);
-        env.putAll(ENCODING);
+        env.putAll(PYTHON_SETTINGS);
         if (envVars != null) {
             env.putAll(envVars);
         }

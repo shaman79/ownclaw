@@ -60,7 +60,7 @@ class DynamicSkillGrantTest {
             stdin.add(in);
             return answers.isEmpty()
                     ? new SandboxResult(0, "{\"success\": true, \"output\": \"read it\"}", "", 1, false)
-                    : answers.poll();
+                    : DynamicSkillSelfHealNameTest.answered(answers.poll(), in);
         }
 
         @Override

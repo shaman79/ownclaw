@@ -445,6 +445,8 @@ public class ContainerSandbox {
             dockerfile.append("ENV DEBIAN_FRONTEND=noninteractive\n");
             dockerfile.append("ENV PYTHONIOENCODING=utf-8\n");
             dockerfile.append("ENV PYTHONUTF8=1\n");
+            // No directory ahead of sys.path for a script, -c or -m: see SkillJail.PYTHON_SETTINGS.
+            dockerfile.append("ENV PYTHONSAFEPATH=1\n");
             // Ensure the Python shared library (libpython3.xx.so) is always findable.
             // Some system packages trigger ldconfig which can drop /usr/local/lib from cache.
             dockerfile.append("ENV LD_LIBRARY_PATH=/usr/local/lib\n");

@@ -343,7 +343,7 @@ class SkillGrantRunTest {
         // Its code imports what the runner then reports missing: the heal installs only such a module.
         Files.writeString(skills.generated.resolve("mailer/skill.py"), "import requests\ndef run(params):\n    return {}\n");
         skills.launches.answer = launch -> skills.launches.runs().size() == 1
-                ? DynamicSkillSelfHealNameTest.missing("requests")
+                ? DynamicSkillSelfHealNameTest.answered(DynamicSkillSelfHealNameTest.missing("requests"), launch.stdin())
                 : new SandboxResult(0, "{\"success\": true, \"output\": \"sent\"}", "", 1, false);
 
         assertFalse(GrantsKit.run(mailer, "ann").success());

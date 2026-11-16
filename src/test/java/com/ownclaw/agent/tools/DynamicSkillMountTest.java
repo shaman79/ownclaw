@@ -140,7 +140,7 @@ class DynamicSkillMountTest {
                                                    Map<String, String> extraVolumes) {
                 runs.add(extraVolumes);
                 return runs.size() == 1
-                        ? DynamicSkillSelfHealNameTest.missing("pdfplumber")
+                        ? DynamicSkillSelfHealNameTest.answered(DynamicSkillSelfHealNameTest.missing("pdfplumber"), stdinJson)
                         : new SandboxResult(0, "{\"success\": true, \"output\": \"read it\"}", "", 1, false);
             }
         };

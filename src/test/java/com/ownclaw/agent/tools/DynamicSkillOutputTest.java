@@ -47,7 +47,7 @@ class DynamicSkillOutputTest {
                                                String stdinJson, int timeout,
                                                SandboxManager.ProgressCallback cb,
                                                Map<String, String> extraVolumes) {
-            return results.poll();
+            return DynamicSkillSelfHealNameTest.answered(results.poll(), stdinJson);
         }
     }
 
@@ -360,7 +360,7 @@ class DynamicSkillOutputTest {
             }
         };
         var r = run(installs,
-                exited(0, DynamicSkillSelfHealNameTest.runnerSaysMissing("scapy"), ""),
+                exited(0, DynamicSkillSelfHealNameTest.runnerSaysMissing("scapy", DynamicSkillSelfHealNameTest.THIS_RUN), ""),
                 exited(1, "", "PermissionError: raw sockets need root"));
         assertFalse(r.success());
         assertTrue(r.output().startsWith("PermissionError: raw sockets need root"),

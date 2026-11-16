@@ -256,6 +256,38 @@ class RunnerHarnessRegressionTest {
     }
 
     @Test
+    @DisplayName("nor by the Python processes a run starts: a -c subprocess and a spawn worker would each put the working directory -- the skill's -- first")
+    void nothingLeftInTheDirectoryRunsInTheRunsChildren() throws Exception {
+        // A json.py for the -c subprocess, a threading.py for the worker's bootstrap: each marks
+        // that it ran and ends its process, so a worker it ran in exits with an error.
+        Files.writeString(skillDir.resolve("json.py"), "open('planted_ran', 'a').write('json ')\nraise SystemExit('planted json ran')\n");
+        Files.writeString(skillDir.resolve("threading.py"), "open('planted_ran', 'a').write('threading ')\nraise SystemExit('planted threading ran')\n");
+        Ran control = python("-c", "import json");
+        assertTrue(control.out.contains("planted json ran"), "the plant must work on plain Python's -c, or this test proves nothing: "
+                + control.out);
+        Files.deleteIfExists(skillDir.resolve("planted_ran"));
+
+        Files.writeString(skillDir.resolve("skill.py"), """
+                import multiprocessing, subprocess, sys
+                def child():
+                    pass
+                def run(params):
+                    sub = subprocess.run([sys.executable, '-c', 'import json; print(json.dumps([1]))'],
+                                         capture_output=True, text=True)
+                    worker = multiprocessing.get_context('spawn').Process(target=child)
+                    worker.start()
+                    worker.join(60)
+                    return {'output': sub.stdout.strip() + '|' + str(worker.exitcode)}
+                """);
+        String out = runSkill();
+
+        assertTrue(out.startsWith("[1]|0"), out);
+        assertFalse(Files.exists(skillDir.resolve("planted_ran")), "a plant ran in a child of the run");
+        // Mutation: PYTHONSAFEPATH not in SkillJail.PYTHON_SETTINGS -> the -c subprocess imports the
+        // planted json, the spawn worker the planted threading, and both mark it.
+    }
+
+    @Test
     @DisplayName("an uncaught ModuleNotFoundError is reported in the runner's own key, which a skill cannot set in what it returns -- and a module named only through importlib is not installed")
     void aMissingModuleIsReportedInTheRunnersKey() throws Exception {
         Files.writeString(skillDir.resolve("skill.py"), """

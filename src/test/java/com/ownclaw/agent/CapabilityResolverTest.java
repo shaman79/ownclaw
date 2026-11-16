@@ -168,7 +168,13 @@ class CapabilityResolverTest {
                 // Reading, though sending is in the sentence too.
                 "check my email and send me a summary", "Fetch emails and email the results to me",
                 "Send me a summary of my new emails", "check if Bob emailed me", "read the email the boss sent",
-                "Zkontroluj, co mám na mailu", "Zkontroluj můj e-mail")) {
+                "Zkontroluj, co mám na mailu", "Zkontroluj můj e-mail",
+                // Reading, phrased as sending, or with the mail word after a pronoun or a preposition.
+                "Send me my unread emails", "send me my new emails", "Pošli mi nepřečtené maily",
+                "Pošli mi nepřečtené e-maily", "anything new by email?", "Check what Bob sent me by email",
+                "summarize everything that arrived by email today", "read what came via email",
+                "check the email her manager sent", "read the email you got from Bob",
+                "check mail it should have arrived", "check my work-email")) {
             assertNotNull(bare().resolve(message), message);
         }
         // Mutation: WORD_START also put after each word (whole words only) -> "emails", "records" fail.
@@ -239,12 +245,27 @@ class CapabilityResolverTest {
                 "Stáhni jídelní lístek a pošli mi ho mailem",
                 "Zkontroluj počasí a pošli mi to e-mailem",
                 "Zkontroluj zálohy a pošli to na můj e-mail",
-                "Zkontroluj ceny a pošli mi nový e-mail")) {
+                "Zkontroluj ceny a pošli mi nový e-mail",
+                "check the weather and email the result to me",
+                "Check the backups and email the report to Bob",
+                "fetch the menu and mail the result to me",
+                "summarize the meeting and email everyone",
+                "Check the logs and email Jana the result",
+                "Check the logs, then email it to me",
+                "Check the logs, email them to me",
+                "Can you check the logs and email me",
+                "Check the logs and put it in an email to me",
+                "Check the logs and reply with an email",
+                "Check the logs and drop me an email",
+                "Check the logs and shoot me a quick email",
+                "Check the logs and forward it to my work email",
+                "Fetch the menu and notify me via e-mail",
+                "Zkontroluj logy a pošli mi zprávu na pracovní e-mail")) {
             assertNull(bare().resolve(message), message);
         }
-        // Mutations: SENT_AFTER left out -> "email it", "mail me", "mailem" ask for a mailbox reader;
-        // SENT_BEFORE left out -> "to my email", "by email", "send me a new email" do; TO_THE_MAIL
-        // left out -> "na můj e-mail" does.
+        // Mutations: SENT_AS_A_VERB left out -> "email it", "mail me", "email the result" ask for a
+        // mailbox reader; SENT_BEFORE left out -> "to my email", "by email", "send me a new email"
+        // do; TO_THE_MAIL left out -> "na můj e-mail" does; SENT_AFTER left out -> "mailem" does.
     }
 
     @Test
@@ -282,6 +303,8 @@ class CapabilityResolverTest {
                 "mail-".repeat(80_000) + letter,                      // a mail word at every hyphen, and never an @
                 "check " + "send me a ".repeat(40_000) + "email",     // a verb of sending before every word
                 "zkontroluj " + "na můj ".repeat(50_000) + "mail",   // "to my mail", over and over
+                "check " + "and email the ".repeat(30_000),           // a mail word as a verb at every clause
+                "check " + "send me a new ".repeat(30_000) + "email",  // an email being made, over and over
                 "check " + "mail.".repeat(80_000) + letter)) {        // ... at every dot
             org.junit.jupiter.api.Assertions.assertTimeoutPreemptively(java.time.Duration.ofSeconds(20),
                     () -> assertNull(resolver.resolve(text)), () -> "a text of " + text.length() + " characters beginning " + text.substring(0, 12));
