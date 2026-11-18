@@ -110,18 +110,6 @@ public class ThinkingEngine {
         context.requestSize(requestChars(messages, requestConfig.tools()), provider.name() + "/" + provider.model(),
                 messages.stream().anyMatch(m -> !m.images().isEmpty()));
 
-        // To a cloud model: how long its provider is to keep what it caches of the task's steps,
-        // by how far apart the task's think requests are sent (AgentContext#cloudThinkSent) --
-        // counted here, as this one goes.
-        if (!mode.local()) {
-            boolean already = context.stepsFarApart();
-            requestConfig = requestConfig.withHourLongSteps(context.cloudThinkSent(now()));
-            if (requestConfig.hourLongSteps() && !already) {
-                log.info("Task {}: two think requests more than {} s apart, so the steps are cached for "
-                        + "an hour from here", context.taskId(), AgentContext.FIVE_MINUTE_CACHE_HOLDS_MS / 1000);
-            }
-        }
-
         // The task's progress hook keeps its stall watchdog from taking a long call for silence,
         // and lets its Stop end it; the call's own keeps what the owner is shown of it while it
         // runs (LiveCall).
@@ -242,14 +230,6 @@ public class ThinkingEngine {
                     "Continue from where the task stands."), messages, "ERROR: " + e.getMessage(),
                     null, e.getMessage());
         }
-    }
-
-    /**
-     * When a think request is sent, in milliseconds on a clock that only runs forward: two of
-     * them are compared, and the wall clock is set now and then. A test's own, to make minutes pass.
-     */
-    long now() {
-        return System.nanoTime() / 1_000_000;
     }
 
     /**

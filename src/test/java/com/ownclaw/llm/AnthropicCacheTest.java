@@ -16,9 +16,8 @@ import static org.junit.jupiter.api.Assertions.*;
  * What the Anthropic request looks like to the prompt cache: the task is cached on a task's first
  * call and read back on the next; the chat it came from is a block per message, cached where it
  * ends; the stable prefix -- tools, system prompt, chat, task -- is cached for an hour and the steps
- * after it for five minutes, up to the newest result, the hour-long marks first -- for an hour too
- * once the task's steps have been further apart than five minutes; and no request carries more
- * cache marks than the API allows.
+ * after it for five minutes, up to the newest result, the hour-long marks first; and no request
+ * carries more cache marks than the API allows.
  */
 class AnthropicCacheTest {
 
@@ -28,13 +27,8 @@ class AnthropicCacheTest {
     private final AnthropicProvider provider = new AnthropicProvider(new OwnClawConfig(), new ObjectMapper());
 
     private JsonNode body(List<LlmMessage> messages, boolean tools) {
-        return body(messages, tools, false);
-    }
-
-    /** @param farApart the task's steps have been further apart than a five-minute cache entry lives */
-    private JsonNode body(List<LlmMessage> messages, boolean tools, boolean farApart) {
         var specs = tools ? List.of(new ToolSpec("respond", "answer", Map.of("type", "object"))) : null;
-        return provider.requestBody(messages, new LlmRequestConfig(null, null, false, specs).withHourLongSteps(farApart),
+        return provider.requestBody(messages, new LlmRequestConfig(null, null, false, specs),
                 "claude-opus-5", 128_000);
     }
 
@@ -248,35 +242,30 @@ class AnthropicCacheTest {
     }
 
     @Test
-    @DisplayName("once the task's steps have been far apart the sliding mark lives an hour like the marks before it; never an hour-long mark after a five-minute one")
-    void farApartTheStepsAreCachedForAnHour() {
+    @DisplayName("the sliding mark lives five minutes wherever it stands -- on the newest result, on the message before it, after a first message that lost its boundary: the hour is the stable prefix's alone")
+    void theSlidingMarkLivesFiveMinutes() {
         List<String> chat = List.of("USER: a\n", "ASSISTANT: b\n");
-        assertEquals(List.of("0/0 1h", "4/0 1h"), where(body(step(3, null, i -> "result " + i), true, true)));
-        assertEquals(List.of(HOUR, HOUR, HOUR, HOUR),
-                marks(body(step(3, chat, i -> "result " + i), true, true)).stream().map(JsonNode::toString).toList(),
-                "all four for an hour: the system prompt, the chat, the task, the newest result");
-        assertEquals(List.of("0/0 1h", "4/0 5m"), where(body(step(3, null, i -> "result " + i), true, false)),
-                "the premise: five minutes while they follow one another");
-        assertEquals(List.of("0/0 1h"), where(body(step(1, null, i -> ""), true, true)), "step 1 has none to lengthen");
-
-        // Where the mark is put as before, it lives as long.
-        assertEquals(List.of("0/0 1h", "3/0 1h"), where(body(List.of(LlmMessage.system("SYSTEM"),
+        assertEquals(List.of(HOUR, HOUR, HOUR, FIVE_MINUTES),
+                marks(body(step(3, chat, i -> "result " + i), true)).stream().map(JsonNode::toString).toList(),
+                "the system prompt, the chat and the task for an hour; the newest result for five minutes");
+        assertEquals(List.of("0/0 1h", "78/0 5m"), where(body(step(40, null, i -> "result " + i), true)),
+                "however many steps the task has taken");
+        // Where the mark is put as before, it lives as long as before.
+        assertEquals(List.of("0/0 1h", "3/0 5m"), where(body(List.of(LlmMessage.system("SYSTEM"),
                 LlmMessage.marked("the task" + MARK), LlmMessage.assistant("action 1"), LlmMessage.user("result 1"),
-                LlmMessage.assistant("action 2"), LlmMessage.user("result 2" + STEP)), true, true)));
+                LlmMessage.assistant("action 2"), LlmMessage.user("result 2" + STEP)), true)));
 
-        // A first message whose boundary the filter took: the system prompt is cached for five
-        // minutes, and an hour-long mark after it is a request the API refuses.
+        // A first message whose boundary the filter took: no stable prefix, so the system prompt is
+        // cached for five minutes -- and the newest result is still marked, after it, as long.
         var noBoundary = body(List.of(LlmMessage.system("SYSTEM"), LlmMessage.marked("the task«secret removed»"),
-                LlmMessage.assistant("action 1"), LlmMessage.newest("result 1", STEP)), true, true);
+                LlmMessage.assistant("action 1"), LlmMessage.newest("result 1", STEP)), true);
         assertEquals(List.of(FIVE_MINUTES, FIVE_MINUTES), marks(noBoundary).stream().map(JsonNode::toString).toList(),
                 noBoundary.toString());
-        // Nor is a request that is no think call given one, whatever it says of its steps.
-        var codegen = body(List.of(LlmMessage.system("Write the skill."), LlmMessage.user("the specification"),
-                LlmMessage.assistant("part 1"), LlmMessage.user("go on")), false, true);
-        assertEquals(List.of(FIVE_MINUTES, FIVE_MINUTES), marks(codegen).stream().map(JsonNode::toString).toList());
-        // Mutation: the hour whenever the request asks -> [5m, 1h] for the two above, which the
-        // API answers with HTTP 400. Never the hour -> a task of long steps writes all of them
-        // again after each.
+        assertEquals(List.of("2/0 5m"), where(noBoundary));
+        // Mutation: an hour-long mark on the newest result -> four hour-long marks, 2x on what every
+        // step adds, which cost more than it saved on a month's tasks (AnthropicProvider#requestBody);
+        // and [5m, 1h] after the first message without a boundary, which the API answers with HTTP 400.
+        // An hour-long mark where it is put as before -> "3/0 1h".
     }
 
     /** A task's first message as the engine writes it for a chat: its messages, the end of the chat, the task. */
@@ -418,10 +407,8 @@ class AnthropicCacheTest {
             for (int i = 0; i < chat; i++) history.add((i % 2 == 0 ? "USER: " : "ASSISTANT: ") + i + "\n");
             for (boolean split : List.of(true, false)) {
                 for (int turns = 0; turns < 8; turns++) {
-                    // The newest message as the engine writes it, its result named, and as one text;
-                    // the steps close together, and far apart.
-                    for (int shape = 0; shape < 4; shape++) {
-                        boolean named = shape % 2 == 0, farApart = shape >= 2;
+                    // The newest message as the engine writes it, its result named, and as one text.
+                    for (boolean named : List.of(true, false)) {
                         var messages = new ArrayList<LlmMessage>();
                         messages.add(LlmMessage.system("SYSTEM" + MARK + "dynamic"));
                         String task = chat < 0 ? "task" : chatThenTask(history, "task");
@@ -435,15 +422,14 @@ class AnthropicCacheTest {
                             // A step that found tools: its addition comes after the newest user turn.
                             if (i == turns - 1 && i % 2 == 1) messages.add(LlmMessage.toolsAdded(List.of("respond")));
                         }
-                        JsonNode body = body(messages, true, farApart);
+                        JsonNode body = body(messages, true);
                         String what = " with a chat of " + chat + " and " + turns + " turns, split=" + split
-                                + ", named=" + named + ", farApart=" + farApart + ": " + body;
+                                + ", named=" + named + ": " + body;
                         int marks = body.toString().split("cache_control", -1).length - 1;
                         assertTrue(marks <= 4, marks + " marks" + what);
                         var ttls = marks(body).stream().map(JsonNode::toString).toList();
                         assertTrue(ttls.lastIndexOf(HOUR) < Math.max(0, ttls.indexOf(FIVE_MINUTES)) || !ttls.contains(FIVE_MINUTES),
                                 "the hour-long marks before the five-minute ones: " + ttls + what);
-                        if (farApart && split) assertFalse(ttls.contains(FIVE_MINUTES), "every mark for an hour: " + ttls + what);
                         body.path("messages").forEach(m -> m.path("content").forEach(b -> assertFalse(
                                 b.path("text").asText("x").isBlank(), "a blank block, which the API refuses: " + body)));
                     }

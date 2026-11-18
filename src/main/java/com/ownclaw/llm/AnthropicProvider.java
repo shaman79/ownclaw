@@ -510,11 +510,9 @@ class AnthropicProvider implements LlmProvider {
         // (TTL "1h", writes at 2x the input rate, reads at the usual rate): a delegation that
         // keeps the cloud waiting for twenty minutes, or the owner's next message ten minutes on,
         // used to find it expired after the default five and pay for writing all of it again.
-        // The steps after it slide on the five-minute cache -- until two of them have been
-        // further apart than that cache lives, and from then on for an hour too (below). The API
-        // takes the longer-lived marks before the shorter ones, which this order is. A request
-        // without the marker -- code generation, a summary -- has no prefix worth an hour: its
-        // marks are all five-minute ones.
+        // The steps after it slide on the five-minute cache. The API takes the longer-lived marks
+        // before the shorter ones, which this order is. A request without the marker -- code
+        // generation, a summary -- has no prefix worth an hour: its marks are all five-minute ones.
         String systemPrompt = null;
         ArrayNode msgs = body.putArray("messages");
         boolean stable = false;
@@ -638,30 +636,31 @@ class AnthropicProvider implements LlmProvider {
         // writes only the steps after it. With the system prompt, the chat and the task, that is
         // four marks, the most the API takes.
         //
-        // For five minutes, counted from the start of the request that wrote or last read the
-        // entry: enough while a task's requests follow one another, each read renewing it for
-        // nothing. A step or a reply longer than that lets it expire, and the next request writes
-        // every step of the task again -- five such rewrites were $3.42 of one $12.85 chat, its
-        // requests 5.8 to 9.7 minutes apart. So once two think requests of a task have started
-        // further apart than the entry lives (AgentContext#cloudThinkSent), its sliding mark is
-        // an hour-long one, like the marks before it: what each step adds is then written at 2x
-        // the input rate instead of 1.25x, and a later long step costs nothing -- at five minutes
-        // it wrote every step of the task again, at 1.25x, so the second long step of a task
-        // repays the dearer writes. Only after the hour-long marks of a stable prefix: the API
-        // refuses a longer-lived mark after a shorter one, and a think call whose first message
-        // lost its boundary to the filter has a five-minute system prompt.
+        // For five minutes, always, though a step or a reply longer than that lets the entry
+        // expire and the next request writes every step of the task again -- $3.42 of one $12.85
+        // chat, in five rewrites. An hour-long sliding mark from the first think request sent
+        // more than 4.5 minutes after the one before it was built and taken out again: replayed
+        // over the tasks of 20 October to 18 November 2026 (184 of them, input side, $261.99
+        // paid) this placement alone came to $234.16 and with that rule to $240.76 -- dearer in
+        // 75 tasks (+$14.68), cheaper in 15 (-$8.09). Of 90 tasks with a long gap 64 had just
+        // one, where the rule only adds: the request after the gap writes every step again
+        // whatever its mark, with the rule at 2x the input rate instead of 1.25x, and every later
+        // step is written at 2x for nothing; two gentler rules -- the hour from the request after
+        // the first long gap, or from the second long gap -- came within one percent of none
+        // ($232.26, $233.57). It would pay with many tasks of two or more long steps that have
+        // other steps between them, and since delegations became exact calls, on 11 November,
+        // 3 tasks in 32 have a long gap at all.
         int newest = msgs.size() - 1;
         while (newest > 0 && !"user".equals(msgs.get(newest).path("role").asText())) newest--;
-        boolean hour = stable && reqConfig.hourLongSteps();
-        boolean sliding = lasting != null && markLasting((ObjectNode) msgs.get(newest), lasting, hour);
+        boolean sliding = lasting != null && markLasting((ObjectNode) msgs.get(newest), lasting);
         // A newest message that names no such beginning -- a skill's code written in parts, which
-        // is no think call; a think call's when the filter wrote across where the result ends
-        // (CloudGateway#lasting) -- is marked as every request was before: on the message before
-        // the newest user turn, a message of text: a tool addition -- after that turn, or before
-        // it -- is not one.
+        // is no think call; a think call's when the filter reads the result otherwise alone than
+        // with what follows it (CloudGateway#lasting) -- is marked as every request was before:
+        // on the message before the newest user turn, a message of text: a tool addition -- after
+        // that turn, or before it -- is not one.
         for (int i = newest - 1; i > 0 && !sliding; i--) {
             if (msgs.get(i).path("content").isTextual()) {
-                setMessageCacheBreakpoint(msgs, i, hour);
+                setMessageCacheBreakpoint(msgs, i);
                 sliding = true;
             }
         }
@@ -782,10 +781,10 @@ class AnthropicProvider implements LlmProvider {
     }
 
     /**
-     * Set a cache breakpoint on a message -- a five-minute one, or an hour-long one -- by
-     * converting its plain-text content to a content-block array with cache_control.
+     * Set a five-minute cache breakpoint on a message by converting its plain-text content
+     * to a content-block array with cache_control.
      */
-    private void setMessageCacheBreakpoint(ArrayNode msgs, int index, boolean hour) {
+    private void setMessageCacheBreakpoint(ArrayNode msgs, int index) {
         ObjectNode msg = (ObjectNode) msgs.get(index);
         String rawContent = msg.path("content").asText("");
         msg.remove("content");
@@ -793,22 +792,22 @@ class AnthropicProvider implements LlmProvider {
         ObjectNode block = contentArray.addObject();
         block.put("type", "text");
         block.put("text", rawContent);
-        block.set("cache_control", cacheControl(hour));
+        block.set("cache_control", cacheControl(false));
     }
 
     /**
      * A message of text as two blocks: {@code lasting}, the beginning of it that is all of the
-     * message on the next step, with the cache mark, then the rest of it with none -- joined, the
-     * text the message was. Or as it is, and false: when the text does not begin so, and when
-     * either part is nothing but blanks, a block the API refuses -- a mark on one too.
+     * message on the next step, with a five-minute cache mark, then the rest of it with none --
+     * joined, the text the message was. Or as it is, and false: when the text does not begin so,
+     * and when either part is nothing but blanks, a block the API refuses -- a mark on one too.
      */
-    private boolean markLasting(ObjectNode message, String lasting, boolean hour) {
+    private boolean markLasting(ObjectNode message, String lasting) {
         JsonNode content = message.path("content");
         if (!content.isTextual() || !content.asText().startsWith(lasting) || lasting.isBlank()) return false;
         String rest = content.asText().substring(lasting.length());
         if (!rest.isEmpty() && rest.isBlank()) return false;
         ArrayNode blocks = message.putArray("content");
-        textBlock(blocks, lasting).set("cache_control", cacheControl(hour));
+        textBlock(blocks, lasting).set("cache_control", cacheControl(false));
         if (!rest.isEmpty()) textBlock(blocks, rest);
         return true;
     }
