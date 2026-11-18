@@ -530,19 +530,37 @@ public class DynamicSkillRegistry {
         return List.of();
     }
 
+    /**
+     * The parameters a SKILL.yaml declares, in its order: each name with its definition -- its
+     * type, its description, whether it is required.
+     * <p>
+     * Or the same written as a JSON Schema -- {@code type: object}, the definitions under
+     * {@code properties}, the required names in a list -- as the model that writes a skill
+     * sometimes declares them; skill_create keeps what it is handed. Read as a map of names, that
+     * was one parameter called "properties" and no other: imap_move_to_bin_by_sender_gmail,
+     * declared so, was offered to the model with that one parameter, and its own five nowhere. A
+     * call the cloud writes is held to what its skill declares (LocalExecutor#misfit): held to
+     * that reading, a call naming the skill's real parameters would be refused.
+     */
     @SuppressWarnings("unchecked")
     private Map<String, ToolParam> parseParameters(Map<String, Object> yaml) {
         Object paramsObj = yaml.get("parameters");
         if (!(paramsObj instanceof Map)) return Map.of();
 
         Map<String, Object> paramsMap = (Map<String, Object>) paramsObj;
+        List<?> requiredNames = List.of();
+        if ("object".equals(paramsMap.get("type")) && paramsMap.get("properties") instanceof Map<?, ?> properties) {
+            if (paramsMap.get("required") instanceof List<?> names) requiredNames = names;
+            paramsMap = (Map<String, Object>) properties;
+        }
         Map<String, ToolParam> result = new LinkedHashMap<>();
 
         for (var entry : paramsMap.entrySet()) {
             if (entry.getValue() instanceof Map paramDef) {
                 String type = paramDef.containsKey("type") ? String.valueOf(paramDef.get("type")) : "string";
                 String desc = paramDef.containsKey("description") ? String.valueOf(paramDef.get("description")) : "";
-                boolean required = Boolean.TRUE.equals(paramDef.get("required"));
+                boolean required = Boolean.TRUE.equals(paramDef.get("required"))
+                        || requiredNames.contains(entry.getKey());
                 result.put(entry.getKey(), new ToolParam(type, desc, required));
             }
         }

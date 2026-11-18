@@ -195,6 +195,62 @@ class CallParametersTest {
     }
 
     @Test
+    @DisplayName("a SKILL.yaml that declares its parameters as a JSON Schema declares those parameters: listed, and a call naming them fits")
+    void aSchemaShapedDeclarationIsRead(@TempDir Path tmp) throws Exception {
+        // As a skill of production's is declared: the registry read it as one parameter, "properties".
+        Path dir = java.nio.file.Files.createDirectories(tmp.resolve("imap_move_to_bin"));
+        java.nio.file.Files.writeString(dir.resolve("SKILL.yaml"), String.join("\n",
+                "name: imap_move_to_bin",
+                "description: Move the mail of the given senders to the bin.",
+                "parameters:",
+                "  type: \"object\"",
+                "  properties:",
+                "    mailbox:",
+                "      type: \"string\"",
+                "      description: \"Source mailbox to search (e.g. INBOX).\"",
+                "    senders:",
+                "      type: \"string\"",
+                "      description: \"Comma-separated sender patterns to match.\"",
+                "    dry_run:",
+                "      type: \"string\"",
+                "      description: \"'1' to only report, else execute move.\"",
+                "      default: \"0\"",
+                "  required:",
+                "  - \"mailbox\"",
+                "  - \"senders\"",
+                ""));
+        java.nio.file.Files.writeString(dir.resolve("skill.py"), "def run(params):\n    return {}\n");
+        Tool skill = new com.ownclaw.agent.tools.DynamicSkillRegistry(null, null, null, null, null, null, null)
+                .loadSkill(dir);
+
+        assertEquals(String.join("\n",
+                "  - mailbox (string, required): Source mailbox to search (e.g. INBOX).",
+                "  - senders (string, required): Comma-separated sender patterns to match.",
+                "  - dry_run (string, optional): '1' to only report, else execute move."), ToolFinder.parameters(skill));
+        assertEquals(List.of(), LocalExecutor.misfit(skill, Map.of("mailbox", "INBOX", "senders", "news@example.org")));
+        assertEquals(List.of("'senders' is required and was left out"), LocalExecutor.misfit(skill, Map.of("mailbox", "INBOX")));
+
+        // Declared the usual way, a skill is read as it was.
+        java.nio.file.Files.writeString(dir.resolve("SKILL.yaml"), String.join("\n",
+                "name: imap_move_to_bin",
+                "description: Move the mail of the given senders to the bin.",
+                "parameters:",
+                "  mailbox:",
+                "    type: \"string\"",
+                "    description: \"Source mailbox to search (e.g. INBOX).\"",
+                "    required: true",
+                "  type:",
+                "    type: \"string\"",
+                "    description: \"The kind of move.\"",
+                ""));
+        assertEquals("  - mailbox (string, required): Source mailbox to search (e.g. INBOX).\n"
+                + "  - type (string, optional): The kind of move.", ToolFinder.parameters(
+                new com.ownclaw.agent.tools.DynamicSkillRegistry(null, null, null, null, null, null, null).loadSkill(dir)));
+        // Mutation: read the declaration as a map of names alone, as before -> the skill's one
+        // parameter is "properties", and the call naming mailbox and senders does not fit.
+    }
+
+    @Test
     @DisplayName("find_tools lists each match with its parameters under it, and says so of a skill with none; its first line and its paging are as they were")
     void whatFindToolsLists(@TempDir Path tmp) throws Exception {
         var tools = new java.util.ArrayList<Tool>(List.of(smtp(),
