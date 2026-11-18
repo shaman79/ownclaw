@@ -416,6 +416,58 @@ class CloudGatewayTest {
         // differ, and no beginning is named.
     }
 
+    @Test
+    @DisplayName("a newest result that holds a text the task declared -- a skill's code, read; what a skill printed -- is read the second time as the first: its beginning is named, the values inside longer words replaced in it, and is the next step's message")
+    void theBeginningOfADeclaredResultIsNamed() {
+        // skill.py as skill_manage read shows it, and a run's output: a host's name is a word of
+        // its own in one place and inside a longer word in another, where the filter of plain
+        // text leaves it and the filter of a declared text does not.
+        String code = "import os\n\nHOST = \"fake-laptop\"\nBACKUP = \"/srv/fake-laptop_daily\"\n\n"
+                + "def run(params):\n    return {'output': os.listdir(BACKUP)}\n";
+        String printed = "backup of fake-laptop failed\nFileNotFoundError: '/srv/fake-laptop_daily'\n";
+        record Held(String result, String declared, Redactor.Declared as, String filtered) {}
+        var cases = List.of(
+                new Held("[skill_manage] OK (3ms)\n--- skill.py ---\n" + code, code, Redactor.Declared.CODE,
+                        "[skill_manage] OK (3ms)\n--- skill.py ---\nimport os\n\nHOST = \"<host_1>\"\nBACKUP = \"/srv/<host_1>_daily\"\n\n"
+                                + "def run(params):\n    return {'output': os.listdir(BACKUP)}\n"),
+                new Held("[backup_check] FAILED (12ms)\n" + printed, printed, Redactor.Declared.OUTPUT,
+                        "[backup_check] FAILED (12ms)\nbackup of <host_1> failed\nFileNotFoundError: '/srv/<host_1>_daily'\n"));
+        for (Held c : cases) {
+            String result = c.result(), filtered = c.filtered();
+            var provider = new Recording();
+            var gw = new CloudGateway(provider, new Recording(), config("anthropic", CloudGateway.Mode.ENFORCE), new Rows(),
+                    null, new Redactor(null));
+            // The task's own message names the host, so the user's table holds the name.
+            var before = List.of(LlmMessage.authoredSystem("SYSTEM"),
+                    LlmMessage.user("why do the backups fail?\nhostname: fake-laptop\n"), LlmMessage.assistant("{\"tool\":\"skill_manage\"}"));
+            var cfg = new LlmRequestConfig(null, null, false).withEgress(new EgressContext("u1", "t1", "think",
+                    new PrivateIndex(), Map.of(), (h, w) -> false, null, null, Map.of(c.declared(), c.as())));
+            var now = new ArrayList<>(before);
+            now.add(LlmMessage.newest(result, STEP));
+            gw.chat(now, cfg);
+
+            LlmMessage handed = provider.calls.get(0).get(3);
+            assertEquals(filtered + STEP, handed.content(),
+                    "the premise: in the declared text the name is replaced inside the longer word too");
+            assertEquals(filtered, handed.lasting(), c.as() + ": the beginning is named, read as the message was");
+
+            var next = new ArrayList<>(before);
+            next.add(LlmMessage.user(result));
+            next.add(LlmMessage.assistant("{\"tool\":\"respond\"}"));
+            next.add(LlmMessage.newest("[respond] OK (1ms)\nsaid", STEP));
+            gw.chat(next, cfg);
+            assertEquals(handed.lasting(), provider.calls.get(1).get(3).content(), "and it is the next step's message");
+
+            // The same result with nothing declared: the name inside the longer word stays.
+            assertTrue(handed(LlmMessage.newest("hostname: fake-laptop\n" + result, STEP)).content().contains("/srv/fake-laptop_daily"),
+                    "the premise: only the declaration has the filter look inside a longer word");
+        }
+        // Mutation: read the beginning the second time without the texts the task declared ->
+        // "/srv/fake-laptop_daily" stands in that reading, the message does not begin with it, and
+        // no beginning is named: for every skill's code the cloud reads, the mark is back on the
+        // message before it and the code is paid in full, then written.
+    }
+
     static final String KEY_HEAD = "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAABG5vbmUfakeHEAD\n";
     static final String KEY_TAIL = "AAAAC3NzaC1lZDI1NTE5AAAAIGfakeTAILfakeTAILfake\nAbCd==\n-----END OPENSSH PRIVATE KEY-----\n";
 

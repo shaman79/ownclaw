@@ -429,9 +429,13 @@ public final class CloudGateway implements LlmProvider {
      * name the first reading learned from what follows the beginning is known to it. A place
      * carried over from the engine's text would not do: every secret removed and identifier
      * replaced before it moves it. The two readings differ where something the filter removes runs
-     * across the boundary -- a vault value that holds a line break -- and then the message goes on
-     * with no beginning named, and the provider marks as it did before there was one. What the
-     * second reading counts is not the request's ({@code tally}).
+     * across the boundary -- a vault value that holds a line break -- and where the first reading
+     * learned a name that the result also holds in another spelling, which only a later reading
+     * replaces; then the message goes on with no beginning named, and the provider marks as it
+     * did before there was one. The second reading is given the texts the task declared, as the
+     * first is: without them a value inside a longer word of a skill's code would stand in this
+     * reading and not in the message, and a skill's code the cloud reads would have no beginning.
+     * What it counts is not the request's ({@code tally}).
      */
     private String lasting(LlmMessage m, String filtered, String user, Map<String, String> vault, EgressContext egress) {
         if (m.lasting() == null || filtered == null) return null;
