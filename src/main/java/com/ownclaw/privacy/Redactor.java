@@ -352,9 +352,29 @@ public final class Redactor {
      */
     public String filter(String userId, String text, Map<String, String> vault, Tally tally,
                          Map<String, Declared> declared) {
+        return filter(userId, text, vault, tally, declared, null);
+    }
+
+    /**
+     * {@link #filter(String, String, Map, Tally, Map)}, telling {@code sentAs} what each declared text
+     * that stands in {@code text} went out as: the text as the task declared it, and the stretch of
+     * what is returned that it became -- cut from what this very pass wrote, never worked out a
+     * second time. For a caller that must know exactly what a model was shown of a text: a skill's
+     * code that the model changes by naming the lines to replace ({@code SkillEdits}) is changed in
+     * the text the model read, and that is not the text the task holds. The filter of the code
+     * alone does not give it: an SSID named anywhere in the part -- the specification above the
+     * code -- is replaced in the code as a word, from that part on. Told null where it cannot be
+     * cut out: a finding lies across the beginning or the end of the declared text, so what the
+     * text became has no beginning or no end of its own in what was sent.
+     *
+     * @param sentAs told once for every place a declared text stands at, in order; or null
+     */
+    public String filter(String userId, String text, Map<String, String> vault, Tally tally,
+                         Map<String, Declared> declared, java.util.function.BiConsumer<String, String> sentAs) {
         if (text == null || text.isEmpty()) return text;
         if (declared == null || declared.isEmpty()) return filter(userId, text, vault, tally);
-        return filtered(userId, text, vault, tally, s -> stretches(s, declared, vault));
+        var told = sentAs == null ? null : new ArrayList<String>();
+        return filtered(userId, text, vault, tally, s -> stretches(s, declared, vault, told), told, sentAs);
     }
 
     /**
@@ -366,12 +386,19 @@ public final class Redactor {
                              boolean keepPlaceholders) {
         if (text == null || text.isEmpty()) return text;
         Declared as = keepPlaceholders ? Declared.CODE_AS_WRITTEN : Declared.CODE;
-        return filtered(userId, text, vault, tally, s -> List.of(new int[] {0, s.length(), as.ordinal()}));
+        return filtered(userId, text, vault, tally, s -> List.of(new int[] {0, s.length(), as.ordinal()}), null, null);
     }
 
-    /** The filter over all of {@code text}, its declared stretches -- in the text the vault scrub left -- as they are. */
+    /**
+     * The filter over all of {@code text}, its declared stretches -- in the text the vault scrub left -- as they are.
+     *
+     * @param told   the text each stretch was declared as, in the stretches' order, when {@code sentAs} is told
+     * @param sentAs told what each stretch went out as ({@link #filter(String, String, Map, Tally, Map,
+     *               java.util.function.BiConsumer)}), or null
+     */
     private String filtered(String userId, String text, Map<String, String> vault, Tally tally,
-                            java.util.function.Function<String, List<int[]>> stretchesOf) {
+                            java.util.function.Function<String, List<int[]>> stretchesOf, List<String> told,
+                            java.util.function.BiConsumer<String, String> sentAs) {
         Scrubbed scrubbed = scrubVault(text, vault);
         tally.secrets += scrubbed.count();
         String s = scrubbed.text();
@@ -397,11 +424,22 @@ public final class Redactor {
         }
         Map<String, String> known = stretches.isEmpty() ? Map.of() : table.byValue();
         var sb = new StringBuilder(s.length());
+        // Where in sb each stretch begins and ends, for sentAs: noted as the pass writes that end of
+        // it, and never where a finding lies across it -- there the stretch has no end of its own.
+        int[][] wrote = sentAs == null ? null : new int[stretches.size()][];
+        if (wrote != null) {
+            for (int i = 0; i < wrote.length; i++) wrote[i] = new int[] {-1, -1};
+        }
         int from = 0;
         for (Finding f : found) {
-            sb.append(knownReplacedIn(s, from, f.start(), stretches, known, tally));
+            knownReplacedIn(sb, s, from, f.start(), stretches, known, tally, wrote);
             String span = s.substring(f.start(), f.end());
             Declared in = within(stretches, f.start(), f.end());
+            // A finding that begins a stretch it lies inside: the stretch begins where it is written.
+            for (int i = 0; wrote != null && i < wrote.length; i++) {
+                int[] st = stretches.get(i);
+                if (f.start() == st[0] && f.end() <= st[1]) wrote[i][0] = sb.length();
+            }
             if (f.kind() == null) {
                 sb.append(SECRET_REMOVED);
                 tally.secrets++;
@@ -412,21 +450,40 @@ public final class Redactor {
                 sb.append(table.placeholder(f.kind(), f.valueIn(s)));
                 tally.identifiers++;
             }
+            // And one that ends a stretch it lies inside: the stretch ends after it.
+            for (int i = 0; wrote != null && i < wrote.length; i++) {
+                int[] st = stretches.get(i);
+                if (f.end() == st[1] && f.start() >= st[0]) wrote[i][1] = sb.length();
+            }
             from = f.end();
         }
-        return sb.append(knownReplacedIn(s, from, s.length(), stretches, known, tally)).toString();
+        knownReplacedIn(sb, s, from, s.length(), stretches, known, tally, wrote);
+        String out = sb.toString();
+        for (int i = 0; wrote != null && i < wrote.length; i++) {
+            sentAs.accept(told.get(i), wrote[i][0] >= 0 && wrote[i][1] >= wrote[i][0]
+                    ? out.substring(wrote[i][0], wrote[i][1]) : null);
+        }
+        return out;
     }
 
     /**
      * Where the {@code declared} texts stand in {@code s}, each as the vault scrub left it: {start, end,
      * the Declared's ordinal}, in order, none inside another -- the longer first. One shorter than
      * {@link #MIN_DECLARED} is not looked for.
+     *
+     * @param told filled, when not null, with the text each stretch was declared as, in the order
+     *             returned -- of two declared texts the vault scrub leaves the same, the one that
+     *             sorts first
      */
-    private static List<int[]> stretches(String s, Map<String, Declared> declared, Map<String, String> vault) {
+    private static List<int[]> stretches(String s, Map<String, Declared> declared, Map<String, String> vault,
+                                         List<String> told) {
         var texts = new ArrayList<Map.Entry<String, Declared>>();
+        var declaredAs = new HashMap<String, String>();   // as the vault scrub left it, to as it was declared
         for (var e : declared.entrySet()) {
             String t = scrubVault(e.getKey(), vault).text();
-            if (t.length() >= MIN_DECLARED) texts.add(Map.entry(t, e.getValue()));
+            if (t.length() < MIN_DECLARED) continue;
+            texts.add(Map.entry(t, e.getValue()));
+            declaredAs.merge(t, e.getKey(), (a, b) -> a.compareTo(b) <= 0 ? a : b);
         }
         texts.sort(Comparator.comparingInt((Map.Entry<String, Declared> e) -> e.getKey().length()).reversed());
         var taken = new BitSet(s.length());
@@ -442,6 +499,9 @@ public final class Redactor {
             }
         }
         out.sort(Comparator.comparingInt((int[] a) -> a[0]));
+        if (told != null) {
+            for (int[] st : out) told.add(declaredAs.get(s.substring(st[0], st[1])));
+        }
         return out;
     }
 
@@ -454,21 +514,27 @@ public final class Redactor {
         return null;
     }
 
-    /** {@code s} from {@code from} to {@code to}, the known values replaced where it lies inside a stretch. */
-    private static String knownReplacedIn(String s, int from, int to, List<int[]> stretches,
-                                          Map<String, String> known, Tally tally) {
-        if (from >= to) return "";
-        if (stretches.isEmpty()) return s.substring(from, to);
-        var sb = new StringBuilder(to - from);
+    /**
+     * Appends to {@code out} {@code s} from {@code from} to {@code to}, the known values replaced where
+     * it lies inside a stretch -- each stretch's piece by itself, so a stretch that begins or ends
+     * here does so at a place of its own in {@code out}: noted in {@code wrote}, when that is kept.
+     */
+    private static void knownReplacedIn(StringBuilder out, String s, int from, int to, List<int[]> stretches,
+                                        Map<String, String> known, Tally tally, int[][] wrote) {
+        if (from >= to) return;
         int at = from;
-        for (int[] st : stretches) {
+        for (int i = 0; i < stretches.size(); i++) {
+            int[] st = stretches.get(i);
             if (st[1] <= at) continue;
             if (st[0] >= to) break;
             int a = Math.max(at, st[0]), b = Math.min(to, st[1]);
-            sb.append(s, at, a).append(knownReplaced(s.substring(a, b), known, tally));
+            out.append(s, at, a);
+            if (wrote != null && a == st[0]) wrote[i][0] = out.length();
+            out.append(knownReplaced(s.substring(a, b), known, tally));
+            if (wrote != null && b == st[1]) wrote[i][1] = out.length();
             at = b;
         }
-        return sb.append(s, at, to).toString();
+        out.append(s, at, to);
     }
 
     /**

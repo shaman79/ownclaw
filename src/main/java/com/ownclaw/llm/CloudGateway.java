@@ -197,8 +197,11 @@ public final class CloudGateway implements LlmProvider {
             // The engine's marked message is filtered as one text like any other -- its markers
             // are only where the provider splits it (LlmMessage#marked), and nothing the filter
             // removes is let off because a marker stands in it -- and goes on marked.
+            // What each text the task declared goes out as is kept under the context
+            // (EgressContext.SentAs): the caller that changes a skill's code by the lines the model
+            // names must change the text the model read, and only this pass knows it.
             String content = m.authored() ? Redactor.filterAuthored(m.content(), vault, tally)
-                    : redactor.filter(user, m.content(), vault, tally, egress.skillCode());
+                    : redactor.filter(user, m.content(), vault, tally, egress.skillCode(), egress.sentAs()::put);
             filteredMessages.add(new LlmMessage(m.role(), content, m.authored(), m.marked(), m.images()));
         }
 

@@ -36,13 +36,17 @@ import java.util.function.IntFunction;
  *                     and inside each such text also replaces every value the user's table holds
  *                     wherever it stands ({@code Redactor#filter(String, String, Map, Redactor.Tally,
  *                     Map)}). Only the task declares them ({@code AgentContext#declareSkillCode})
+ * @param sentAs       what the gateway sent each of those texts as, under this context
+ *                     ({@link SentAs}): always this context's own, and empty when it is made --
+ *                     whatever a caller passes is not taken
  */
 public record EgressContext(String userId, String taskId, String purpose, PrivateIndex index,
                             Map<String, String> secretValues,
                             BiPredicate<Integer, String> allowed,
                             IntFunction<String> toolOf,
                             HandedOut handedOut,
-                            Map<String, Redactor.Declared> skillCode) {
+                            Map<String, Redactor.Declared> skillCode,
+                            SentAs sentAs) {
 
     public EgressContext {
         index = index == null ? new PrivateIndex() : index;
@@ -54,6 +58,15 @@ public record EgressContext(String userId, String taskId, String purpose, Privat
         // texts it never handed out.
         handedOut = new HandedOut();
         skillCode = skillCode == null ? Map.of() : Map.copyOf(skillCode);
+        // Nor this: only the gateway says what it sent.
+        sentAs = new SentAs();
+    }
+
+    /** A context that declares {@code skillCode}, with memories of its own ({@link #handedOut}, {@link #sentAs}). */
+    public EgressContext(String userId, String taskId, String purpose, PrivateIndex index,
+                         Map<String, String> secretValues, BiPredicate<Integer, String> allowed,
+                         IntFunction<String> toolOf, HandedOut handedOut, Map<String, Redactor.Declared> skillCode) {
+        this(userId, taskId, purpose, index, secretValues, allowed, toolOf, handedOut, skillCode, null);
     }
 
     /** A context with a memory of its own, empty ({@link #handedOut}), and no skill code. */
@@ -135,12 +148,56 @@ public record EgressContext(String userId, String taskId, String purpose, Privat
     }
 
     /**
+     * What the gateway sent each declared text as ({@link #skillCode}), in the requests made under
+     * one context since a caller last emptied it: the stretch of the filtered part that the text
+     * became, cut from what was sent ({@code Redactor#filter(String, String, Map, Redactor.Tally, Map,
+     * java.util.function.BiConsumer)}). A skill's code goes to the model with the user's values
+     * replaced -- the code as the model wrote it too: a placeholder the table does not know, an
+     * address the model wrote itself, a network the same request names, each becomes another text
+     * on the way out -- and a model that answers with the lines to replace ({@code SkillEdits})
+     * names lines of the text it read. Only the door knows that text, so the door says it.
+     * <p>
+     * One text for each declared text, or none: a text that went out as two different ones -- the
+     * table learned a value between two calls, or it stands twice in a request and was filtered
+     * differently -- or as one that could not be cut out of the part, is not known, and stays so
+     * until it is emptied. Only the gateway puts a text in; a caller reads, and empties it before
+     * the requests it asks about. Held by the context, it ends with it.
+     */
+    public static final class SentAs {
+        private final Map<String, java.util.Optional<String>> texts = new java.util.concurrent.ConcurrentHashMap<>();
+
+        private SentAs() {}
+
+        /** {@code declared} went out as {@code sent}; null: as a text that could not be told. */
+        void put(String declared, String sent) {
+            if (declared == null) return;
+            texts.merge(declared, java.util.Optional.ofNullable(sent),
+                    (was, now) -> was.equals(now) ? was : java.util.Optional.empty());
+        }
+
+        /**
+         * What {@code declared} was sent as in every request since {@link #forget} -- the same text in
+         * each -- or null: it was in none of them, or what it was sent as is not known.
+         */
+        public String of(String declared) {
+            var sent = declared == null ? null : texts.get(declared);
+            return sent == null ? null : sent.orElse(null);
+        }
+
+        /** Empties it: what follows is what the requests from here on send. */
+        public void forget() {
+            texts.clear();
+        }
+    }
+
+    /**
      * Without the vault values -- their names only. A record's own toString prints every
      * component, and so every decrypted secret, into whatever logs the context or a request
      * config holding it.
      */
     @Override
     public String toString() {
+        // Nor what the declared texts were sent as: the code itself, in whatever logs the context.
         return "EgressContext[userId=" + userId + ", taskId=" + taskId + ", purpose=" + purpose
                 + ", secretValues=" + secretValues.keySet() + ", skillCode=" + skillCode.size() + " texts]";
     }
