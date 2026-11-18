@@ -326,7 +326,7 @@ class DeclarationInDoubtTest {
                 "def run(params):",
                 "    params['count'] += 1",
                 "    params['limit'] = 10",
-                "    return {'output': str(params['count']), 'success': True}",
+                "    return {'output': 'counted', 'success': True}",
                 ""),
                 "parameters:", "  url:", "    type: string");
         assertEquals(List.of("'limit' is not one of its parameters"),
