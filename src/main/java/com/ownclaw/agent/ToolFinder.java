@@ -152,7 +152,14 @@ final class ToolFinder {
      * A tool's parameters as a model that is to write a call of it is told them, a line each: the
      * name, its type where the declaration gives one a schema has
      * ({@link ToolSchemas#normalizeType}; no type is said rather than a guessed one), whether it
-     * is required, and the first sentence of its description. Every one of them.
+     * is required, and its description -- all of it, on the one line ({@link #oneLine}). Every
+     * one of them.
+     * <p>
+     * A parameter's description is not cut to its first sentence, as the skill's own is: the
+     * orchestrating cloud has no other copy of it, and the sentence that was cut is often the one
+     * that says how the value is written -- "The commands to send. Each is an object with a
+     * type." Production has 19 descriptions of more than one sentence (the review of e16a1ff,
+     * 2026-11-18).
      * <p>
      * The cloud, orchestrating, is shown no skill's schema -- every skill is deferred in its tools
      * -- and yet writes the exact calls code runs (delegate's 'calls'). All it read of a skill was
@@ -174,11 +181,20 @@ final class ToolFinder {
             String type = ToolSchemas.normalizeType(param.type());
             sb.append("  - ").append(name).append(" (").append(type == null ? "" : type + ", ")
               .append(param.required() ? "required" : "optional").append(')');
-            String what = gist(param.description());
+            String what = oneLine(param.description());
             if (!what.isEmpty()) sb.append(": ").append(what);
         });
         if (!declared.whole()) sb.append('\n').append(NOT_READ_IN_FULL);
         return sb.toString();
+    }
+
+    /**
+     * A description on one line, nothing of it left out: every run of blanks and line breaks is
+     * one space. A list a model reads a line at a time stays one parameter to a line, whatever a
+     * description holds.
+     */
+    static String oneLine(String description) {
+        return description == null ? "" : description.replaceAll("(?U)\\s+", " ").strip();
     }
 
     /**

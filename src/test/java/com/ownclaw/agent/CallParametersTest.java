@@ -145,7 +145,7 @@ class CallParametersTest {
     // ───────────────────────── what a model is told of a skill's parameters ─────────────────────────
 
     @Test
-    @DisplayName("a skill's parameters are listed one to a line -- name, type, required or optional, the first sentence of its description -- every one, in the schema's order; a skill with none says so")
+    @DisplayName("a skill's parameters are listed one to a line -- name, type, required or optional, and its description, whole and on that line -- every one, in the schema's order; a skill with none says so; the skill's own description is its first sentence")
     void theLines() {
         assertEquals(SMTP_PARAMETERS, ToolFinder.parameters(smtp()));
         assertEquals("  (no parameters)", ToolFinder.parameters(ToolFinderTest.skill("web_fetch", "Fetch a page.", Map.of())));
@@ -154,16 +154,20 @@ class CallParametersTest {
 
         // Declared as the model that wrote the skill wrote it: a type a schema has under another
         // name, one it has not, a description of several sentences, of several lines, and none.
-        Tool odd = ToolFinderTest.skill("ha_api", "Calls Home Assistant.", declared(
+        String lineSeparator = String.valueOf((char) 0x2028), noBreakSpace = String.valueOf((char) 0xA0);
+        Tool odd = ToolFinderTest.skill("ha_api", "Calls Home Assistant. Slowly.", declared(
                 "commands", ToolParam.required("List[dict]", "The commands to send. Each is an object with a type."),
-                "when", ToolParam.optional("datetime", "When to run it\nISO 8601, local time"),
+                "when", ToolParam.optional("datetime", "When to run it\nISO 8601, local time.\r\n\r\n\tNever in the past. "),
+                "to", ToolParam.optional("str", "  Who is told," + lineSeparator + "one address" + noBreakSpace + " each.  "),
                 "dry_run", ToolParam.optional("bool", null),
-                "note", ToolParam.optional("", "   ")));
+                "note", ToolParam.optional("", " \n  ")));
         assertEquals(String.join("\n",
-                "  - commands (array, required): The commands to send.",
-                "  - when (optional): When to run it",
+                "  - commands (array, required): The commands to send. Each is an object with a type.",
+                "  - when (optional): When to run it ISO 8601, local time. Never in the past.",
+                "  - to (string, optional): Who is told, one address each.",
                 "  - dry_run (boolean, optional)",
                 "  - note (optional)"), ToolFinder.parameters(odd));
+        assertTrue(ToolFinder.listed(odd).startsWith("- ha_api: Calls Home Assistant.\n  - commands"), ToolFinder.listed(odd));
 
         // Every one of them: a skill of production's declares 22.
         var many = new LinkedHashMap<String, ToolParam>();
@@ -176,8 +180,13 @@ class CallParametersTest {
                         "c", ToolParam.optional("string", ""), "a", ToolParam.optional("string", ""),
                         "b", ToolParam.optional("string", "")))));
         // Mutations: list only the required ones -> body_html is missing from the first; print the
-        // declared type as written -> "List[dict]" and "datetime"; the whole description -> "Each is
-        // an object with a type."; stop after eight -> 8 lines of 40.
+        // declared type as written -> "List[dict]" and "datetime"; the first sentence of a
+        // parameter's description alone, as it was -> "Each is an object with a type." is gone,
+        // the one that says how a command is written; a description as it is written -> its
+        // line breaks make lines that are no parameter's; only the blanks ASCII has are blanks
+        // -> the line separator and the no-break space stay; its edges kept -> "each. " ends
+        // with a space; the skill's own description whole too -> "Slowly." is in its line; stop
+        // after eight -> 8 lines of 40.
     }
 
     @Test
