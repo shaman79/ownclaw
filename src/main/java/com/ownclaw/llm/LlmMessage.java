@@ -28,11 +28,32 @@ import java.util.regex.Pattern;
  *                 ({@link #image}): by index into this list. Empty for every other message. Only
  *                 the gateway attaches an image's bytes ({@link Image#sent}), after it has checked
  *                 the file itself; a provider sends an image it has bytes for and no other.
+ * @param lasting  the beginning of {@code content} that is all this message will be on every later
+ *                 step of its task, or null when it has none: a think call's newest message, from
+ *                 the task's second step on, is the last step's result and then what changes on
+ *                 every step ({@link #newest}). Anthropic's provider sends the two as two blocks
+ *                 with its sliding cache mark on the first, which the next step's request -- where
+ *                 that block is the whole message -- reads back; every other reader reads
+ *                 {@code content}, the one text it always was. The beginning is named beside the
+ *                 text: not marked in it, and not counted as a place in it. A result holds whatever
+ *                 bytes a tool printed, a marker's among them, and with those taken out for the
+ *                 newest message alone it would be other bytes than the same result a step later,
+ *                 which is sent as it is; and the gateway rewrites the text, so a place in what the
+ *                 engine wrote is no place in what is sent. Whoever rewrites {@code content} says
+ *                 what its beginning is then ({@code CloudGateway}); one that is not how the
+ *                 content begins is no beginning, and is dropped here.
  */
-public record LlmMessage(Role role, String content, boolean authored, boolean marked, List<Image> images) {
+public record LlmMessage(Role role, String content, boolean authored, boolean marked, List<Image> images,
+                         String lasting) {
 
     public LlmMessage {
         images = images == null ? List.of() : List.copyOf(images);
+        if (lasting != null && (lasting.isEmpty() || content == null || !content.startsWith(lasting))) lasting = null;
+    }
+
+    /** A message that is no step's newest: all of it is what it will be. */
+    public LlmMessage(Role role, String content, boolean authored, boolean marked, List<Image> images) {
+        this(role, content, authored, marked, images, null);
     }
 
     /** A message with no image. */
@@ -205,7 +226,7 @@ public record LlmMessage(Role role, String content, boolean authored, boolean ma
 
     /** The message with these images: the gateway's, with the bytes it attached. */
     LlmMessage withImages(List<Image> images) {
-        return new LlmMessage(role, content, authored, marked, images);
+        return new LlmMessage(role, content, authored, marked, images, lasting);
     }
 
     public static LlmMessage system(String content) {
@@ -229,6 +250,15 @@ public record LlmMessage(Role role, String content, boolean authored, boolean ma
     /** {@link #marked(String)}, showing these images where its image markers stand. */
     public static LlmMessage marked(String content, List<Image> images) {
         return new LlmMessage(Role.USER, content, false, true, images);
+    }
+
+    /**
+     * A think call's newest message from its task's second step on: {@code result}, which is all
+     * the message will be on every later step ({@link #lasting}), then {@code step}, which changes
+     * on every one. Its content is the two as one text, as it was before the first had a name.
+     */
+    public static LlmMessage newest(String result, String step) {
+        return new LlmMessage(Role.USER, result + step, false, false, List.of(), result);
     }
 
     public static LlmMessage assistant(String content) {

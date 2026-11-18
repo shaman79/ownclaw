@@ -196,10 +196,13 @@ public final class CloudGateway implements LlmProvider {
             }
             // The engine's marked message is filtered as one text like any other -- its markers
             // are only where the provider splits it (LlmMessage#marked), and nothing the filter
-            // removes is let off because a marker stands in it -- and goes on marked.
+            // removes is let off because a marker stands in it -- and goes on marked. So is a
+            // message that names the beginning it will be on the next step: filtered as one text,
+            // and its beginning named again for the text that leaves (lasting).
             String content = m.authored() ? Redactor.filterAuthored(m.content(), vault, tally)
                     : redactor.filter(user, m.content(), vault, tally, egress.skillCode());
-            filteredMessages.add(new LlmMessage(m.role(), content, m.authored(), m.marked(), m.images()));
+            filteredMessages.add(new LlmMessage(m.role(), content, m.authored(), m.marked(), m.images(),
+                    lasting(m, content, user, vault, egress)));
         }
 
         // (b2) The images, decided here and by the file: whatever a message carries for one is put
@@ -397,6 +400,32 @@ public final class CloudGateway implements LlmProvider {
     /** Whether the active provider is sent an effort at all. */
     @Override
     public boolean takesEffort() { return active().takesEffort(); }
+
+    /**
+     * The beginning of a filtered message that is all the message will be on its task's next step
+     * ({@link LlmMessage#lasting}), or null: {@code m}'s own beginning filtered alone -- which is
+     * that message as this door writes it on the next step, when the beginning is all there is of
+     * it -- and only when {@code filtered} begins with exactly that. So the block the provider
+     * caches under it is, byte for byte, what the next request sends in its place while the filter
+     * reads that text then as it does now, or there is no such block.
+     * <p>
+     * Nothing that leaves is read from here. The message was filtered whole, as every part is --
+     * a text is never filtered in pieces ({@link Redactor}) -- and this second reading only finds
+     * where the first part of it ends in what the first reading wrote; it comes second, so that a
+     * name the first reading learned from what follows the beginning is known to it. A place
+     * carried over from the engine's text would not do: every secret removed and identifier
+     * replaced before it moves it. The two readings differ where something the filter removes runs
+     * across the boundary -- a vault value that holds a line break -- and then the message goes on
+     * with no beginning named, and the provider marks as it did before there was one. What the
+     * second reading counts is not the request's ({@code tally}).
+     */
+    private String lasting(LlmMessage m, String filtered, String user, Map<String, String> vault, EgressContext egress) {
+        if (m.lasting() == null || filtered == null) return null;
+        var uncounted = new Redactor.Tally();
+        String alone = m.authored() ? Redactor.filterAuthored(m.lasting(), vault, uncounted)
+                : redactor.filter(user, m.lasting(), vault, uncounted, egress.skillCode());
+        return alone != null && filtered.startsWith(alone) ? alone : null;
+    }
 
     /** The reply with the user's placeholders put back to their values; the same reply when it names none. */
     private LlmResponse restoredReply(String user, LlmResponse r) {

@@ -1,0 +1,667 @@
+{
+  "anthropic" : {
+    "engine" : [ {
+      "role" : "system",
+      "authored" : true,
+      "marked" : false,
+      "images" : 0,
+      "content" : [ "<the system prompt>" ]
+    }, {
+      "role" : "user",
+      "authored" : false,
+      "marked" : true,
+      "images" : 0,
+      "content" : [ "## Prior Context", "### The conversation so far", "USER: which routers do we have?", "", "\u0001\u001E", "ASSISTANT: Two: the gateway and the one in the attic.", "", "\u0001\u001D", "", "## Preferences", "The NAS is at 192.0.2.20. (the owner said this)", "", "## Task", "Check the routers' wifi and mail the report to jan@example.org.", "\u0001\u001C", "", "", "Your previous reply was empty (stop reason: end_turn): no text and no tool call, so nothing was run.", "", "Continue from where the task stands." ]
+    }, {
+      "role" : "tools",
+      "authored" : false,
+      "marked" : false,
+      "images" : 0,
+      "content" : [ "openwrtWifiConfig", "openwrt_run" ]
+    }, {
+      "role" : "assistant",
+      "authored" : false,
+      "marked" : false,
+      "images" : 0,
+      "content" : [ "{\"tool\":\"find_tools\",\"params\":{\"query\":\"web page\"}}" ]
+    }, {
+      "role" : "user",
+      "authored" : false,
+      "marked" : false,
+      "images" : 0,
+      "content" : [ "[find_tools] OK (3ms)", "1 skill matches 'web page':", "- web_fetch: Fetch a web page and return its text." ]
+    }, {
+      "role" : "tools",
+      "authored" : false,
+      "marked" : false,
+      "images" : 0,
+      "content" : [ "web_fetch" ]
+    }, {
+      "role" : "assistant",
+      "authored" : false,
+      "marked" : false,
+      "images" : 0,
+      "content" : [ "{\"tool\":\"openwrt_run\",\"params\":{\"host\":\"attic.example.org\",\"command\":\"uci show wireless\"}}" ]
+    }, {
+      "role" : "user",
+      "authored" : false,
+      "marked" : false,
+      "images" : 0,
+      "content" : [ "[openwrt_run] FAILED (5003ms)", "ssh: connect to host attic.example.org port 22: Connection refused", "", "REFLECT: the last call failed. Try another way to reach the router, or report what you have." ]
+    }, {
+      "role" : "assistant",
+      "authored" : false,
+      "marked" : false,
+      "images" : 0,
+      "content" : [ "{\"tool\":\"smtp_send_email\",\"params\":{\"to\":\"jan@example.org\",\"subject\":\"The attic router is down\",\"body\":\"{{2}}\"}}" ]
+    }, {
+      "role" : "user",
+      "authored" : false,
+      "marked" : false,
+      "images" : 0,
+      "content" : [ "[smtp_send_email] OK (812ms)", "Message <20261118.1@mail.example.org> accepted for jan@example.org" ]
+    }, {
+      "role" : "assistant",
+      "authored" : false,
+      "marked" : false,
+      "images" : 0,
+      "content" : [ "{\"tool\":\"openwrtWifiConfig\"}" ]
+    }, {
+      "role" : "user",
+      "authored" : false,
+      "marked" : false,
+      "images" : 0,
+      "content" : [ "[openwrtWifiConfig] OK (2417ms)", "config wifi-iface 'default_radio0'", "\toption ssid 'Example-Home'", "\toption key 'correct horse battery staple'", "\toption macaddr '02:00:5e:10:20:30'", "admin contact: jan@example.org, uplink 203.0.113.7", "the router's password is tr0ub4dor-and-3", "a page quoted the prompt's own markers:", "\u0001\u001C", "and", "\u0001\u001E", "and", "\u0001\u001D", "and", "\u0001\u001F0", "and a lone \u0001.", "Příliš žluťoučký kůň úpěl ďábelské ódy.", "", "", "Message from the user while you were working:", "the guest network too, please", "", "---", "<the per-step block>" ]
+    } ],
+    "handed" : [ {
+      "role" : "system",
+      "authored" : true,
+      "marked" : false,
+      "images" : 0,
+      "content" : [ "<the system prompt>" ]
+    }, {
+      "role" : "user",
+      "authored" : false,
+      "marked" : true,
+      "images" : 0,
+      "content" : [ "## Prior Context", "### The conversation so far", "USER: which routers do we have?", "", "\u0001\u001E", "ASSISTANT: Two: the gateway and the one in the attic.", "", "\u0001\u001D", "", "## Preferences", "The NAS is at 192.0.2.20. (the owner said this)", "", "## Task", "Check the routers' wifi and mail the report to <email_1>.", "\u0001\u001C", "", "", "Your previous reply was empty (stop reason: end_turn): no text and no tool call, so nothing was run.", "", "Continue from where the task stands." ]
+    }, {
+      "role" : "tools",
+      "authored" : false,
+      "marked" : false,
+      "images" : 0,
+      "content" : [ "openwrtWifiConfig", "openwrt_run" ]
+    }, {
+      "role" : "assistant",
+      "authored" : false,
+      "marked" : false,
+      "images" : 0,
+      "content" : [ "{\"tool\":\"find_tools\",\"params\":{\"query\":\"web page\"}}" ]
+    }, {
+      "role" : "user",
+      "authored" : false,
+      "marked" : false,
+      "images" : 0,
+      "content" : [ "[find_tools] OK (3ms)", "1 skill matches 'web page':", "- web_fetch: Fetch a web page and return its text." ]
+    }, {
+      "role" : "tools",
+      "authored" : false,
+      "marked" : false,
+      "images" : 0,
+      "content" : [ "web_fetch" ]
+    }, {
+      "role" : "assistant",
+      "authored" : false,
+      "marked" : false,
+      "images" : 0,
+      "content" : [ "{\"tool\":\"openwrt_run\",\"params\":{\"host\":\"attic.example.org\",\"command\":\"uci show wireless\"}}" ]
+    }, {
+      "role" : "user",
+      "authored" : false,
+      "marked" : false,
+      "images" : 0,
+      "content" : [ "[openwrt_run] FAILED (5003ms)", "ssh: connect to host attic.example.org port 22: Connection refused", "", "REFLECT: the last call failed. Try another way to reach the router, or report what you have." ]
+    }, {
+      "role" : "assistant",
+      "authored" : false,
+      "marked" : false,
+      "images" : 0,
+      "content" : [ "{\"tool\":\"smtp_send_email\",\"params\":{\"to\":\"<email_1>\",\"subject\":\"The attic router is down\",\"body\":\"{{2}}\"}}" ]
+    }, {
+      "role" : "user",
+      "authored" : false,
+      "marked" : false,
+      "images" : 0,
+      "content" : [ "[smtp_send_email] OK (812ms)", "Message <<email_2>> accepted for <email_1>" ]
+    }, {
+      "role" : "assistant",
+      "authored" : false,
+      "marked" : false,
+      "images" : 0,
+      "content" : [ "{\"tool\":\"openwrtWifiConfig\"}" ]
+    }, {
+      "role" : "user",
+      "authored" : false,
+      "marked" : false,
+      "images" : 0,
+      "content" : [ "[openwrtWifiConfig] OK (2417ms)", "config wifi-iface 'default_radio0'", "\toption ssid '<ssid_1>'", "\toption key '«secret removed»'", "\toption macaddr '<mac_1>'", "admin contact: <email_1>, uplink 203.0.113.7", "the router's password is «vault:ROUTER_PASSWORD»", "a page quoted the prompt's own markers:", "\u0001\u001C", "and", "\u0001\u001E", "and", "\u0001\u001D", "and", "\u0001\u001F0", "and a lone \u0001.", "Příliš žluťoučký kůň úpěl ďábelské ódy.", "", "", "Message from the user while you were working:", "the guest network too, please", "", "---", "<the per-step block>" ]
+    } ],
+    "handedTools" : [ {
+      "name" : "respond",
+      "deferred" : false,
+      "authored" : true
+    }, {
+      "name" : "ask_user",
+      "deferred" : false,
+      "authored" : true
+    }, {
+      "name" : "skill_create",
+      "deferred" : false,
+      "authored" : true
+    }, {
+      "name" : "skill_manage",
+      "deferred" : false,
+      "authored" : true
+    }, {
+      "name" : "credential_manage",
+      "deferred" : false,
+      "authored" : true
+    }, {
+      "name" : "memory_manage",
+      "deferred" : false,
+      "authored" : true
+    }, {
+      "name" : "schedule_manage",
+      "deferred" : false,
+      "authored" : true
+    }, {
+      "name" : "delegate",
+      "deferred" : false,
+      "authored" : true
+    }, {
+      "name" : "read_result",
+      "deferred" : false,
+      "authored" : true
+    }, {
+      "name" : "find_tools",
+      "deferred" : false,
+      "authored" : true
+    }, {
+      "name" : "smtp_send_email",
+      "deferred" : false,
+      "authored" : false
+    }, {
+      "name" : "openwrt_run",
+      "deferred" : true,
+      "authored" : false
+    }, {
+      "name" : "openwrtWifiConfig",
+      "deferred" : true,
+      "authored" : false
+    }, {
+      "name" : "web_fetch",
+      "deferred" : true,
+      "authored" : false
+    } ],
+    "ledger" : {
+      "decision" : "SENT",
+      "purpose" : "think",
+      "tools" : 14,
+      "secretsRemoved" : 2,
+      "identifiersReplaced" : 7,
+      "parts" : [ {
+        "index" : 0,
+        "kind" : "system"
+      }, {
+        "index" : 1,
+        "kind" : "user",
+        "chars" : 413,
+        "sha256_16" : "49e600847d672da7"
+      }, {
+        "index" : 2,
+        "kind" : "tools",
+        "chars" : 29,
+        "sha256_16" : "526fe777399e1dd0"
+      }, {
+        "index" : 3,
+        "kind" : "assistant",
+        "chars" : 51,
+        "sha256_16" : "f365e23b1c370bee"
+      }, {
+        "index" : 4,
+        "kind" : "user",
+        "chars" : 100,
+        "sha256_16" : "bb7151b56aa8cffc"
+      }, {
+        "index" : 5,
+        "kind" : "tools",
+        "chars" : 9,
+        "sha256_16" : "3f2690ac7303c43f"
+      }, {
+        "index" : 6,
+        "kind" : "assistant",
+        "chars" : 90,
+        "sha256_16" : "7eb1deec4bdf1621"
+      }, {
+        "index" : 7,
+        "kind" : "user",
+        "chars" : 190,
+        "sha256_16" : "2d5f0f5f9d4d5067"
+      }, {
+        "index" : 8,
+        "kind" : "assistant",
+        "chars" : 106,
+        "sha256_16" : "10f29fb996ff8668"
+      }, {
+        "index" : 9,
+        "kind" : "user",
+        "chars" : 71,
+        "sha256_16" : "de6908d5068a0ca4"
+      }, {
+        "index" : 10,
+        "kind" : "assistant",
+        "chars" : 28,
+        "sha256_16" : "866755a04bfd1c1d"
+      }, {
+        "index" : 11,
+        "kind" : "user"
+      }, {
+        "index" : 12,
+        "kind" : "tool:respond"
+      }, {
+        "index" : 13,
+        "kind" : "schema:respond"
+      }, {
+        "index" : 14,
+        "kind" : "tool:ask_user"
+      }, {
+        "index" : 15,
+        "kind" : "schema:ask_user"
+      }, {
+        "index" : 16,
+        "kind" : "tool:skill_create"
+      }, {
+        "index" : 17,
+        "kind" : "schema:skill_create"
+      }, {
+        "index" : 18,
+        "kind" : "tool:skill_manage"
+      }, {
+        "index" : 19,
+        "kind" : "schema:skill_manage"
+      }, {
+        "index" : 20,
+        "kind" : "tool:credential_manage"
+      }, {
+        "index" : 21,
+        "kind" : "schema:credential_manage"
+      }, {
+        "index" : 22,
+        "kind" : "tool:memory_manage"
+      }, {
+        "index" : 23,
+        "kind" : "schema:memory_manage"
+      }, {
+        "index" : 24,
+        "kind" : "tool:schedule_manage"
+      }, {
+        "index" : 25,
+        "kind" : "schema:schedule_manage"
+      }, {
+        "index" : 26,
+        "kind" : "tool:delegate"
+      }, {
+        "index" : 27,
+        "kind" : "schema:delegate"
+      }, {
+        "index" : 28,
+        "kind" : "tool:read_result"
+      }, {
+        "index" : 29,
+        "kind" : "schema:read_result"
+      }, {
+        "index" : 30,
+        "kind" : "tool:find_tools"
+      }, {
+        "index" : 31,
+        "kind" : "schema:find_tools"
+      }, {
+        "index" : 32,
+        "kind" : "tool:smtp_send_email"
+      }, {
+        "index" : 33,
+        "kind" : "schema:smtp_send_email"
+      }, {
+        "index" : 34,
+        "kind" : "tool:openwrt_run"
+      }, {
+        "index" : 35,
+        "kind" : "schema:openwrt_run"
+      }, {
+        "index" : 36,
+        "kind" : "tool:openwrtWifiConfig"
+      }, {
+        "index" : 37,
+        "kind" : "schema:openwrtWifiConfig"
+      }, {
+        "index" : 38,
+        "kind" : "tool:web_fetch"
+      }, {
+        "index" : 39,
+        "kind" : "schema:web_fetch"
+      } ]
+    },
+    "read" : {
+      "system" : "<the system prompt>",
+      "tools" : [ {
+        "name" : "respond",
+        "deferred" : false
+      }, {
+        "name" : "ask_user",
+        "deferred" : false
+      }, {
+        "name" : "skill_create",
+        "deferred" : false
+      }, {
+        "name" : "skill_manage",
+        "deferred" : false
+      }, {
+        "name" : "credential_manage",
+        "deferred" : false
+      }, {
+        "name" : "memory_manage",
+        "deferred" : false
+      }, {
+        "name" : "schedule_manage",
+        "deferred" : false
+      }, {
+        "name" : "delegate",
+        "deferred" : false
+      }, {
+        "name" : "read_result",
+        "deferred" : false
+      }, {
+        "name" : "find_tools",
+        "deferred" : false
+      }, {
+        "name" : "smtp_send_email",
+        "deferred" : false
+      }, {
+        "name" : "openwrt_run",
+        "deferred" : true
+      }, {
+        "name" : "openwrtWifiConfig",
+        "deferred" : true
+      }, {
+        "name" : "web_fetch",
+        "deferred" : true
+      } ],
+      "messages" : [ {
+        "role" : "user",
+        "text" : [ "## Prior Context", "### The conversation so far", "USER: which routers do we have?", "ASSISTANT: Two: the gateway and the one in the attic.", "", "## Preferences", "The NAS is at 192.0.2.20. (the owner said this)", "", "## Task", "Check the routers' wifi and mail the report to <email_1>.", "", "Your previous reply was empty (stop reason: end_turn): no text and no tool call, so nothing was run.", "", "Continue from where the task stands." ]
+      }, {
+        "role" : "system",
+        "offers" : [ "openwrtWifiConfig", "openwrt_run" ]
+      }, {
+        "role" : "assistant",
+        "text" : [ "{\"tool\":\"find_tools\",\"params\":{\"query\":\"web page\"}}" ]
+      }, {
+        "role" : "user",
+        "text" : [ "[find_tools] OK (3ms)", "1 skill matches 'web page':", "- web_fetch: Fetch a web page and return its text." ]
+      }, {
+        "role" : "system",
+        "offers" : [ "web_fetch" ]
+      }, {
+        "role" : "assistant",
+        "text" : [ "{\"tool\":\"openwrt_run\",\"params\":{\"host\":\"attic.example.org\",\"command\":\"uci show wireless\"}}" ]
+      }, {
+        "role" : "user",
+        "text" : [ "[openwrt_run] FAILED (5003ms)", "ssh: connect to host attic.example.org port 22: Connection refused", "", "REFLECT: the last call failed. Try another way to reach the router, or report what you have." ]
+      }, {
+        "role" : "assistant",
+        "text" : [ "{\"tool\":\"smtp_send_email\",\"params\":{\"to\":\"<email_1>\",\"subject\":\"The attic router is down\",\"body\":\"{{2}}\"}}" ]
+      }, {
+        "role" : "user",
+        "text" : [ "[smtp_send_email] OK (812ms)", "Message <<email_2>> accepted for <email_1>" ]
+      }, {
+        "role" : "assistant",
+        "text" : [ "{\"tool\":\"openwrtWifiConfig\"}" ]
+      }, {
+        "role" : "user",
+        "text" : [ "[openwrtWifiConfig] OK (2417ms)", "config wifi-iface 'default_radio0'", "\toption ssid '<ssid_1>'", "\toption key '«secret removed»'", "\toption macaddr '<mac_1>'", "admin contact: <email_1>, uplink 203.0.113.7", "the router's password is «vault:ROUTER_PASSWORD»", "a page quoted the prompt's own markers:", "\u0001\u001C", "and", "\u0001\u001E", "and", "\u0001\u001D", "and", "\u0001\u001F0", "and a lone \u0001.", "Příliš žluťoučký kůň úpěl ďábelské ódy.", "", "", "Message from the user while you were working:", "the guest network too, please", "", "---", "<the per-step block>" ]
+      } ]
+    }
+  },
+  "openai" : {
+    "engine" : [ {
+      "role" : "system",
+      "authored" : true,
+      "marked" : false,
+      "images" : 0,
+      "content" : [ "<the system prompt>" ]
+    }, {
+      "role" : "user",
+      "authored" : false,
+      "marked" : false,
+      "images" : 0,
+      "content" : [ "## Prior Context", "### The conversation so far", "USER: which routers do we have?", "ASSISTANT: Two: the gateway and the one in the attic.", "", "## Preferences", "The NAS is at 192.0.2.20. (the owner said this)", "", "## Task", "Check the routers' wifi and mail the report to jan@example.org." ]
+    }, {
+      "role" : "tools",
+      "authored" : false,
+      "marked" : false,
+      "images" : 0,
+      "content" : [ "openwrtWifiConfig", "openwrt_run" ]
+    }, {
+      "role" : "tools",
+      "authored" : false,
+      "marked" : false,
+      "images" : 0,
+      "content" : [ "web_fetch" ]
+    }, {
+      "role" : "user",
+      "authored" : false,
+      "marked" : false,
+      "images" : 0,
+      "content" : [ "## History", "[Step 1] Your previous reply was empty (stop reason: end_turn): no text and no tool call, so nothing was run.", "", "Continue from where the task stands.", "", "[Step 2] {\"tool\":\"find_tools\",\"params\":{\"query\":\"web page\"}}", "[find_tools] OK (3ms)", "1 skill matches 'web page':", "- web_fetch: Fetch a web page and return its text.", "", "[Step 3] {\"tool\":\"openwrt_run\",\"params\":{\"host\":\"attic.example.org\",\"command\":\"uci show wireless\"}}", "[openwrt_run] FAILED (5003ms)", "ssh: connect to host attic.example.org port 22: Connection refused", "", "[Step 4] REFLECT: the last call failed. Try another way to reach the router, or report what you have.", "", "[Step 5] {\"tool\":\"smtp_send_email\",\"params\":{\"to\":\"jan@example.org\",\"subject\":\"The attic router is down\",\"body\":\"{{2}}\"}}", "[smtp_send_email] OK (812ms)", "Message <20261118.1@mail.example.org> accepted for jan@example.org", "", "[Step 6] {\"tool\":\"openwrtWifiConfig\"}", "[openwrtWifiConfig] OK (2417ms)", "config wifi-iface 'default_radio0'", "\toption ssid 'Example-Home'", "\toption key 'correct horse battery staple'", "\toption macaddr '02:00:5e:10:20:30'", "admin contact: jan@example.org, uplink 203.0.113.7", "the router's password is tr0ub4dor-and-3", "a page quoted the prompt's own markers:", "\u0001\u001C", "and", "\u0001\u001E", "and", "\u0001\u001D", "and", "\u0001\u001F0", "and a lone \u0001.", "Příliš žluťoučký kůň úpěl ďábelské ódy.", "", "", "[Step 7] Message from the user while you were working:", "the guest network too, please", "", "", "", "---", "<the per-step block>" ]
+    } ],
+    "ledger" : {
+      "decision" : "SENT",
+      "purpose" : "think",
+      "tools" : 14,
+      "secretsRemoved" : 2,
+      "identifiersReplaced" : 7,
+      "parts" : [ {
+        "index" : 0,
+        "kind" : "system"
+      }, {
+        "index" : 1,
+        "kind" : "user",
+        "chars" : 261,
+        "sha256_16" : "073201eb73828103"
+      }, {
+        "index" : 2,
+        "kind" : "tools",
+        "chars" : 29,
+        "sha256_16" : "526fe777399e1dd0"
+      }, {
+        "index" : 3,
+        "kind" : "tools",
+        "chars" : 9,
+        "sha256_16" : "3f2690ac7303c43f"
+      }, {
+        "index" : 4,
+        "kind" : "user"
+      }, {
+        "index" : 5,
+        "kind" : "tool:respond"
+      }, {
+        "index" : 6,
+        "kind" : "schema:respond"
+      }, {
+        "index" : 7,
+        "kind" : "tool:ask_user"
+      }, {
+        "index" : 8,
+        "kind" : "schema:ask_user"
+      }, {
+        "index" : 9,
+        "kind" : "tool:skill_create"
+      }, {
+        "index" : 10,
+        "kind" : "schema:skill_create"
+      }, {
+        "index" : 11,
+        "kind" : "tool:skill_manage"
+      }, {
+        "index" : 12,
+        "kind" : "schema:skill_manage"
+      }, {
+        "index" : 13,
+        "kind" : "tool:credential_manage"
+      }, {
+        "index" : 14,
+        "kind" : "schema:credential_manage"
+      }, {
+        "index" : 15,
+        "kind" : "tool:memory_manage"
+      }, {
+        "index" : 16,
+        "kind" : "schema:memory_manage"
+      }, {
+        "index" : 17,
+        "kind" : "tool:schedule_manage"
+      }, {
+        "index" : 18,
+        "kind" : "schema:schedule_manage"
+      }, {
+        "index" : 19,
+        "kind" : "tool:delegate"
+      }, {
+        "index" : 20,
+        "kind" : "schema:delegate"
+      }, {
+        "index" : 21,
+        "kind" : "tool:read_result"
+      }, {
+        "index" : 22,
+        "kind" : "schema:read_result"
+      }, {
+        "index" : 23,
+        "kind" : "tool:find_tools"
+      }, {
+        "index" : 24,
+        "kind" : "schema:find_tools"
+      }, {
+        "index" : 25,
+        "kind" : "tool:smtp_send_email"
+      }, {
+        "index" : 26,
+        "kind" : "schema:smtp_send_email"
+      }, {
+        "index" : 27,
+        "kind" : "tool:openwrt_run"
+      }, {
+        "index" : 28,
+        "kind" : "schema:openwrt_run"
+      }, {
+        "index" : 29,
+        "kind" : "tool:openwrtWifiConfig"
+      }, {
+        "index" : 30,
+        "kind" : "schema:openwrtWifiConfig"
+      }, {
+        "index" : 31,
+        "kind" : "tool:web_fetch"
+      }, {
+        "index" : 32,
+        "kind" : "schema:web_fetch"
+      } ]
+    },
+    "body" : {
+      "model" : "gpt-5",
+      "stream" : true,
+      "stream_options" : {
+        "include_usage" : true
+      },
+      "messages" : [ {
+        "role" : "system",
+        "content" : "<the system prompt>"
+      }, {
+        "role" : "user",
+        "content" : {
+          "lines" : [ "## Prior Context", "### The conversation so far", "USER: which routers do we have?", "ASSISTANT: Two: the gateway and the one in the attic.", "", "## Preferences", "The NAS is at 192.0.2.20. (the owner said this)", "", "## Task", "Check the routers' wifi and mail the report to <email_1>." ]
+        }
+      }, {
+        "role" : "user",
+        "content" : {
+          "lines" : [ "## History", "[Step 1] Your previous reply was empty (stop reason: end_turn): no text and no tool call, so nothing was run.", "", "Continue from where the task stands.", "", "[Step 2] {\"tool\":\"find_tools\",\"params\":{\"query\":\"web page\"}}", "[find_tools] OK (3ms)", "1 skill matches 'web page':", "- web_fetch: Fetch a web page and return its text.", "", "[Step 3] {\"tool\":\"openwrt_run\",\"params\":{\"host\":\"attic.example.org\",\"command\":\"uci show wireless\"}}", "[openwrt_run] FAILED (5003ms)", "ssh: connect to host attic.example.org port 22: Connection refused", "", "[Step 4] REFLECT: the last call failed. Try another way to reach the router, or report what you have.", "", "[Step 5] {\"tool\":\"smtp_send_email\",\"params\":{\"to\":\"<email_1>\",\"subject\":\"The attic router is down\",\"body\":\"{{2}}\"}}", "[smtp_send_email] OK (812ms)", "Message <<email_2>> accepted for <email_1>", "", "[Step 6] {\"tool\":\"openwrtWifiConfig\"}", "[openwrtWifiConfig] OK (2417ms)", "config wifi-iface 'default_radio0'", "\toption ssid '<ssid_1>'", "\toption key '«secret removed»'", "\toption macaddr '<mac_1>'", "admin contact: <email_1>, uplink 203.0.113.7", "the router's password is «vault:ROUTER_PASSWORD»", "a page quoted the prompt's own markers:", "\u0001\u001C", "and", "\u0001\u001E", "and", "\u0001\u001D", "and", "\u0001\u001F0", "and a lone \u0001.", "Příliš žluťoučký kůň úpěl ďábelské ódy.", "", "", "[Step 7] Message from the user while you were working:", "the guest network too, please", "", "", "", "---", "<the per-step block>" ]
+        }
+      } ],
+      "tools" : [ "respond", "ask_user", "skill_create", "skill_manage", "credential_manage", "memory_manage", "schedule_manage", "delegate", "read_result", "find_tools", "smtp_send_email", "openwrtWifiConfig", "openwrt_run", "web_fetch" ],
+      "parallel_tool_calls" : false
+    }
+  },
+  "ollama" : {
+    "engine" : [ {
+      "role" : "system",
+      "authored" : true,
+      "marked" : false,
+      "images" : 0,
+      "content" : [ "<the system prompt>" ]
+    }, {
+      "role" : "user",
+      "authored" : false,
+      "marked" : false,
+      "images" : 0,
+      "content" : [ "## Prior Context", "### The conversation so far", "USER: which routers do we have?", "ASSISTANT: Two: the gateway and the one in the attic.", "", "## Preferences", "The NAS is at 192.0.2.20. (the owner said this)", "", "## Task", "Check the routers' wifi and mail the report to jan@example.org." ]
+    }, {
+      "role" : "tools",
+      "authored" : false,
+      "marked" : false,
+      "images" : 0,
+      "content" : [ "openwrtWifiConfig", "openwrt_run" ]
+    }, {
+      "role" : "tools",
+      "authored" : false,
+      "marked" : false,
+      "images" : 0,
+      "content" : [ "web_fetch" ]
+    }, {
+      "role" : "user",
+      "authored" : false,
+      "marked" : false,
+      "images" : 0,
+      "content" : [ "## History", "[Step 1] Your previous reply was empty (stop reason: end_turn): no text and no tool call, so nothing was run.", "", "Continue from where the task stands.", "", "[Step 2] {\"tool\":\"find_tools\",\"params\":{\"query\":\"web page\"}}", "[find_tools] OK (3ms)", "1 skill matches 'web page':", "- web_fetch: Fetch a web page and return its text.", "", "[Step 3] {\"tool\":\"openwrt_run\",\"params\":{\"host\":\"attic.example.org\",\"command\":\"uci show wireless\"}}", "[openwrt_run] FAILED (5003ms)", "ssh: connect to host attic.example.org port 22: Connection refused", "", "[Step 4] REFLECT: the last call failed. Try another way to reach the router, or report what you have.", "", "[Step 5] {\"tool\":\"smtp_send_email\",\"params\":{\"to\":\"jan@example.org\",\"subject\":\"The attic router is down\",\"body\":\"{{2}}\"}}", "[smtp_send_email] OK (812ms)", "Message <20261118.1@mail.example.org> accepted for jan@example.org", "", "[Step 6] {\"tool\":\"openwrtWifiConfig\"}", "[openwrtWifiConfig] OK (2417ms)", "config wifi-iface 'default_radio0'", "\toption ssid 'Example-Home'", "\toption key 'correct horse battery staple'", "\toption macaddr '02:00:5e:10:20:30'", "admin contact: jan@example.org, uplink 203.0.113.7", "the router's password is tr0ub4dor-and-3", "a page quoted the prompt's own markers:", "\u0001\u001C", "and", "\u0001\u001E", "and", "\u0001\u001D", "and", "\u0001\u001F0", "and a lone \u0001.", "Příliš žluťoučký kůň úpěl ďábelské ódy.", "", "", "[Step 7] Message from the user while you were working:", "the guest network too, please", "", "", "", "---", "<the per-step block>" ]
+    } ],
+    "body" : {
+      "model" : "local-model:q4",
+      "keep_alive" : -1,
+      "options" : {
+        "temperature" : 1.0,
+        "top_p" : 0.95,
+        "top_k" : 20,
+        "min_p" : 0.0,
+        "presence_penalty" : 1.5,
+        "num_ctx" : 262144
+      },
+      "tools" : [ "respond", "ask_user", "skill_create", "skill_manage", "credential_manage", "memory_manage", "schedule_manage", "delegate", "read_result", "find_tools", "smtp_send_email", "openwrtWifiConfig", "openwrt_run", "web_fetch" ],
+      "messages" : [ {
+        "role" : "system",
+        "content" : "<the system prompt>"
+      }, {
+        "role" : "user",
+        "content" : {
+          "lines" : [ "## Prior Context", "### The conversation so far", "USER: which routers do we have?", "ASSISTANT: Two: the gateway and the one in the attic.", "", "## Preferences", "The NAS is at 192.0.2.20. (the owner said this)", "", "## Task", "Check the routers' wifi and mail the report to jan@example.org." ]
+        }
+      }, {
+        "role" : "user",
+        "content" : {
+          "lines" : [ "## History", "[Step 1] Your previous reply was empty (stop reason: end_turn): no text and no tool call, so nothing was run.", "", "Continue from where the task stands.", "", "[Step 2] {\"tool\":\"find_tools\",\"params\":{\"query\":\"web page\"}}", "[find_tools] OK (3ms)", "1 skill matches 'web page':", "- web_fetch: Fetch a web page and return its text.", "", "[Step 3] {\"tool\":\"openwrt_run\",\"params\":{\"host\":\"attic.example.org\",\"command\":\"uci show wireless\"}}", "[openwrt_run] FAILED (5003ms)", "ssh: connect to host attic.example.org port 22: Connection refused", "", "[Step 4] REFLECT: the last call failed. Try another way to reach the router, or report what you have.", "", "[Step 5] {\"tool\":\"smtp_send_email\",\"params\":{\"to\":\"jan@example.org\",\"subject\":\"The attic router is down\",\"body\":\"{{2}}\"}}", "[smtp_send_email] OK (812ms)", "Message <20261118.1@mail.example.org> accepted for jan@example.org", "", "[Step 6] {\"tool\":\"openwrtWifiConfig\"}", "[openwrtWifiConfig] OK (2417ms)", "config wifi-iface 'default_radio0'", "\toption ssid 'Example-Home'", "\toption key 'correct horse battery staple'", "\toption macaddr '02:00:5e:10:20:30'", "admin contact: jan@example.org, uplink 203.0.113.7", "the router's password is tr0ub4dor-and-3", "a page quoted the prompt's own markers:", "\u0001\u001C", "and", "\u0001\u001E", "and", "\u0001\u001D", "and", "\u0001\u001F0", "and a lone \u0001.", "Příliš žluťoučký kůň úpěl ďábelské ódy.", "", "", "[Step 7] Message from the user while you were working:", "the guest network too, please", "", "", "", "---", "<the per-step block>" ]
+        }
+      } ],
+      "stream" : true,
+      "truncate" : false,
+      "shift" : false
+    }
+  }
+}

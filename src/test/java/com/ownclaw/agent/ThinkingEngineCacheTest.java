@@ -36,8 +36,17 @@ class ThinkingEngineCacheTest {
         List<LlmMessage> step1 = engine.buildMessages(ctx, "anthropic", mode);
         assertEquals(first0.substring(0, cut) + ThinkingEngine.CACHE_BOUNDARY_MARKER, step1.get(1).content(),
                 "the cached prefix of step 0 is exactly step 1's first message, marked again as the stable prefix");
-        assertFalse(step1.get(step1.size() - 1).content().contains(ThinkingEngine.CACHE_BOUNDARY_MARKER),
-                "the newest message is no prefix of anything");
+        // The newest message was no prefix of anything, and its result was paid in full: now it
+        // names its result as the beginning that lasts -- named, not marked in the text.
+        LlmMessage newest = step1.get(step1.size() - 1);
+        assertFalse(newest.content().contains("\u0001") || newest.marked(), "no marker in it, and not the engine's marked one");
+        assertEquals("[delegate] OK (5ms)\ndone", newest.lasting(), "the result is the beginning that lasts");
+        assertTrue(newest.content().substring(newest.lasting().length()).startsWith("\n\n---\n## Environment"),
+                "what changes on every step follows it: " + newest.content());
+        assertTrue(step1.subList(0, step1.size() - 1).stream().allMatch(m -> m.lasting() == null),
+                "only the newest: every other message is all of what it will be");
+        assertTrue(engine.buildMessages(ctx, "openai", mode).stream().allMatch(m -> m.lasting() == null),
+                "and only for Anthropic, whose provider caches by it");
     }
 
     @Test
@@ -119,7 +128,24 @@ class ThinkingEngineCacheTest {
             }
             assertTrue(sent(after.get(newest)).startsWith(withoutTheStepsContext(before.get(newest))),
                     "step " + k + " rewrote the newest message instead of adding to it");
+            // The beginning the newest message named is what the provider cached of it.
+            String named = before.get(newest).lasting();
+            if (newest > 1) {
+                assertEquals(withoutTheStepsContext(before.get(newest)), named,
+                        "before step " + k + " the newest message named all of it but the step's context");
+            }
+            if (named != null && after.size() > before.size()) {
+                assertEquals(named, after.get(newest).content(),
+                        "after step " + k + ", one of the model's, that beginning is the whole message");
+                assertNull(after.get(newest).lasting());
+            } else if (named != null) {
+                assertTrue(after.get(newest).lasting().startsWith(named) && after.get(newest).lasting().length() > named.length(),
+                        "step " + k + ", one of the loop's own, joined the newest message: its beginning is longer");
+            }
             before = after;
         }
+        // Mutation: name the result without what the loop said after it -> a message that holds
+        // such a step is not the beginning it named. Name the per-step block too -> the beginning
+        // is other bytes on the next step, and nothing reads what was cached under it.
     }
 }

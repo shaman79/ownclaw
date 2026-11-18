@@ -730,6 +730,51 @@ public class AgentContext {
     }
 
     /**
+     * How far apart two cloud think requests of a task may be sent for the second still to find
+     * what the first cached for five minutes: the five minutes Anthropic keeps such an entry,
+     * counted from the start of the request that wrote or last read it, less half a minute. The
+     * half minute is what a request can start later at the API than it is counted here
+     * ({@link #cloudThinkSent}), when the one before it did not: the gateway reading a long
+     * conversation, the lookup of the model's limits on a process's first request (ten seconds at
+     * most), connecting (fifteen at most). A wait for a rate limit is not in it, and cannot be:
+     * a request held back that long finds the entry gone, and the one after it is counted far
+     * apart. What the margin costs is the dearer write from steps four and a half minutes apart
+     * instead of five.
+     */
+    static final long FIVE_MINUTE_CACHE_HOLDS_MS = 5 * 60_000L - 30_000L;
+
+    /** When this task's last think request to the cloud was sent, or null before its first. */
+    private Long cloudThinkSentMs;
+    /** See {@link #stepsFarApart}. */
+    private boolean stepsFarApart;
+
+    /**
+     * A think request of this task is being sent to the cloud model, at {@code nowMs}
+     * ({@code ThinkingEngine}): whether the steps it holds are to be cached for an hour
+     * ({@link #stepsFarApart}) -- from the first request sent more than
+     * {@link #FIVE_MINUTE_CACHE_HOLDS_MS} after the one before it. Think requests only: the
+     * requests that write a skill's code between two of them are another conversation, and read
+     * nothing of this one, so they renew nothing of it.
+     */
+    public synchronized boolean cloudThinkSent(long nowMs) {
+        if (cloudThinkSentMs != null && nowMs - cloudThinkSentMs > FIVE_MINUTE_CACHE_HOLDS_MS) stepsFarApart = true;
+        cloudThinkSentMs = nowMs;
+        return stepsFarApart;
+    }
+
+    /**
+     * Whether two think requests of this task to the cloud have been further apart than a
+     * five-minute cache entry lives, and for the rest of the task: a delegation, a long skill, a
+     * reply written for minutes. The steps cached for five minutes had then expired, and the
+     * request after each such step wrote all of them to the cache again -- $3.42 of one $12.85
+     * chat, in five rewrites. A task that has had one such step is taken to have another: its
+     * steps are cached for an hour from there on ({@code AnthropicProvider#requestBody}).
+     */
+    public synchronized boolean stepsFarApart() {
+        return stepsFarApart;
+    }
+
+    /**
      * The credential key prefixes that mark a personal-content source
      * ({@code ownclaw.privacy.personal-sources}), set from the configuration at task start.
      */

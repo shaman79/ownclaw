@@ -112,8 +112,12 @@ class CachedPrefixTest {
             var expected = new ArrayList<>(List.of("/system/0 1h", "/messages/0/content/0 1h"));
             int newest = newestUserTurn(body);
             if (newest > 0) {
-                assertEquals("assistant", body.path("messages").get(newest - 1).path("role").asText());
-                expected.add("/messages/" + (newest - 1) + "/content/0 5m");
+                // On the newest result, the first block of the newest user turn: it stood on the
+                // model's call before it, and the result was paid in full, then written.
+                expected.add("/messages/" + newest + "/content/0 5m");
+                JsonNode blocks = body.path("messages").get(newest).path("content");
+                assertEquals(2, blocks.size(), "the result, then what changes on every step: " + blocks);
+                assertTrue(blocks.get(1).path("text").asText().startsWith("\n\n---\n## Environment"), blocks.toString());
             }
             assertEquals(expected, marks(body, ""), "request " + (i + 1));
         }
@@ -121,11 +125,22 @@ class CachedPrefixTest {
         // ── the conversation only grows: what one request cached, the next sends again ──
         for (int i = 0; i + 1 < sent.size(); i++) {
             JsonNode before = sent.get(i).path("messages"), after = sent.get(i + 1).path("messages");
-            for (int m = 0; m < newestUserTurn(sent.get(i)); m++) {
+            int newest = newestUserTurn(sent.get(i));
+            for (int m = 0; m < newest; m++) {
                 assertEquals(unmarked(before.get(m)), unmarked(after.get(m)),
                         "request " + (i + 2) + " rewrote message " + m + " of the conversation request " + (i + 1) + " cached");
             }
+            if (newest == 0) continue;
+            // And the newest result, the block the request marked: the whole of that message in
+            // the next request -- or, when the step was declined and asked again, its first block.
+            String cached = before.get(newest).path("content").get(0).path("text").asText();
+            JsonNode again = after.get(newest).path("content");
+            assertEquals(cached, again.isTextual() ? again.asText() : again.get(0).path("text").asText(),
+                    "request " + (i + 2) + " does not send the result request " + (i + 1) + " cached as it was cached");
+            assertEquals(newestUserTurn(sent.get(i + 1)) > newest, again.isTextual(),
+                    "as one text once another step follows it; the same two blocks when the step is asked again");
         }
+        assertEquals(newestUserTurn(sent.get(3)), newestUserTurn(sent.get(4)), "the premise: request 5 asks request 4's step again");
 
         // ── what changed went at the end ──
         for (JsonNode body : sent.subList(0, 2)) {
@@ -147,7 +162,9 @@ class CachedPrefixTest {
         // Mutation: the valve hands the registry back as tools of their own -> the tools differ
         // from request 3 on. The quiet retry's instruction in the system prompt -> the system
         // block differs at request 5. An addition placed where it was made -> request 3 inserts
-        // a message request 2 cached.
+        // a message request 2 cached. The mark on the message before the newest user turn again
+        // -> every request's third mark is on an assistant turn, and the declined step's result
+        // is sent in full a second time.
     }
 
     /** The tools sent that are not deferred: the part of the array in the cached prefix. */
