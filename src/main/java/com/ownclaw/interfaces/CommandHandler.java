@@ -192,6 +192,9 @@ public class CommandHandler {
                 if (command.equals("/revoke") || command.startsWith("/revoke ")) {
                     yield Optional.of(handleRevoke(userId, message.trim().substring(7).strip()));
                 }
+                if (command.equals("/repair") || command.startsWith("/repair ")) {
+                    yield Optional.of(handleRepair(userId, message.trim().substring(7).strip()));
+                }
                 if (command.startsWith("/cred ")) {
                     yield Optional.of(handleCred(userId, message.trim().substring(6).strip()));
                 }
@@ -699,6 +702,7 @@ public class CommandHandler {
                 - `/grant <skill> [KEY ...]` — Let a skill read credentials of yours: the ones named, or every one it declares. A skill reads none it was not granted
                 - `/revoke <skill> [KEY ...]` — Take that back: the ones named, or all of them
                 - `/grants` — What each skill may read, and which skills wait for a grant
+                - `/repair <skill>` — Have self-repair try again for a skill it left to you: the next time unattended work shows a problem with it, a repair starts
                 - `/cred set <KEY> <VALUE>` — Store a credential
                 - `/cred list` — List stored credential keys
                 - `/cred delete <KEY>` — Delete a credential
@@ -1271,6 +1275,35 @@ public class CommandHandler {
             return "'" + skill + "' had been granted " + (keys.isEmpty() ? "nothing." : "none of those.");
         }
         return "\u274c '" + skill + "' may no longer read: " + String.join(", ", revoked) + ".";
+    }
+
+    // ── Self-repair ──
+
+    /** What repairs a skill unattended work shows did not do its whole job; null where there is none (a test's handler). */
+    private com.ownclaw.agent.SkillSelfRepair selfRepair;
+
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    public void setSelfRepair(com.ownclaw.agent.SkillSelfRepair selfRepair) {
+        this.selfRepair = selfRepair;
+    }
+
+    private static final String REPAIR_USAGE = "Usage: `/repair <skill>` — for a skill self-repair left to you: "
+            + "the next time unattended work shows a problem with it, a repair starts again.";
+
+    /**
+     * {@code /repair <skill>}: its user has self-repair try again for a skill it left to them
+     * ({@code SkillSelfRepair#tryAgain}). After a repair that ended without a fix it had checked,
+     * the skill's next problems start none until a run of it goes well -- and until this command
+     * there was nothing its user could do about that but wait: the texts that leave a skill to
+     * them name it and offer it to click. Their own records only, and it starts nothing itself.
+     */
+    private String handleRepair(String userId, String args) {
+        String[] parts = args.isEmpty() ? new String[0] : args.split("\\s+");
+        if (parts.length != 1) return REPAIR_USAGE;
+        if (selfRepair == null) return "Self-repair is not available here.";
+        var named = toolRegistry.find(parts[0]).or(() -> toolRegistry.find(parts[0].toLowerCase(Locale.ROOT)));
+        if (named.isEmpty()) return "Skill not found: " + parts[0];
+        return selfRepair.tryAgain(userId, named.get().name());
     }
 
     /** {@code /grants}: what each skill may read of this user's vault, and which skills wait for a grant. */

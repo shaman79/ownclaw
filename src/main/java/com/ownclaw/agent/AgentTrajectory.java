@@ -37,15 +37,21 @@ public class AgentTrajectory {
         }
 
         /**
-         * The step's action as the model wrote it: its reasoning, the tool, and the arguments as
-         * written -- a reference as {{N}}, never the bytes it resolves to -- as JSON. One
-         * rendering for both renderers: the Anthropic replay's assistant turn, and the history
-         * every other provider reads, which named only the tool, so a model there could not tell
-         * whom it had written to or which page it had fetched.
+         * The step's action as the model wrote it: the tool, and the arguments as written -- a
+         * reference as {{N}}, never the bytes it resolves to -- as JSON, with or without the words
+         * it wrote beside the call. One rendering for both renderers: the Anthropic replay's
+         * assistant turn, and the history every other provider reads, which named only the tool,
+         * so a model there could not tell whom it had written to or which page it had fetched.
          *
-         * @param withReasoning false once the provider has declined a step of the task as
-         *                      reasoning extraction ({@link AgentContext#declinedAsReasoning}): the
-         *                      words the model wrote beside its earlier calls are not shown to it again
+         * @param withReasoning whether the words the model wrote beside the call are among it,
+         *                      under "reasoning". Never in the replay to Anthropic: its classifier
+         *                      declines a request that elicits the model's reasoning in the reply
+         *                      (reasoning extraction), and the model's own earlier words, replayed
+         *                      under that key, were what set it off -- 7 of 50 cloud calls from 14
+         *                      to 18 Nov 2026, each billed, in every self-repair right after it
+         *                      read a skill's source. The words stay in the trajectory, for the
+         *                      owner's chat and the task page, and the history every other
+         *                      provider reads -- the local model's, of its own steps -- has them
          */
         public String actionText(boolean withReasoning) {
             Map<String, Object> map = new LinkedHashMap<>();
@@ -159,7 +165,8 @@ public class AgentTrajectory {
      * then the result as {@link Turn#observationText} renders it. A step the loop took itself
      * ({@link Turn#byTheLoop}) is what the model was told about it.
      *
-     * @param withReasoning as {@link Turn#actionText}
+     * @param withReasoning as {@link Turn#actionText}: the words beside each call, which this
+     *                      history has
      */
     public String toPromptSummary(boolean withReasoning) {
         return toPromptSummary(withReasoning, (i, turn) -> turn.observationText());

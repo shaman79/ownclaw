@@ -60,13 +60,19 @@ import java.util.function.BiPredicate;
  *       other judged way -- changed nothing, could not check its change, or checked it and still saw
  *       the problem -- the problem again starts none: the owner is told once, and it is left to him
  *       until a run of the skill goes well (a completed run whose model reported nothing of it) --
- *       he can have it fixed in a chat. A change of the skill by a later task does not, by itself,
- *       start a repair again. A repair that did not finish -- stopped, cut short, interrupted, never
- *       started -- is no verdict. No count of attempts ends anything.</li>
+ *       he can have it fixed in a chat -- or until he sends {@code /repair <skill>}
+ *       ({@link #tryAgain}), which every text that leaves a skill to him names and offers to click.
+ *       A change of the skill by a later task does not, by itself, start a repair again. A repair
+ *       that did not finish -- stopped, cut short, interrupted, never started -- is no verdict. No
+ *       count of attempts ends anything.</li>
  *   <li>How it ended ({@link #finish}), by code: the code's hash before and after, whether the
  *       skill was run after its last change, and whether that run worked and the repair's own
  *       answer named no problem with it. The owner is told through the channels unattended
  *       results use ({@link ResultDelivery}): the chat of scheduled results, and Telegram.</li>
+ *   <li>What an answer owes ({@link #owed}): {@code problems} and a repair's {@code check} are
+ *       parameters of respond, and a model can end its turn in prose, which carries neither. An
+ *       answer that does not say what code is about to read is kept, and the model asked for it,
+ *       once.</li>
  * </ul>
  * Never for a chat, whose owner is there to ask for a fix; nor an ops run; nor a repair's own
  * problems, which are its verdict, not a reason for another. Switched off by
@@ -371,20 +377,125 @@ public class SkillSelfRepair {
                 finish(ctx, ended);
                 return ended;
             }
-            if (!enabled() || !ctx.isUnattended() || ctx.isOps()) return ended;
+            if (!readsProblems(ctx)) return ended;
             Map<String, Found> found = found(ctx, ended, this::isOwnSkill);
             if (ended.terminationReason() == TerminationReason.COMPLETED) cleared(ctx, found);
             if (found.isEmpty()) return ended;
             var lines = new ArrayList<String>();
-            for (Found f : found.values()) lines.add(take(ctx, f));
+            // The command a line names for a skill left to the owner, offered to click as the ending's
+            // other commands are (AgentLoop#grantsAsked): written here, by code, never by a model.
+            var offered = new ArrayList<>(ended.choices());
+            for (Found f : found.values()) lines.add(take(ctx, f, offered));
             String said = "\n\n" + String.join("\n\n", lines);
             return new AgentResult(ended.success(), ended.response() + said, ended.trajectory(), ended.totalSteps(),
                     ended.totalDurationMs(), ended.terminationReason(), ended.taskId(),
-                    ended.ownerText() == null ? null : ended.ownerText() + said, ended.choices(), ended.localOnly());
+                    ended.ownerText() == null ? null : ended.ownerText() + said, offered, ended.localOnly());
         } catch (RuntimeException e) {
             log.error("Self-repair after task {} failed: {}", ctx.taskId(), e.getMessage(), e);
             return ended;
         }
+    }
+
+    /**
+     * Whether what this task's answer says in {@code problems} is read when it ends: unattended
+     * work, self-repair on, not an ops run (whose problems start no repair) and not a repair (whose
+     * answer says how its check went instead) -- where the answer is offered the parameter
+     * ({@code ThinkingEngine#reportsProblems}).
+     */
+    private boolean readsProblems(AgentContext ctx) {
+        return enabled() && ctx.isUnattended() && !ctx.isOps() && ctx.repair() == null;
+    }
+
+    // ───────────────────────── what an answer owes ─────────────────────────
+
+    /**
+     * What an answer of this task owes before it ends the task, as the model is told it, or null
+     * when it owes nothing. What ends a task is read by code -- {@link #found} reads
+     * {@code problems}, {@link #checked} reads {@code check} -- and both are parameters of respond,
+     * which a model offered tools natively need not call: it may end its turn in prose, read as
+     * an answer with a message and nothing else. From 14 to 18 Nov 2026 three of four repairs that
+     * completed ended so and were recorded unverified. One had fixed its skill and said "the check
+     * run confirmed it": the owner was told "Changed, but not checked", and the skill's next two
+     * problems, other ones, were left to him. Another had said its check failed, and was no
+     * {@code not_fixed}. So an answer that does not say what code is about to read is not the
+     * ending yet: the loop keeps it and asks, once ({@code AgentLoop}).
+     * <ul>
+     *   <li>A repair, however it answered -- in prose or by a respond with no usable
+     *       {@code check}: where its check is read at all ({@link #awaitsCheck}). Where code
+     *       decides alone -- it changed nothing, never ran the skill after its change, or that run
+     *       failed -- nothing is asked: the answer could change no outcome, and the question would
+     *       be a billed call for nothing.</li>
+     *   <li>Unattended work whose problems are read ({@link #readsProblems}), when it answered in
+     *       prose and a skill of the account's own ran in the task -- a problem can be named of
+     *       nothing else ({@link #found}). A respond call that lists no problems says there are
+     *       none, as it always did.</li>
+     * </ul>
+     * Never a chat, whose owner reads the answer himself. Nothing here may break a task's ending
+     * either: what fails is logged, and the answer ends the task as it is.
+     *
+     * @param prose the answer came without a respond call ({@link ThinkResult#inProse})
+     */
+    public String owed(AgentContext ctx, AgentAction answer, boolean prose) {
+        try {
+            return owes(ctx, answer, prose);
+        } catch (RuntimeException e) {
+            log.error("Task {}: could not tell what its answer owes, so it is asked nothing: {}", ctx.taskId(),
+                    e.getMessage(), e);
+            return null;
+        }
+    }
+
+    private String owes(AgentContext ctx, AgentAction answer, boolean prose) {
+        Job job = ctx.repair();
+        if (job != null) {
+            if (usableCheck(answer.params().get(CHECK)) != null
+                    || !awaitsCheck(ctx, tools.find(job.skill()).orElse(null))) {
+                return null;
+            }
+            return "this answer does not say how the check of your change went, and code cannot tell: '"
+                    + job.skill() + "' ran after your last change and reported success, which a run that leaves "
+                    + "part of its job undone does too. Call respond with 'check' set to 'passed' -- run after "
+                    + "your last change, it did its whole job -- 'failed' -- it still did not -- or 'not_run'. " + KEPT;
+        }
+        if (!prose || !readsProblems(ctx) || !ranOwnSkill(ctx)) return null;
+        return "you answered in text, without calling respond, so the answer could not say which tools did not "
+                + "do their whole job. Call respond with '" + PROBLEMS + "': an entry -- 'tool' its exact name, "
+                + "'what' one sentence -- for every tool that ran in this task but did not do its whole job (a part "
+                + "missing, a fallback taken, a warning or an error in its output, data stale or wrong, even when it "
+                + "reported success), or an empty list when every tool did. Each skill listed is repaired after "
+                + "this task. " + KEPT;
+    }
+
+    /** What the question says of the answer already given: it need not be written again. */
+    private static final String KEPT = "Leave 'message' empty to keep the answer you gave: it is then delivered "
+            + "whole, as you wrote it. A message you give replaces it.";
+
+    /** {@code check} as a repair's answer wrote it, when it is one of {@link #CHECKS}; else null. */
+    static String usableCheck(Object written) {
+        return written instanceof String c && CHECKS.contains(c.strip()) ? c.strip() : null;
+    }
+
+    /**
+     * Whether what a repair says of its check decides its outcome ({@link #finish}): it may run its
+     * skill, it changed it, it ran it after its last change, and that run worked. Only then does
+     * {@link #checked} read the answer -- a run that failed is not fixed whatever the repair says,
+     * and one that never happened checked nothing.
+     *
+     * @param now the registry's skill as it is now, or null when it is gone ({@link #notRunBecause})
+     */
+    static boolean awaitsCheck(AgentContext ctx, Tool now) {
+        Job job = ctx.repair();
+        if (job == null || notRunBecause(job.declared(), now) != null) return false;
+        Artifact run = lastRunSinceChange(ctx, job.skill());
+        return run != null && run.succeeded();
+    }
+
+    /** Whether a generated skill of the task's user ran in the task: all {@code problems} can name ({@link #found}). */
+    private boolean ranOwnSkill(AgentContext ctx) {
+        for (Artifact a : new ArrayList<>(ctx.artifacts())) {
+            if (isOwnSkill(a.tool(), ctx.userId())) return true;
+        }
+        return false;
     }
 
     /** A generated skill a task of this user may change: what self-repair repairs. */
@@ -492,10 +603,95 @@ public class SkillSelfRepair {
             if (found.containsKey(e.getKey()) || !e.getValue().succeeded() || !isOwnSkill(e.getKey(), ctx.userId())) {
                 continue;
             }
-            // This account's repairs only: another's record is never touched by this one's runs.
-            jdbc.update("UPDATE skill_repairs SET cleared_at = datetime('now') WHERE skill_name = ? AND user_id = ? "
-                    + "AND cleared_at IS NULL AND outcome != ?", e.getKey(), ctx.userId(), RUNNING);
+            clear(e.getKey(), ctx.userId());
         }
+    }
+
+    /**
+     * This account's finished repairs of the skill no longer stand in the way of the next: what a
+     * clean run does ({@link #cleared}), and the owner's /repair ({@link #tryAgain}). This account's
+     * only: another's record is never touched by this one's runs or commands.
+     *
+     * @return how many records it cleared
+     */
+    private int clear(String skill, String userId) {
+        return jdbc.update("UPDATE skill_repairs SET cleared_at = datetime('now') WHERE skill_name = ? AND user_id = ? "
+                + "AND cleared_at IS NULL AND outcome != ?", skill, userId, RUNNING);
+    }
+
+    /**
+     * This account's last repair of the skill that is a verdict, or the record that it was left to
+     * the owner: never another account's, and none under way or that did not finish. Null when
+     * there is none.
+     */
+    private Map<String, Object> lastJudged(String skill, String userId) {
+        return row("WHERE skill_name = ? AND user_id = ? AND outcome NOT IN (?, ?, ?, ?, ?) "
+                + "ORDER BY id DESC LIMIT 1", skill, userId, RUNNING, INTERRUPTED, NOT_STARTED, STOPPED, NOT_FINISHED);
+    }
+
+    /**
+     * Whether, after {@code last} ({@link #lastJudged}), a problem of the skill starts no repair and
+     * is left to the owner. Only a VERIFIED fix earns another automatic repair. Until a clean run,
+     * a problem after a repair that ended any other judged way -- changed nothing, could not check
+     * its change, or checked it and still saw the problem -- starts none: the owner is told once,
+     * and it is left to him (he can have it fixed in a chat, or send /repair). Not even after a
+     * later task rewrote the skill: a scheduled run's own skill_create is no fix anyone checked. A
+     * repair that did not finish is no verdict. A mechanism, no count: no key of "the same failure"
+     * is reliable -- dates, timestamps and what a skill prints change every run, and a private
+     * failure has none.
+     */
+    private static boolean leftAfter(Map<String, Object> last) {
+        boolean current = last != null && last.get("cleared_at") == null;
+        boolean judged = last != null && (GAVE_UP.equals(last.get("outcome"))
+                || last.get("completed") instanceof Number c && c.intValue() != 0);
+        return current && judged && !FIXED.equals(last.get("outcome"));
+    }
+
+    // ───────────────────────── left to the owner: /repair ─────────────────────────
+
+    /** The command that has self-repair try again for a skill left to the owner: what he sends, or clicks. */
+    public static String repairCommand(String skill) {
+        return "/repair " + skill;
+    }
+
+    /** How a text that leaves a skill to the owner names the command and what it does, after "until ..., or ". */
+    private static String orRepair(String skill) {
+        return "you send `" + repairCommand(skill) + "`: then self-repair tries again the next time it shows a problem";
+    }
+
+    /**
+     * The owner's {@code /repair <skill>}: for his own records of the skill, what a clean run does
+     * ({@link #clear}) -- so the next problem unattended work shows of it starts a repair again.
+     * "Left to you" used to end only by itself: from 14 Nov 2026 a skill whose repair had in fact
+     * fixed it stayed left to the owner through two more problems, with no way to say "try again"
+     * but to wait for a run that went well. Only where the skill is left to him
+     * ({@link #leftAfter}): anywhere else nothing is changed, and the answer says why nothing needs
+     * to be. It starts no repair itself -- a repair needs a problem and its evidence, which only a
+     * run of the skill shows.
+     *
+     * @return what he is answered
+     */
+    public String tryAgain(String userId, String skill) {
+        if (!enabled()) {
+            return "Self-repair is switched off (ownclaw.self-repair.enabled), so no repair starts by itself. "
+                    + "Nothing was changed.";
+        }
+        synchronized (lock) {
+            Map<String, Object> last = lastJudged(skill, userId);
+            if (!leftAfter(last)) {
+                Map<String, Object> running = row("WHERE skill_name = ? AND user_id = ? AND outcome = ? "
+                        + "ORDER BY id DESC LIMIT 1", skill, userId, RUNNING);
+                return "Nothing of " + skill + " is left to you" + (running == null ? ""
+                        : " -- a repair of it is under way (task " + running.get("repair_task_id") + ")")
+                        + ": the next time unattended work shows a problem with it, self-repair takes it up "
+                        + "as usual. Nothing was changed.";
+            }
+            clear(skill, userId);
+            log.info("User {} sent /repair for '{}': left to the owner since repair {} ({}), it is repaired again "
+                    + "at its next problem.", userId, skill, last.get("id"), last.get("outcome"));
+        }
+        return "\u2705 " + skill + " is no longer left to you: the next time unattended work -- a scheduled run, "
+                + "/bg -- shows a problem with it, self-repair starts a repair again. Nothing starts now.";
     }
 
     // ───────────────────────── starting a repair ─────────────────────────
@@ -504,9 +700,10 @@ public class SkillSelfRepair {
      * What a problem of one skill becomes, decided and recorded under one lock: added to the repair
      * under way; or -- the last repair changed nothing, nothing has changed the code since, and no
      * run since went well -- no repair, and the owner told, once; or a repair started. Returns the
-     * line the triggering task's ending gets.
+     * line the triggering task's ending gets, and adds to {@code offered} the command that line
+     * names when it leaves the skill to the owner ({@link #repairCommand}).
      */
-    private String take(AgentContext ctx, Found f) {
+    private String take(AgentContext ctx, Found f, List<String> offered) {
         String skill = f.skill();
         String problem = String.join(" ", f.what());
         String tellOwner = null;
@@ -534,26 +731,16 @@ public class SkillSelfRepair {
                         + "it._";
             }
             // What this account's own repairs of the skill did: never another account's report.
-            Map<String, Object> last = row("WHERE skill_name = ? AND user_id = ? AND outcome NOT IN (?, ?, ?, ?, ?) "
-                    + "ORDER BY id DESC LIMIT 1", skill, ctx.userId(), RUNNING, INTERRUPTED, NOT_STARTED, STOPPED,
-                    NOT_FINISHED);
-            // Only a VERIFIED fix earns another automatic repair. Until a clean run, a problem after a
-            // repair that ended any other judged way -- changed nothing, could not check its change, or
-            // checked it and still saw the problem -- starts none: the owner is told once, and it is left
-            // to him (he can have it fixed in a chat). Not even after a later task rewrote the skill: a
-            // scheduled run's own skill_create is no fix anyone checked. A repair that did not finish is
-            // no verdict. A mechanism, no count: no key of "the same failure" is reliable -- dates,
-            // timestamps and what a skill prints change every run, and a private failure has none.
-            boolean current = last != null && last.get("cleared_at") == null;
-            boolean judged = last != null && (GAVE_UP.equals(last.get("outcome"))
-                    || last.get("completed") instanceof Number c && c.intValue() != 0);
-            boolean noProgress = current && judged && !FIXED.equals(last.get("outcome"));
+            Map<String, Object> last = lastJudged(skill, ctx.userId());
+            boolean noProgress = leftAfter(last);
             if (noProgress && GAVE_UP.equals(last.get("outcome"))) {
                 addProblem(id(last), ctx, problem);
                 log.info("Task {}: '{}' showed its problem again; self-repair left it to the owner before, so nothing "
                         + "starts.", ctx.taskId(), skill);
                 event(ctx.userId(), ctx.taskId(), "left", skill, problem, null, ctx.taskId());
-                return "_🔧 Self-repair could not fix " + skill + " before, and you were told: it is left to you._";
+                offered.add(repairCommand(skill));
+                return "_🔧 Self-repair could not fix " + skill + " before, and you were told: it is left to you. "
+                        + "To have it tried again the next time it shows a problem, send:_ `" + repairCommand(skill) + "`";
             }
             if (noProgress) {
                 jdbc.update("""
@@ -575,10 +762,12 @@ public class SkillSelfRepair {
                         startedAt(ctx)) + " the problem is back: " + problem + "\n\nThe last repair (task "
                         + last.get("repair_task_id") + ") " + did + ", and only a fix self-repair has checked earns "
                         + "another try: it is left to you -- you can have it fixed in a chat -- until a run of the "
-                        + "skill goes well. "
+                        + "skill goes well, or " + orRepair(skill) + ". "
                         + "That repair's report:\n\n" + last.get("report");
+                offered.add(repairCommand(skill));
                 line = "_🔧 Self-repair is not tried again for " + skill + ": its last repair (task "
-                        + last.get("repair_task_id") + ") " + did + ". You were told; it is left to you._";
+                        + last.get("repair_task_id") + ") " + did + ". You were told; it is left to you. "
+                        + "To have it tried again the next time it shows a problem, send:_ `" + repairCommand(skill) + "`";
             } else {
                 Map<String, Object> previous = last != null && changed(last)
                         && List.of(FIXED, UNVERIFIED, NOT_FIXED).contains(String.valueOf(last.get("outcome")))
@@ -587,7 +776,8 @@ public class SkillSelfRepair {
             }
         }
         if (tellOwner != null) {
-            tell(ctx.userId(), ctx.taskId(), "🔧 Self-repair of " + skill + " left to you", tellOwner, null);
+            tell(ctx.userId(), ctx.taskId(), "🔧 Self-repair of " + skill + " left to you", tellOwner, null,
+                    List.of(repairCommand(skill)));
         }
         return line;
     }
@@ -895,23 +1085,32 @@ public class SkillSelfRepair {
                     str(row, "trigger_task_id"));
         }
         log.info("Self-repair {} of '{}' (task {}) ended: {}.", job.id(), job.skill(), ctx.taskId(), outcome);
-        String said = said(outcome, notRun, ended);
+        String said = said(outcome, notRun, ended, job.skill());
         String head = "After " + trigger(str(row, "trigger_message"), str(row, "trigger_at")) + " it did not do its "
                 + "whole job: " + row.get("problem") + "\n\n" + said + "\n\n";
         String rerun = FIXED.equals(outcome) || UNVERIFIED.equals(outcome)
                 ? "\n\nIts next run uses the changed skill. To run that task now, send:\n/bg "
                         + str(row, "trigger_message")
                 : "";
+        // The command the rule names, to click: the report says a later problem is left to him.
         tell(ctx.userId(), ctx.taskId(), "🔧 Self-repair of " + job.skill(), head + ended.response() + rerun,
-                ended.ownerText() == null ? null : head + ended.ownerText() + rerun);
+                ended.ownerText() == null ? null : head + ended.ownerText() + rerun,
+                said.contains(leftToOwner(job.skill())) ? List.of(repairCommand(job.skill())) : List.of());
     }
 
-    /** The rule, for the owner, after a repair that ended without a fix it checked. */
-    static final String LEFT = " Only a fix self-repair has checked earns another try: if the problem shows again, it "
-            + "is left to you -- you can have it fixed in a chat -- until a run of the skill goes well.";
+    /**
+     * The rule, for the owner, after a repair that ended without a fix it checked -- with the way
+     * out of it that is his to take: the command, which the report offers to click.
+     */
+    static String leftToOwner(String skill) {
+        return " Only a fix self-repair has checked earns another try: if the problem shows again, it "
+                + "is left to you -- you can have it fixed in a chat -- until a run of the skill goes well, or "
+                + orRepair(skill) + ".";
+    }
 
     /** What an outcome is, for the owner. */
-    private static String said(String outcome, String notRun, AgentResult ended) {
+    private static String said(String outcome, String notRun, AgentResult ended, String skill) {
+        String left = leftToOwner(skill);
         boolean completed = ended.terminationReason() == TerminationReason.COMPLETED;
         String which = completed ? "What the repair said:" : "How the repair ended:";
         return switch (outcome) {
@@ -922,13 +1121,13 @@ public class SkillSelfRepair {
                     + " The next time the problem shows, a repair starts again."
                     : (notRun != null ? "Changed, but not run again to check it: " + notRun + "."
                     : "Changed, but not checked: the repair did not run it again after its change and say the check "
-                            + "passed.") + LEFT) + " " + which;
-            case NOT_FIXED -> "Changed, but run again it still shows the problem." + LEFT + " " + which;
+                            + "passed.") + left) + " " + which;
+            case NOT_FIXED -> "Changed, but run again it still shows the problem." + left + " " + which;
             case STOPPED -> "Stopped before it changed the skill. The next time the problem shows, a repair "
                     + "starts again. " + which;
             case NOT_FINISHED -> "The repair did not finish, and changed nothing. The next time the problem shows, "
                     + "a repair starts again. " + which;
-            default -> "Not fixed: the repair did not change the skill." + LEFT + " " + which;
+            default -> "Not fixed: the repair did not change the skill." + left + " " + which;
         };
     }
 
@@ -941,15 +1140,27 @@ public class SkillSelfRepair {
      */
     static Boolean checked(AgentContext ctx, AgentResult ended, String skill) {
         if (ended.terminationReason() != TerminationReason.COMPLETED) return null;
+        Artifact run = lastRunSinceChange(ctx, skill);
+        if (run == null) return null;
+        String check = usableCheck(ctx.reportedCheck());
+        if (!run.succeeded() || "failed".equals(check)) return false;
+        return "passed".equals(check) ? Boolean.TRUE : null;
+    }
+
+    /**
+     * The last run of the skill after the repair's last change of it, among the task's results, or
+     * null: the repair changed nothing, or did not run the skill since. What {@link #checked}
+     * judges, and what decides whether a repair's answer is asked how its check went ({@link #awaitsCheck}).
+     */
+    private static Artifact lastRunSinceChange(AgentContext ctx, String skill) {
         int from = ctx.changedAfter();
         if (from < 0) return null;
         List<Artifact> results = new ArrayList<>(ctx.artifacts());
-        List<Artifact> runs = results.subList(Math.min(from, results.size()), results.size()).stream()
-                .filter(a -> skill.equals(a.tool())).toList();
-        if (runs.isEmpty()) return null;
-        String check = ctx.reportedCheck() instanceof String c ? c.strip() : null;
-        if (!runs.getLast().succeeded() || "failed".equals(check)) return false;
-        return "passed".equals(check) ? Boolean.TRUE : null;
+        Artifact last = null;
+        for (Artifact a : results.subList(Math.min(from, results.size()), results.size())) {
+            if (skill.equals(a.tool())) last = a;
+        }
+        return last;
     }
 
     /**
@@ -1154,10 +1365,21 @@ public class SkillSelfRepair {
 
     // ───────────────────────── helpers ─────────────────────────
 
-    /** The owner is told, as unattended results are: the chat of scheduled results, and Telegram. */
+    /** The owner is told, as unattended results are: the chat of scheduled results, and Telegram. Nothing is offered to click. */
     private void tell(String userId, String taskId, String header, String text, String ownerText) {
+        tell(userId, taskId, header, text, ownerText, List.of());
+    }
+
+    /**
+     * {@link #tell(String, String, String, String, String)}, offering these commands to click under
+     * it -- none but {@link #repairCommand}, where the text leaves a skill to the owner: a command
+     * is written by code for its account to send, never taken from what a model wrote.
+     */
+    private void tell(String userId, String taskId, String header, String text, String ownerText,
+                      List<String> commands) {
         try {
-            delivery.deliver(userId, () -> conversations.scheduledSession(userId), header, text, taskId, ownerText);
+            delivery.deliver(userId, () -> conversations.scheduledSession(userId), header, text, taskId, ownerText,
+                    commands);
         } catch (RuntimeException e) {
             log.error("Self-repair could not tell user {}: {}", userId, e.getMessage());
         }

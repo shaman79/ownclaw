@@ -719,7 +719,7 @@ class TaskEndToEndTest {
     }
 
     @Test
-    @DisplayName("a step declined as reasoning extraction is asked again, with no words asked for beside the call")
+    @DisplayName("a chat's step declined as reasoning extraction is asked again once, with no words asked for beside the call")
     void aStepDeclinedAsReasoningIsAskedAgainQuietly(@TempDir Path tmp) throws Exception {
         var rig = new LoopRig(tmp, List.of(NOOP));
         rig.jdbc.update("INSERT INTO users (id, display_name) VALUES ('u1', 'Owner')");
@@ -738,8 +738,10 @@ class TaskEndToEndTest {
         List<LlmMessage> asked = thinks.get(1).messages();
         String step = asked.get(asked.size() - 1).content();
         assertTrue(step.contains(invited) && step.contains(ThinkingEngine.NARRATION),
-                "the premise: the per-step block asks for them: " + step);
-        assertTrue(asked.stream().anyMatch(m -> m.content().contains(beside)), "the premise: step 1's words are replayed");
+                "the premise: a chat's per-step block asks for them: " + step);
+        // Since 2026-11-18 step 1's words are in no request: this test used to hold that the retry
+        // replayed them as the provider had cached them, and that replay is what was declined.
+        assertTrue(thinks.stream().noneMatch(t -> all(t.messages()).contains(beside)), "step 1's words were replayed");
         for (var again : thinks.subList(2, 4)) {
             var quiet = again.messages();
             assertFalse(all(quiet).contains(ThinkingEngine.NARRATION), "nothing asks for words: " + quiet);
@@ -750,19 +752,24 @@ class TaskEndToEndTest {
         // Asked at the end of the conversation: the provider reads all before it from its cache.
         var quiet = thinks.get(2).messages();
         assertEquals(asked.subList(0, asked.size() - 1), quiet.subList(0, asked.size() - 1),
-                "the system prompt and the steps replayed, step 1's words among them, are the same bytes");
+                "the system prompt and the steps replayed are the same bytes");
         assertEquals(2, r.trajectory().steps().size(), "the declined step is not one of them");
         assertEquals(3 * 1_100 + 2_300, cloudTokens(rig), "the declined reply was billed, so it is counted");
         List<String> rows = rig.jdbc.queryForList("SELECT content FROM conversations WHERE role = 'progress'", String.class);
-        assertTrue(rows.stream().anyMatch(c -> c.startsWith("⚠️ The cloud model's provider stopped step 2 as "
-                + "reasoning extraction")), String.valueOf(rows));
+        assertTrue(rows.contains("⚠️ The cloud model's provider stopped step 2 as reasoning extraction: a safety check "
+                + "against giving away the model's hidden reasoning, most likely set off by the progress update it is "
+                + "asked for beside each call. Asking again, once, without asking for one; the steps from here on come "
+                + "without them. If the provider stops a step again, the task goes on on the local model, or ends "
+                + "where there is none."), String.valueOf(rows));
         assertTrue(rows.stream().anyMatch(c -> c.startsWith("☁️ Step 2 · noop")), "the step asked again keeps its "
                 + "number: " + rows);
+        // Mutation: the loop's ProviderRefused branch never asking again (its test of quiet() dropped, so
+        // every reasoning-extraction decline ends like any refusal) -> the task ends ERROR after 2 calls.
     }
 
     @Test
-    @DisplayName("declined again when asked quietly, the step is asked once more without the earlier words; a third time, the task ends saying so in words")
-    void declinedThriceEndsInWords(@TempDir Path tmp) throws Exception {
+    @DisplayName("declined again when asked quietly, the step is not asked a third time: with no local model the task ends saying so in words")
+    void declinedTwiceEndsInWords(@TempDir Path tmp) throws Exception {
         var rig = new LoopRig(tmp, List.of(NOOP));
         rig.jdbc.update("INSERT INTO users (id, display_name) VALUES ('u1', 'Owner')");
         String beside = "Checking the network first.";
@@ -770,27 +777,67 @@ class TaskEndToEndTest {
                 List.of(new com.ownclaw.llm.ToolCall("c-noop", "noop", Map.of()))));
         rig.cloud.think.add(declined("reasoning_extraction"));
         rig.cloud.think.add(declined("reasoning_extraction"));
-        rig.cloud.think.add(declined("reasoning_extraction"));
         AgentResult r = rig.turn(session(rig), "check the network");
 
+        // Until 2026-11-18 a second decline was asked once more without the earlier words, and a
+        // third ended the task: those words are in no request now, so the second is what the third was.
         assertEquals(AgentResult.TerminationReason.ERROR, r.terminationReason());
         var thinks = rig.cloud.calls("think");
-        assertEquals(4, thinks.size(), "asked again twice, not until it answers");
-        for (var quiet : thinks.subList(2, 4)) {
-            assertFalse(all(quiet.messages()).contains(ThinkingEngine.NARRATION), "asked quietly");
-        }
-        assertTrue(all(thinks.get(2).messages()).contains(beside), "first with the earlier words, as cached");
-        assertFalse(all(thinks.get(3).messages()).contains(beside), "then without them");
+        assertEquals(3, thinks.size(), "asked again once, not until it answers");
+        assertTrue(all(thinks.get(1).messages()).contains(ThinkingEngine.NARRATION), "the premise: asked for words");
+        assertFalse(all(thinks.get(2).messages()).contains(ThinkingEngine.NARRATION), "asked again quietly");
         assertTrue(r.response().startsWith("**Stopped:** the cloud model's provider (anthropic) stopped the step as "
                 + "reasoning extraction -- a safety check against giving away the model's hidden reasoning -- and "
-                + "did so again after the model was asked for no progress updates beside its calls, and again "
-                + "when it was no longer shown those it had written.\n\n**What it did** — "), r.response());
-        assertTrue(r.response().contains("8,000 cloud tokens"), "every declined reply was billed: " + r.response());
+                + "did so again after the model was asked for no progress updates beside its calls.\n\n"
+                + "**What it did** — "), r.response());
+        assertTrue(r.response().contains("5,700 cloud tokens"), "every declined reply was billed: " + r.response());
         assertTrue(r.response().contains("**Next:** Your next message starts a new task"), r.response());
+        // Mutation: the loop asks again whenever a step is declined as reasoning extraction, quiet or
+        // not -> a third call, and the script has no reply for it.
+    }
+
+    @Test
+    @DisplayName("declined again when asked quietly, with a local model there: the task goes on on it, as after any refusal")
+    void declinedTwiceGoesOnLocally(@TempDir Path tmp) throws Exception {
+        var local = LocalModeTest.localModel();
+        var rig = new LoopRig(tmp, List.of(NOOP), 600, local);
+        rig.jdbc.update("INSERT INTO users (id, display_name) VALUES ('u1', 'Owner')");
+        rig.cloud.think.add(call("noop", Map.of()));
+        rig.cloud.think.add(declined("reasoning_extraction"));
+        rig.cloud.think.add(declined("reasoning_extraction"));
+        local.think.add(call("noop", Map.of()));
+        local.think.add(respond("done locally"));
+        AgentResult r = rig.turn(session(rig), "check the network");
+
+        assertEquals(AgentResult.TerminationReason.COMPLETED, r.terminationReason(), r.response());
+        assertTrue(r.response().startsWith("done locally"), r.response());
+        assertEquals(3, rig.cloud.calls("think").size(), "the cloud: step 1, the decline, the one quiet retry");
+        assertEquals(2, local.calls("think").size(), "the local model took the declined step and finished");
         List<String> rows = rig.jdbc.queryForList("SELECT content FROM conversations WHERE role = 'progress'", String.class);
-        assertTrue(rows.contains("⚠️ The cloud model's provider stopped step 2 as reasoning extraction again. Asking "
-                + "once more, without showing the model the progress updates it wrote before."), String.valueOf(rows));
-        // Mutation: end the task on the second decline, as before -> 3 calls, and the ending's words.
+        assertTrue(rows.stream().anyMatch(c -> c.contains("can't be used -- it declined this request")
+                && c.contains("category \"reasoning_extraction\"")), String.valueOf(rows));
+        // Mutation: as declinedTwiceEndsInWords's -> the cloud is asked a third time.
+    }
+
+    @Test
+    @DisplayName("unattended work asks for nothing beside its calls, so a step declined as reasoning extraction is not asked again: the same request would be")
+    void anUnattendedDeclineIsNotAskedAgain(@TempDir Path tmp) throws Exception {
+        var rig = new LoopRig(tmp, List.of(NOOP));
+        rig.jdbc.update("INSERT INTO users (id, display_name) VALUES ('u1', 'Owner')");
+        rig.cloud.think.add(call("noop", Map.of()));
+        rig.cloud.think.add(declined("reasoning_extraction"));
+        AgentResult r = rig.loop.executeFull("u1", "check the network", true);
+
+        assertEquals(AgentResult.TerminationReason.ERROR, r.terminationReason(), r.response());
+        var thinks = rig.cloud.calls("think");
+        assertEquals(2, thinks.size(), "the declined step was asked again");
+        assertTrue(thinks.stream().noneMatch(t -> all(t.messages()).contains(ThinkingEngine.NARRATION)),
+                "the premise: no step of it asked for words");
+        assertTrue(r.response().startsWith("**Stopped:** the cloud model's provider (anthropic) stopped the step as "
+                + "reasoning extraction -- a safety check against giving away the model's hidden reasoning -- "
+                + "although the model was asked for no words beside its calls.\n\n**What it did** — "), r.response());
+        // Mutation: the loop asking again unless the task was declined before (declinedAsReasoning()
+        // where it asks quiet()) -> a third call, and the script has no reply for it.
     }
 
     @Test

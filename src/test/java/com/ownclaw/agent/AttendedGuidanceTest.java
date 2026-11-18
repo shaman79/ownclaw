@@ -79,4 +79,35 @@ class AttendedGuidanceTest {
                 + "background; the answer is delivered to the chat whenever it is ready. Minutes are free here. "
                 + "Prefer 'delegate' for anything the local model can do"), step);
     }
+
+    @Test
+    @DisplayName("where nobody waits, a step the cloud takes asks for nothing beside its call, on both protocols and from the first step; the local model's is asked as before; and the system prompt is the chat's, byte for byte")
+    void unattendedCloudStepsAskForNothingBesideTheCall() {
+        var engine = new ThinkingEngine(new ToolRegistry(List.of()), new OwnClawConfig(), null);
+        for (boolean nativeTools : new boolean[] {true, false}) {
+            var waited = new AgentContext("u1", "t1", "the morning digest");
+            var nobody = new AgentContext("u1", "t2", "the morning digest");
+            nobody.setUnattended(true);
+            for (String provider : List.of("anthropic", "openai")) {
+                var cloud = new ThinkingEngine.StepMode(nativeTools, false, false);
+                var chat = engine.buildMessages(waited, provider, cloud);
+                var run = engine.buildMessages(nobody, provider, cloud);
+                String path = provider + (nativeTools ? ", native" : ", text") + ": ";
+                String step = run.get(run.size() - 1).content();
+                assertTrue(step.contains(ThinkingEngine.beside(nativeTools, true)), path + step);
+                assertFalse(run.stream().anyMatch(m -> m.content().contains(ThinkingEngine.NARRATION)), path + step);
+                assertTrue(chat.get(chat.size() - 1).content().contains(ThinkingEngine.NARRATION), path + "a chat is asked");
+                // What is asked beside a call is the per-step block's: the system prompt the provider
+                // caches is one text for attended and unattended work.
+                assertEquals(chat.get(0).content(), run.get(0).content(), path + "the system prompt differs");
+            }
+            // The local model running the task itself: no provider's check reads its replies, and what
+            // it writes beside a call is in the history it reads of its own steps.
+            var local = engine.buildMessages(nobody, "ollama", new ThinkingEngine.StepMode(nativeTools, false, true));
+            assertTrue(local.get(local.size() - 1).content().contains(ThinkingEngine.NARRATION),
+                    local.get(local.size() - 1).content());
+        }
+        // Mutation: quiet() without its unattended clause -> the cloud's step on unattended work asks
+        // for the progress update.
+    }
 }

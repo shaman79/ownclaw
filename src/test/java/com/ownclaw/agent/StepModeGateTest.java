@@ -122,8 +122,13 @@ class StepModeGateTest {
                 .reduce("", String::concat);
         assertTrue(text.contains("The owner has chosen cost over speed, so the skills run on the local model: "
                 + "delegate the work."), text);
-        assertTrue(text.contains("what the last result showed and what you are doing next, only what is new "
-                + "since your last update"), "each update restated the same suspicion: " + text);
+        // Until 2026-11-18 it went on "only what is new since your last update": the cloud is no
+        // longer shown its earlier updates, so it cannot tell what is new since them, and the
+        // clause went with them -- nothing asked for in its place.
+        assertTrue(text.contains("as a progress update on the work -- what the last result showed and what you "
+                + "are doing next -- not your reasoning."), text);
+        assertFalse(text.contains("since your last update"), text);
+        // Mutation: NARRATION asking again for "only what is new since your last update" -> it is there.
         String delegate = engine.toolsFor(chat, mode).stream().filter(t -> AgentAction.DELEGATE.equals(t.name()))
                 .findFirst().orElseThrow().description();
         assertTrue(delegate.contains("The owner has chosen cost over speed, so while the local model can do the work you are not given the skills to run yourself"), delegate);

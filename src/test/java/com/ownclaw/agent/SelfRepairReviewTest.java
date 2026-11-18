@@ -548,7 +548,8 @@ class SelfRepairReviewTest {
         fix.unattended(TASK);
         assertEquals("not_fixed", fix.ended(fix.lastId()).get("outcome"));
         String said = fix.told().get(fix.told().size() - 1);
-        assertTrue(said.contains("Changed, but run again it still shows the problem." + SkillSelfRepair.LEFT), said);
+        // The rule names the command that ends it since 2026-11-18 (/repair), so it is said of the skill.
+        assertTrue(said.contains("Changed, but run again it still shows the problem." + SkillSelfRepair.leftToOwner(MENU)), said);
         AgentResult next = fix.menuRun(true);
         assertTrue(next.response().contains("Self-repair is not tried again for " + MENU), next.response());
         assertEquals("gave_up", fix.repairRow(1).get("outcome"));

@@ -71,14 +71,19 @@ final class TaskEnding {
      * Why the model's provider gave no answer, in words, by the category it named. The refusal's
      * own message -- "stop reason: refusal (reasoning_extraction)" -- used to be all the owner
      * was shown, and the owner had to ask what it meant.
+     *
+     * @param askedAgain a step of the task was declined as reasoning extraction before and asked
+     *                   again with nothing asked for beside the call
+     *                   ({@link AgentContext#declinedAsReasoning}): false for a step that asked
+     *                   for nothing from the start, as unattended work's do
      */
-    static String declined(ProviderRefused declined) {
+    static String declined(ProviderRefused declined, boolean askedAgain) {
         String who = "the cloud model's provider (" + declined.getProvider() + ")";
         if (declined.asReasoningExtraction()) {
             return who + " stopped the step as reasoning extraction -- a safety check against giving "
-                    + "away the model's hidden reasoning -- and did so again after the model was asked for "
-                    + "no progress updates beside its calls, and again when it was no longer shown those "
-                    + "it had written";
+                    + "away the model's hidden reasoning -- " + (askedAgain
+                    ? "and did so again after the model was asked for no progress updates beside its calls"
+                    : "although the model was asked for no words beside its calls");
         }
         String category = declined.category();
         return who + " declined to answer this request" + (category == null

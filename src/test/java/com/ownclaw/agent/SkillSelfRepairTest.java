@@ -517,6 +517,9 @@ class SkillSelfRepairTest {
         fix.rig.queue.start();
         fix.scriptMenu(true);
         scriptFixAndCheck(fix.rig, Map.of("debug", true), respond("Changed the headers and ran it."));
+        // Since 2026-11-18 an answer that leaves 'check' out, where the check decides the outcome, is
+        // asked for it once (AnswerOwedTest); answered again without one, the repair ends as it did.
+        fix.rig.cloud.think.add(respond("Changed the headers and ran it."));
         fix.unattended(TASK);
         var row = fix.ended(fix.lastId());
         assertEquals("unverified", row.get("outcome"));
