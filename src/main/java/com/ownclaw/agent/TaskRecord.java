@@ -23,6 +23,9 @@ import java.util.Set;
  * ({@link AgentLoop#stepOutcome}). Nothing else of a result; and never the request, which another
  * row of the task holds, or an attachment's name, which none holds.
  * <p>
+ * How a delegation failed is not its whole report: the report shows the cloud every result of the
+ * calls that ran, and a record holds no result of a call that worked ({@link #howFailed}).
+ * <p>
  * Results are named in words, never by handle: {{2}} named a result of that task, and in the task
  * that reads the record it names another one, so a handle copied from here would resolve to it.
  */
@@ -82,15 +85,116 @@ final class TaskRecord {
     }
 
     /**
-     * How each failed step failed, as its row keeps it -- the text its line shows. A result whose
+     * How each failed step failed -- the text its line shows ({@link #howFailed}). A result whose
      * text is one of these is on the screen already.
      */
     static Set<String> reasons(Map<String, Object> trace) {
         var out = new HashSet<String>();
         for (Map<String, Object> step : maps(trace.get("steps"))) {
-            if (step.get("reason") instanceof String how) out.add(how);
+            String how = howFailed(step);
+            if (how != null) out.add(how);
         }
         return out;
+    }
+
+    /**
+     * How a failed step failed, as the record says it, or null when its row keeps none (a step
+     * that worked, a PRIVATE one): the row's reason, whole -- but of a delegation, without the
+     * results of the calls that worked.
+     * <p>
+     * A failed delegation's reason is its whole report, as the cloud read it and as the task page
+     * shows it: what had already been done, why it stopped, then every result of the calls that
+     * ran, whole. The record's own closing words are that results are not carried into the later
+     * task -- and in the reason they were: one failed delegation's was 273,970 characters, the
+     * listing of every Home Assistant entity, which a call that worked had returned, and every
+     * later turn of that chat began by sending it (a 320,174-character first block, 178,000
+     * tokens written to the cache, $1.46 before any work, on 2026-11-15).
+     * <p>
+     * So a delegation says how it failed apart from its report, where it writes it
+     * (LocalExecutor.Outcome#howFailed), and its row keeps that beside the reason
+     * ({@link AgentLoop#HOW_FAILED}); it is used as it stands. A row from before that has the
+     * reason alone, and the results are taken out of it here ({@link #withoutResults}). Either
+     * way the line is made of the stored row and nothing else, so the record is the same bytes on
+     * every later turn ({@link #forLaterTask}). Any other step's reason is its own error, and
+     * stays whole.
+     */
+    static String howFailed(Map<String, Object> step) {
+        if (step.get(AgentLoop.HOW_FAILED) instanceof String apart && !apart.isBlank()) return apart;
+        if (!(step.get("reason") instanceof String reason)) return null;
+        return AgentAction.DELEGATE.equals(step.get("tool")) ? withoutResults(reason) : reason;
+    }
+
+    /**
+     * A failed delegation's report without the results of its calls: what stands before the line
+     * that opens them, and what stands after them -- the ledger of the tools that ran and the
+     * failed steps' own errors. Found by the lines the report's writer marks them with, which are
+     * its constants ({@link LocalExecutor#RESULTS_OF_CALLS}): in a report of calls that stopped
+     * and in one that finished with a failed step the results end where the ledger begins; one
+     * that did not finish has no ledger, and its results run to its end. A report with none of
+     * those lines holds no result, and is returned as it is.
+     * <p>
+     * A result, a summary or an error can hold a line that reads like one of these, and no result
+     * is left in for it, whatever the report holds. The results are taken to begin at the FIRST
+     * such line: the writer puts the real one before any result. They are taken to end at the
+     * LAST line that opens a ledger: the writer puts the real one after every result -- and at
+     * the report's end wherever a line opens the results of a report that did not finish, since
+     * such a report has no ledger to end them. So a line of that kind can only move an end
+     * outwards, and then more is taken out: the ledger and the failed steps' errors of a report
+     * whose result quotes a report that did not finish, or the part of them before a failed
+     * step's own "[Tools run: ". That is the price of reading it back, and why a delegation now
+     * says how it failed itself: only the writer knows where a result ends.
+     */
+    static String withoutResults(String report) {
+        int calls = lineOpening(report, LocalExecutor.RESULTS_OF_CALLS, 0, true);
+        int unfinished = lineOpening(report, LocalExecutor.PARTIAL_RESULTS, 0, true);
+        int finished = lineOpening(report, LocalExecutor.COMPLETED_FOR, 0, false);
+        int from = -1;
+        for (int opens : new int[] {calls, unfinished, finished}) {
+            if (opens >= 0 && (from < 0 || opens < from)) from = opens;
+        }
+        if (from < 0) return report;
+        int to = report.length();
+        if (unfinished < 0) {
+            int ledger = lastLineOpening(report, LocalExecutor.TOOLS_RUN, from);
+            if (ledger >= 0) {
+                to = ledger;
+            } else if (from == finished && lineOpening(report, LocalExecutor.NO_TOOL_RAN, from, true) >= 0) {
+                // It finished having run no tool, and says so: there is no result in it.
+                return report;
+            }
+        }
+        String before = report.substring(0, from).stripTrailing();
+        // The rule that set the local model's summary off from its results goes with them.
+        String rule = LocalExecutor.SUMMARY_RULE.strip();
+        if (from == finished && (before.equals(rule) || before.endsWith("\n" + rule))) {
+            before = before.substring(0, before.length() - rule.length()).stripTrailing();
+        }
+        String after = report.substring(to);
+        return (before.isEmpty() || after.isEmpty() ? before + after : before + "\n\n" + after).strip();
+    }
+
+    /**
+     * Where the first line of {@code text} that opens with {@code opening} begins, at or after
+     * {@code from} -- the line that is {@code opening} and nothing more, when {@code whole} -- or
+     * -1 when there is none.
+     */
+    private static int lineOpening(String text, String opening, int from, boolean whole) {
+        for (int i = text.indexOf(opening, from); i >= 0; i = text.indexOf(opening, i + 1)) {
+            int end = i + opening.length();
+            if ((i == 0 || text.charAt(i - 1) == '\n')
+                    && (!whole || end == text.length() || text.charAt(end) == '\n')) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    /** Where the last line of {@code text} that opens with {@code opening} begins, at or after {@code from}; -1 when none does. */
+    private static int lastLineOpening(String text, String opening, int from) {
+        for (int i = text.lastIndexOf(opening); i >= from; i = text.lastIndexOf(opening, i - 1)) {
+            if (i == 0 || text.charAt(i - 1) == '\n') return i;
+        }
+        return -1;
     }
 
     /**
@@ -174,7 +278,8 @@ final class TaskRecord {
                 sb.append(", public");
             }
         }
-        if (step.get("reason") instanceof String how && !how.isBlank()) sb.append(" — ").append(how.strip());
+        String how = howFailed(step);
+        if (how != null && !how.isBlank()) sb.append(" — ").append(how.strip());
         return sb.toString();
     }
 

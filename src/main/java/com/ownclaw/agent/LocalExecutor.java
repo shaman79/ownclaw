@@ -212,7 +212,8 @@ public class LocalExecutor {
         }
         if (notes.isEmpty()) return outcome;
         return new Outcome(notes + outcome.text(), outcome.toolsRun(),
-                outcome.stepCount(), outcome.ok(), outcome.produced(), outcome.byCode());
+                outcome.stepCount(), outcome.ok(), outcome.produced(), outcome.byCode(),
+                outcome.howFailed() == null ? null : notes + outcome.howFailed());
     }
 
     private static final String MISSING_REFERENCE_NOTE = "NOTE: the delegation's goal named "
@@ -399,7 +400,7 @@ public class LocalExecutor {
 
     /** The outcome as one the cloud's calls ended, the local model given nothing ({@link Outcome#byCode}). */
     private static Outcome byCode(Outcome o) {
-        return new Outcome(o.text(), o.toolsRun(), o.stepCount(), o.ok(), o.produced(), true);
+        return new Outcome(o.text(), o.toolsRun(), o.stepCount(), o.ok(), o.produced(), true, o.howFailed());
     }
 
     /**
@@ -426,12 +427,14 @@ public class LocalExecutor {
         int after = plan.calls().size() - at - 1;
         String rest = after == 0 ? "" : " The " + (after == 1 ? "call" : after + " calls") + " after it did not run.";
         if (!plan.goal().isBlank()) rest += " The local model was not given the goal.";
-        String text = alreadyDone(ran) + "Delegation stopped at call " + (at + 1) + " of " + plan.calls().size()
-                + ": " + why + rest + "\n\n"
-                + (ran.isEmpty() ? "" : "Results of the calls that ran:\n\n" + resultsForCloud(ran))
+        String stopped = alreadyDone(ran) + "Delegation stopped at call " + (at + 1) + " of " + plan.calls().size()
+                + ": " + why + rest;
+        String text = stopped + "\n\n"
+                + (ran.isEmpty() ? "" : RESULTS_OF_CALLS + "\n\n" + resultsForCloud(ran))
                 + ledger(ran) + verbatimFailures(ran, true);
         log.warn("Delegation stopped at call {} of {}.", at + 1, plan.calls().size());
-        return new Outcome(text, toolNames(ran), ran.size(), false, List.copyOf(ran), true);
+        return new Outcome(text, toolNames(ran), ran.size(), false, List.copyOf(ran), true,
+                howFailed(stopped, ledger(ran), verbatimFailures(ran, true)));
     }
 
     /**
@@ -2178,12 +2181,44 @@ public class LocalExecutor {
         return results.stream().map(r -> r.tool()).distinct().toList();
     }
 
+    /**
+     * Where a failed delegation's report holds the results of its calls, as code writes them: each
+     * of the first three opens the results ({@link #resultsForCloud}) in one of the report's
+     * shapes -- the calls stopped ({@link #callsStopped}), the delegation did not finish
+     * ({@link #buildPartialResult}), or it finished with a step that failed
+     * ({@link #buildConsolidatedResult}, ruled off from the local model's summary by
+     * {@link #SUMMARY_RULE}) -- and {@link #TOOLS_RUN} opens the ledger that follows them in the
+     * first and the third.
+     * <p>
+     * Shared with the one reader that takes the results out again: {@link TaskRecord#withoutResults},
+     * for the step rows written before a failed delegation kept its own account
+     * ({@link Outcome#howFailed}). Written here and read there from the same constants, so the two
+     * cannot drift apart.
+     */
+    static final String RESULTS_OF_CALLS = "Results of the calls that ran:";
+    static final String PARTIAL_RESULTS = "Partial results collected:";
+    static final String COMPLETED_FOR = "Delegation completed for: ";
+    static final String SUMMARY_RULE = "\n\n---\n";
+    static final String TOOLS_RUN = "[Tools run: ";
+    /** The ledger of a delegation that ran no tool: its report holds no result. */
+    static final String NO_TOOL_RAN = "[No tool was executed during this delegation.]";
+
+    /**
+     * How a delegation failed, without the results of the calls that worked: the parts of its
+     * report that say so, in the report's order, a blank line between them
+     * ({@link Outcome#howFailed}).
+     */
+    private static String howFailed(String... parts) {
+        return Arrays.stream(parts).filter(Objects::nonNull).map(String::strip).filter(p -> !p.isEmpty())
+                .collect(Collectors.joining("\n\n"));
+    }
+
     /** The ledger of what ran, appended to a claim so the claim can be checked. */
     private static String ledger(List<Artifact> results) {
         if (results.isEmpty()) {
-            return "\n\n[No tool was executed during this delegation.]";
+            return "\n\n" + NO_TOOL_RAN;
         }
-        var sb = new StringBuilder("\n\n[Tools run: ");
+        var sb = new StringBuilder("\n\n" + TOOLS_RUN);
         for (int i = 0; i < results.size(); i++) {
             if (i > 0) sb.append(", ");
             Artifact r = results.get(i);
@@ -2244,7 +2279,9 @@ public class LocalExecutor {
                     : References.proseForTask(localSummary, results);
         }
         String body = buildConsolidatedResult(goal, results);
-        summary = summary.isEmpty() ? body : summary + "\n\n---\n" + body;
+        // What the delegation said of itself, before its results join it.
+        String claimed = summary;
+        summary = summary.isEmpty() ? body : summary + SUMMARY_RULE + body;
         // A delegation can fail on one step and still have SENT THE EMAIL on another. Reporting
         // it failed is right -- the traceback is what feeds the repair loop -- but it also hands
         // the registry back and tells the cloud to finish the job, and "on failure, try a
@@ -2267,13 +2304,14 @@ public class LocalExecutor {
         if (said != null) produced.add(said);
         boolean worked = !results.isEmpty()
                 || !given.isEmpty() && localSummary != null && !localSummary.isBlank();
+        // A step that threw means the cloud should have the registry back: rewriting a
+        // skill from its traceback is the self-learning loop this project exists for,
+        // and it cannot run through a paraphrase. Marking the delegation failed is what
+        // restores the registry and engages the repair path.
+        boolean ok = worked && !anyFailed;
         return new Outcome(head + summary + ledger(results) + verbatimFailures(results),
-                toolNames(results), results.size(),
-                // A step that threw means the cloud should have the registry back: rewriting a
-                // skill from its traceback is the self-learning loop this project exists for,
-                // and it cannot run through a paraphrase. Marking the delegation failed is what
-                // restores the registry and engages the repair path.
-                worked && !anyFailed, List.copyOf(produced));
+                toolNames(results), results.size(), ok, List.copyOf(produced), false,
+                ok ? null : howFailed(head + claimed, ledger(results), verbatimFailures(results)));
     }
 
     /** What the local model read: the results it was given, then its own. */
@@ -2359,18 +2397,26 @@ public class LocalExecutor {
         return sb.toString();
     }
 
+    /**
+     * A delegation that did not finish: why, and every result it had. Its account for later tasks
+     * ({@link Outcome#howFailed}) says which tools ran and how the failed ones failed where the
+     * report shows the results themselves: the ledger, and the failed steps verbatim.
+     */
     private Outcome partial(String reason, List<Artifact> results) {
         return new Outcome(buildPartialResult(reason, results), toolNames(results),
-                results.size(), false, List.copyOf(results));
+                results.size(), false, List.copyOf(results), false,
+                howFailed(INCOMPLETE + reason, ledger(results), verbatimFailures(results)));
     }
 
+    private static final String INCOMPLETE = "Delegation incomplete: ";
+
     private static String buildPartialResult(String reason, List<Artifact> results) {
-        return "Delegation incomplete: " + reason + "\n\n"
-                + (results.isEmpty() ? "" : "Partial results collected:\n\n" + resultsForCloud(results));
+        return INCOMPLETE + reason + "\n\n"
+                + (results.isEmpty() ? "" : PARTIAL_RESULTS + "\n\n" + resultsForCloud(results));
     }
 
     static String buildConsolidatedResult(String goal, List<Artifact> results) {
-        return "Delegation completed for: " + goal + "\n\n" + resultsForCloud(results);
+        return COMPLETED_FOR + goal + "\n\n" + resultsForCloud(results);
     }
 
     /**
@@ -2422,14 +2468,23 @@ public class LocalExecutor {
      *                  fix -- a name or a field it got wrong -- and not the local tier failing, so
      *                  it does not hand the cloud the skills for the rest of the task
      *                  (ThinkingEngine#delegationFailed)
+     * @param howFailed of a delegation that failed, how -- what had already been done, why it
+     *                  stopped, which tools ran, and each failed call's own error -- without the
+     *                  results of the calls that worked, which {@code text} shows the cloud whole;
+     *                  null of one that worked. The step's row keeps it beside {@code text}
+     *                  ({@code AgentLoop#HOW_FAILED}), and it is what a later task of the chat
+     *                  reads of the step ({@link TaskRecord}): that record says its results are
+     *                  not carried into the later task, and with the whole text they were -- one
+     *                  failed delegation's was 273,970 characters, the listing of every Home
+     *                  Assistant entity that a call that worked had returned, and every later turn
+     *                  of its chat began by sending it (178,000 tokens written to the cache, $1.46
+     *                  before any work, on 2026-11-15). Made here from the report's own parts,
+     *                  never cut out of the text afterwards: only the writer knows where a result
+     *                  ends.
      */
     public record Outcome(String text, List<String> toolsRun, int stepCount, boolean ok,
-                          List<Artifact> produced, boolean byCode) {
-        public Outcome(String text, List<String> toolsRun, int stepCount, boolean ok, List<Artifact> produced) {
-            this(text, toolsRun, stepCount, ok, produced, false);
-        }
-
-        static Outcome failed(String text) { return new Outcome(text, List.of(), 0, false, List.of()); }
+                          List<Artifact> produced, boolean byCode, String howFailed) {
+        static Outcome failed(String text) { return new Outcome(text, List.of(), 0, false, List.of(), false, text); }
     }
 
     /** Parsed action from the local executor LLM. */

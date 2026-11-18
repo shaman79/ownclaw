@@ -1620,6 +1620,9 @@ public class AgentLoop {
                 // Ended by the cloud's own calls, the local model given nothing: a stop there is no
                 // failure of the local tier (ThinkingEngine#delegationFailed).
                 if (outcome.byCode()) structured.put(BY_CODE, true);
+                // How it failed, without the results of the calls that worked: what a later task
+                // of the chat reads of this step (stepOutcome).
+                if (!ok && outcome.howFailed() != null) structured.put(HOW_FAILED, outcome.howFailed());
                 if (!outcome.toolsRun().isEmpty()) structured.put("delegatedTools", outcome.toolsRun());
                 if (!outcome.produced().isEmpty()) {
                     structured.put("artifacts", outcome.produced().stream().map(a -> Map.of(
@@ -1751,6 +1754,13 @@ public class AgentLoop {
      * (ThinkingEngine#delegationFailed).
      */
     static final String BY_CODE = "byCode";
+
+    /**
+     * Where a failed delegate step carries how it failed without the results of the calls that
+     * worked (LocalExecutor.Outcome#howFailed) -- in its observation, and in its row beside
+     * {@code reason}, which holds the delegation's whole report ({@link #stepOutcome}).
+     */
+    static final String HOW_FAILED = "howFailed";
 
     /**
      * A delegation refused before the local model was given anything: texts that are not an
@@ -4316,6 +4326,12 @@ public class AgentLoop {
         boolean withhold = action.isDelegate() && context.localTierReadPrivate()
                 || context.firstLeakIn(obs.output()) != null;
         stepOutcome(details, obs, claimed, withhold, context.secretValues());
+        // A failed delegation's own account of how it failed is the report's parts joined anew,
+        // and what later tasks read: asked the gateway's question on its own, as the report was.
+        if (details.containsKey(HOW_FAILED)
+                && context.firstLeakIn(String.valueOf(obs.structured().get(HOW_FAILED))) != null) {
+            details.remove(HOW_FAILED);
+        }
         return details;
     }
 
@@ -4333,6 +4349,14 @@ public class AgentLoop {
      * caller says to withhold it (see stepDetails). Without it a failure's reason reached only
      * the log and the model -- the 2026-09-24 "context window full" delegation left a row that
      * said FAILED and nothing else.
+     * <p>
+     * A failed delegation's reason is its whole report, the results of the calls that worked in
+     * it: whole here, for the owner's task page. What later tasks read of the step is how it
+     * failed without them, which the delegation made apart from its report
+     * (LocalExecutor.Outcome#howFailed) and the row keeps beside the reason ({@link #HOW_FAILED})
+     * -- where the reason is kept, and scrubbed as the reason is. Read out of the reason, the
+     * record of one failed delegation was 273,970 characters at the start of every later turn of
+     * its chat.
      */
     static void stepOutcome(Map<String, Object> details, AgentObservation obs,
                             java.util.Optional<Artifact> claimed, boolean withhold,
@@ -4344,6 +4368,9 @@ public class AgentLoop {
         if ((!obs.success() || reported) && !privateText) {
             String text = Redactor.scrubVault(obs.output(), secrets).text();
             details.put("reason", text == null ? "" : text);
+            if (obs.structured() != null && obs.structured().get(HOW_FAILED) instanceof String how) {
+                details.put(HOW_FAILED, Redactor.scrubVault(how, secrets).text());
+            }
         }
     }
 

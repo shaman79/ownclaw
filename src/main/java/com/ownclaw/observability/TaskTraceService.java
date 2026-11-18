@@ -179,6 +179,10 @@ public class TaskTraceService {
                     s.put("ok", d.path("success").asBoolean(false) && !Boolean.TRUE.equals(reported));
                     s.put("reportedFailure", reported);
                     s.put("reason", d.hasNonNull("reason") ? d.path("reason").asText() : null);
+                    // delegate, failed: how, without the results of the calls that worked, which the
+                    // reason holds whole -- what the record of the task says of the step (TaskRecord).
+                    // Absent on rows from before it was recorded.
+                    s.put("howFailed", d.hasNonNull("howFailed") ? d.path("howFailed").asText() : null);
                     s.put("durationMs", d.path("durationMs").asLong());
                     s.put("cloudCalls", recorded ? pending.size() : null);
                     s.put("cloudTokens", pending.isEmpty() ? cloudDelta : billed(pending));
