@@ -705,6 +705,22 @@ public class AgentContext {
         return Boolean.TRUE.equals(orchestratedFirst);
     }
 
+    /** See {@link #orchestrationNote}; null until the task's first step that sends it. */
+    private String orchestrationNote;
+
+    /**
+     * What delegate's description adds on this task ({@code ThinkingEngine#orchestrationNote}):
+     * written by {@code first} on the first step that sends it, and those bytes on every step
+     * after, whatever the skills it names have become. The description is in the tools, the front
+     * of the provider's cached prefix, and the note quotes each skill's own first sentence and
+     * parameters -- which a task's own skill_create can change, and then the next request wrote
+     * the whole conversation to the cache again (97,000 tokens, $0.53, on 2026-11-16).
+     */
+    public synchronized String orchestrationNote(java.util.function.Supplier<String> first) {
+        if (orchestrationNote == null) orchestrationNote = first.get();
+        return orchestrationNote;
+    }
+
     /**
      * How many steps the trajectory held when this task's cloud model was first given skills to
      * run -- on its first step, or when a delegation had failed -- or null while it has not been.

@@ -586,31 +586,48 @@ public class ThinkingEngine {
      * list that followed each message changed the front of every turn's prompt, and every turn
      * wrote the whole chat to the cache again ($2.02 for one turn a minute after the last, on
      * 2026-11-10).
+     * <p>
+     * Each skill it names is listed with its parameters ({@link ToolFinder#listed}): the cloud
+     * writes exact calls of these skills (delegate's 'calls') and is shown no schema of them, so
+     * it guessed the names -- smtp_send_email's body_text as 'body', on the news run's first
+     * delegation every morning.
+     * <p>
+     * Written once for the task, on the first step that sends it, and the same bytes on every
+     * step after ({@link AgentContext#orchestrationNote}), whatever the registry holds by then.
+     * It quotes each skill's own words, and a task can change a skill it names: on 2026-11-16 a
+     * self-repair's skill_create rewrote the first sentence of the skill it repaired, the note
+     * changed with it, and the next request wrote the whole conversation to the cache again --
+     * 97,000 tokens, $0.53. A note the task has made stale misleads nobody for long: what the
+     * task changed is in its own steps, a call is checked against the skill as it is when the
+     * call runs, and a refusal lists its parameters as they are then (LocalExecutor#misfit). The
+     * next task's note is written anew.
      */
     private String orchestrationNote(AgentContext context) {
-        var likeliest = new StringBuilder();
-        var names = new LinkedHashSet<String>();
-        if (context.isUnattended()) {
-            var added = context.toolsAdded();
-            if (added != null && !added.isEmpty()) names.addAll(added.getFirst().names());
-            names.addAll(context.usualTools());
-        } else {
-            // By name: the set changes when the owner's most used skills do, the order every time
-            // two of them swap places.
-            context.usualTools().stream().sorted().forEach(names::add);
-        }
-        for (String name : names) {
-            toolRegistry.find(name).ifPresent(t -> likeliest.append("\n- ").append(t.name()).append(": ")
-                    .append(ToolFinder.gist(t.description())));
-        }
-        return "\n\n" + (context.isUnattended() ? "You are orchestrating unattended work"
-                        : "The owner has chosen cost over speed")
-                + ", so while the local model can do the work you are not given the skills to run "
-                + "yourself — this is how the work gets done. State the goal fully and name the skills "
-                + "it needs in 'tools'; find_tools searches every skill."
-                + (likeliest.isEmpty() ? ""
-                        : (context.isUnattended() ? " The likeliest for this task:" : " The owner's usual skills:")
-                                + likeliest);
+        return context.orchestrationNote(() -> {
+            var likeliest = new StringBuilder();
+            var names = new LinkedHashSet<String>();
+            if (context.isUnattended()) {
+                var added = context.toolsAdded();
+                if (added != null && !added.isEmpty()) names.addAll(added.getFirst().names());
+                names.addAll(context.usualTools());
+            } else {
+                // By name: the set changes when the owner's most used skills do, the order every time
+                // two of them swap places.
+                context.usualTools().stream().sorted().forEach(names::add);
+            }
+            for (String name : names) {
+                toolRegistry.find(name).ifPresent(t -> likeliest.append("\n").append(ToolFinder.listed(t)));
+            }
+            return "\n\n" + (context.isUnattended() ? "You are orchestrating unattended work"
+                            : "The owner has chosen cost over speed")
+                    + ", so while the local model can do the work you are not given the skills to run "
+                    + "yourself — this is how the work gets done. State the goal fully and name the skills "
+                    + "it needs in 'tools'; find_tools searches every skill, and lists the parameters of each "
+                    + "it finds."
+                    + (likeliest.isEmpty() ? ""
+                            : (context.isUnattended() ? " The likeliest for this task:" : " The owner's usual skills:")
+                                    + likeliest);
+        });
     }
 
     /**

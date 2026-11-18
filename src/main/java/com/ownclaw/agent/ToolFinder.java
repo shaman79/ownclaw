@@ -2,6 +2,7 @@ package com.ownclaw.agent;
 
 import com.ownclaw.agent.tools.Tool;
 import com.ownclaw.agent.tools.ToolParam;
+import com.ownclaw.agent.tools.ToolSchemas;
 
 import java.util.ArrayList;
 import java.util.Collection;
@@ -136,6 +137,73 @@ final class ToolFinder {
         }
         if (word.length() > 3 && word.endsWith("s")) return word.substring(0, word.length() - 1);
         return word;
+    }
+
+    /**
+     * A skill as a model is listed it: its name and the first sentence of its description, then
+     * its parameters, a line each ({@link #parameters}). What find_tools says of a match, and what
+     * delegate's description says of each skill it names ({@code ThinkingEngine#orchestrationNote}).
+     */
+    static String listed(Tool tool) {
+        return "- " + tool.name() + ": " + gist(tool.description()) + "\n" + parameters(tool);
+    }
+
+    /**
+     * A tool's parameters as a model that is to write a call of it is told them, a line each: the
+     * name, its type where the declaration gives one a schema has
+     * ({@link ToolSchemas#normalizeType}; no type is said rather than a guessed one), whether it
+     * is required, and the first sentence of its description. Every one of them.
+     * <p>
+     * The cloud, orchestrating, is shown no skill's schema -- every skill is deferred in its tools
+     * -- and yet writes the exact calls code runs (delegate's 'calls'). All it read of a skill was
+     * the first sentence of its description, so it guessed the names: the news run's first
+     * delegation, every morning, sent smtp_send_email its text as 'body', which is body_text, and
+     * failed; on other days it read the skill's whole source for them (14,000 to 167,000
+     * characters), or left the calls to the local model (172 s for 30 s of work).
+     * <p>
+     * The same lines wherever a model is told a skill's parameters -- find_tools, delegate's
+     * description, the refusal of a call that does not fit them ({@code LocalExecutor#misfit}) --
+     * from the one reading of the declaration ({@link #declared}).
+     */
+    static String parameters(Tool tool) {
+        Map<String, ToolParam> declared = declared(tool);
+        if (declared.isEmpty()) return "  (no parameters)";
+        var sb = new StringBuilder();
+        declared.forEach((name, param) -> {
+            if (sb.length() > 0) sb.append('\n');
+            String type = ToolSchemas.normalizeType(param.type());
+            sb.append("  - ").append(name).append(" (").append(type == null ? "" : type + ", ")
+              .append(param.required() ? "required" : "optional").append(')');
+            String what = gist(param.description());
+            if (!what.isEmpty()) sb.append(": ").append(what);
+        });
+        return sb.toString();
+    }
+
+    /**
+     * The parameters a model may write in a call of the tool, in the order its schema sends them
+     * ({@link ToolSchemas#inAStableOrder}): what it declares, but for {@link #systemName system
+     * names}. One reading of a declaration, for the list a model is shown and for the check of a
+     * call against it, so a call is never refused over a name the list does not show.
+     */
+    static Map<String, ToolParam> declared(Tool tool) {
+        var out = new java.util.LinkedHashMap<String, ToolParam>();
+        Map<String, ToolParam> params = tool.inputSchema();
+        if (params == null) return out;
+        ToolSchemas.inAStableOrder(params).forEach((name, param) -> {
+            if (name != null && param != null && !systemName(name)) out.put(name, param);
+        });
+        return out;
+    }
+
+    /**
+     * A parameter name that is the system's own: it begins with an underscore, as what a skill is
+     * handed beside a call's arguments does ({@code _attached_files}, {@code _credentials}). A
+     * skill that declares one, because its code reads it, asks nothing of the model: it is not
+     * listed, not asked for, and not the model's to write.
+     */
+    static boolean systemName(String name) {
+        return name.startsWith("_");
     }
 
     /** The first sentence of a description: what a match is listed with. Its whole one is in the tools array. */
