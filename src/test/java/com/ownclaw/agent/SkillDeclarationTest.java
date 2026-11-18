@@ -303,8 +303,9 @@ class SkillDeclarationTest {
                 read("{\"type\": \"object\", \"properties\": {\"url\": {\"type\": \"string\"}}, \"required\": [\"url\", "
                         + "\"token\"]}").byName());
         assertEquals(new DynamicSkillRegistry.Declaration(Map.of(), true), read("{\"type\": \"object\", \"properties\": {}}"));
-        // Its properties alone show it: definitions, every one.
-        assertEquals(new DynamicSkillRegistry.Declaration(Map.of("url", Map.of("type", "string")), true),
+        // Its properties alone do not show it, though every one is a definition: it is as well
+        // one parameter called properties, defined by its fields. Read as the schema, in doubt.
+        assertEquals(new DynamicSkillRegistry.Declaration(Map.of("url", Map.of("type", "string")), false),
                 read("{\"properties\": {\"url\": {\"type\": \"string\"}}}"));
 
         // Parameters that are called properties and type: their definitions say text, not maps.

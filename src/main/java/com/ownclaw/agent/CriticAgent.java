@@ -130,8 +130,11 @@ public class CriticAgent {
 
         Tool tool = toolOpt.get();
 
-        // 3. Validate required parameters
-        var schema = tool.inputSchema();
+        // 3. Validate required parameters -- of a tool whose declaration of them was read in full.
+        // What was read of one in doubt says no more reliably which are required than which
+        // there are (Tool#declaredInFull): a field of a parameter, read as a required parameter
+        // of the skill, blocked the call that handed the skill that field where it belongs.
+        var schema = tool.declaredInFull() ? tool.inputSchema() : null;
         if (schema != null) {
             for (var entry : schema.entrySet()) {
                 if (entry.getValue().required()) {

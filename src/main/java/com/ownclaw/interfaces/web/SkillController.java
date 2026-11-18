@@ -172,6 +172,18 @@ public class SkillController {
     }
 
     /**
+     * The parameters a save from the page writes: the file's own where they are a declaration --
+     * a map, or a list that names a parameter -- and what the page sent where the file holds none
+     * or something skill_create would refuse (text, a number, an empty list in a file written by
+     * hand): refused, a save of the skill's code failed over a field the page cannot edit.
+     */
+    static Object parametersToSave(Object fileOwn, Object fromPage) {
+        boolean aDeclaration = fileOwn instanceof Map<?, ?>
+                || fileOwn instanceof List<?> && !DynamicSkillRegistry.readParameters(fileOwn).byName().isEmpty();
+        return aDeclaration ? fileOwn : fromPage;
+    }
+
+    /**
      * PUT /api/skills/{name} — update a skill's code and/or metadata.
      */
     @PutMapping("/{name}")
@@ -199,7 +211,7 @@ public class SkillController {
         // reads in full: what it had not read was gone from the file, and a call was then held
         // to the rest (the second review of the declaration's reader, 18 Nov 2026).
         Object declared = dynamicSkillRegistry.getDynamic(name).map(dynamicSkillRegistry::declaredAsWritten).orElse(null);
-        params.put("parameters", declared != null ? declared : body.getOrDefault("parameters", Map.of()));
+        params.put("parameters", parametersToSave(declared, body.getOrDefault("parameters", Map.of())));
 
         if (body.containsKey("requirements")) {
             params.put("requirements", body.get("requirements"));

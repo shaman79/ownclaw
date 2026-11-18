@@ -261,6 +261,80 @@ class DeclarationInDoubtTest {
         // holds what was read, url alone, read in full, and header_accept is refused.
     }
 
+    private static Object json(String text) throws Exception {
+        return new com.fasterxml.jackson.databind.ObjectMapper().readValue(text, Object.class);
+    }
+
+    @Test
+    @DisplayName("one name alone that a declaration is wrapped in is in doubt: a schema in shorthand whose properties are called title and description, a parameter called properties defined by its fields, a declaration under 'parameters' -- and beside another parameter such a name is a parameter like any other")
+    void aWrapperAloneIsInDoubt() throws Exception {
+        for (String declared : List.of(
+                "{\"properties\": {\"title\": \"string\", \"description\": \"string\", \"date\": \"string\"}}",
+                "{\"$schema\": \"https://example.org/schema\", \"properties\": {\"title\": \"string\", \"description\": \"string\"}}",
+                "{\"properties\": {\"email\": {\"type\": \"string\", \"required\": true}, \"firstname\": {\"type\": \"string\"}}}",
+                "{\"properties\": {\"url\": {\"type\": \"string\"}}}",
+                "{\"parameters\": {\"url\": {\"type\": \"string\", \"required\": true}}}",
+                "{\"input_schema\": {\"type\": \"object\", \"properties\": {\"url\": {\"type\": \"string\"}}}}",
+                "{\"schema\": {\"type\": \"object\", \"description\": \"What it takes\"}}")) {
+            assertFalse(DynamicSkillRegistry.readParameters(json(declared)).whole(), declared);
+        }
+        assertTrue(DynamicSkillRegistry.readParameters(json("{\"url\": {\"type\": \"string\"}, \"schema\": {\"type\": "
+                + "\"object\", \"description\": \"The schema to validate against\"}}")).whole());
+        // With its required names a schema needs no type to be one.
+        assertTrue(DynamicSkillRegistry.readParameters(json("{\"properties\": {\"url\": {\"type\": \"string\"}}, "
+                + "\"required\": [\"url\"]}")).whole());
+        // Mutations: a schema's word is a parameter wherever a definition stands under it, alone
+        // or not -> the first two, the fifth and the last are one parameter each, read in full;
+        // properties that are all maps show a schema -> the third and the fourth are read in full.
+    }
+
+    @Test
+    @DisplayName("a skill whose one parameter is called properties, defined by its fields: a call that hands it its fields is refused by neither the check of exact calls nor the critic of direct ones, whatever a field is marked")
+    void aParameterDefinedByItsFieldsIsHeldToNothing(@TempDir Path tmp) throws Exception {
+        DynamicSkill skill = onDisk(tmp, "contact_create", FREE_FORM,
+                "parameters:",
+                "  properties:",
+                "    email:",
+                "      type: string",
+                "      required: true",
+                "    firstname:",
+                "      type: string");
+        assertFalse(skill.declaredInFull());
+        var params = new LinkedHashMap<String, Object>();
+        params.put("properties", Map.of("email", "ops0@example.org", "firstname", "Ada"));
+        assertEquals(List.of(), LocalExecutor.misfit(skill, params));
+        var critic = new CriticAgent(new ToolRegistry(List.of(skill)));
+        var verdict = critic.evaluate(new AgentAction("contact_create", params, ""), new AgentContext("u1", "t1", "add her"));
+        assertTrue(verdict.allowed(), verdict.blockReason());
+        // Mutation: the critic holds a direct call to what was read of a declaration in doubt ->
+        // "Required parameter 'email' is missing for tool 'contact_create'".
+    }
+
+    @Test
+    @DisplayName("code reads a name through params whatever run calls its argument, and an assignment that also reads is a read")
+    void readThroughParamsUnderAnotherName(@TempDir Path tmp) throws Exception {
+        DynamicSkill renamed = onDisk(tmp, "page_fetch", String.join("\n",
+                "def run(args):",
+                "    params = args or {}",
+                "    return {'output': str(params.get('timeout', 30)) + args['url'], 'success': True}",
+                ""),
+                "parameters:", "  url:", "    type: string", "    required: true");
+        assertEquals(List.of(), LocalExecutor.misfit(renamed, Map.of("url", "https://example.org", "timeout", 5)));
+        assertEquals(List.of("'depth' is not one of its parameters"),
+                LocalExecutor.misfit(renamed, Map.of("url", "https://example.org", "depth", 2)));
+        DynamicSkill counting = onDisk(tmp, "page_count", String.join("\n",
+                "def run(params):",
+                "    params['count'] += 1",
+                "    params['limit'] = 10",
+                "    return {'output': str(params['count']), 'success': True}",
+                ""),
+                "parameters:", "  url:", "    type: string");
+        assertEquals(List.of("'limit' is not one of its parameters"),
+                LocalExecutor.misfit(counting, Map.of("url", "https://example.org", "count", 1, "limit", 5)));
+        // Mutations: only run's own name for its argument counts -> 'timeout' is refused; an
+        // assignment that also reads is a write -> 'count' is refused too.
+    }
+
     @Test
     @DisplayName("whatever is read in full is written by skill_create in a shape that reads back the same, in full -- parameters called by a schema's own words too; and what is read in full is never a schema's word taken for a parameter with nothing said of it")
     void whatIsReadInFullReadsBackTheSame() {

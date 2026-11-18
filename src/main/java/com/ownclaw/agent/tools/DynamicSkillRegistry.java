@@ -611,7 +611,7 @@ public class DynamicSkillRegistry {
      */
     public static Declaration readParameters(Object declared) {
         Declaration read = readAsItCan(declared);
-        return read.whole() && !unmistakable(declared, read.byName().keySet())
+        return read.whole() && (aWrapper(read.byName().keySet()) || !unmistakable(declared, read.byName().keySet()))
                 ? new Declaration(read.byName(), false) : read;
     }
 
@@ -659,8 +659,10 @@ public class DynamicSkillRegistry {
         boolean object = type instanceof String word && word.strip().equalsIgnoreCase("object");
         if (map.get("properties") instanceof Map<?, ?> properties && (object || !map.containsKey("type"))) {
             List<?> required = map.get("required") instanceof List<?> listed ? listed : null;
-            boolean shown = object || !properties.isEmpty() && (properties.values().stream().allMatch(d -> d instanceof Map<?, ?>)
-                    || required != null && !required.isEmpty());
+            // With no type, only its required names show it a schema. That its properties are
+            // all maps does not: {properties: {email: {...}, firstname: {...}}} is as well one
+            // parameter called properties, defined by its fields (the third review).
+            boolean shown = object || !properties.isEmpty() && required != null && !required.isEmpty();
             for (var e : map.entrySet()) {
                 String key = String.valueOf(e.getKey());
                 Object value = e.getValue();
@@ -719,6 +721,25 @@ public class DynamicSkillRegistry {
         if (!itsWords) return null;
         if (declared.get("properties") instanceof Map<?, ?> properties) return properties;
         return declared.get("type") instanceof String type && type.strip().equalsIgnoreCase("object") ? Map.of() : null;
+    }
+
+    /** The names a whole declaration is found wrapped in, where a model writes one level too many. */
+    private static final Set<String> WRAPPERS = Set.of("properties", "parameters", "params", "input_schema",
+            "inputSchema", "schema", "args", "arguments");
+
+    /**
+     * Whether what was read is one parameter alone -- words about a schema, {@code $schema}, aside
+     * -- under a name a declaration is wrapped in. However it was written, such a reading is in
+     * doubt: {parameters: {url: {...}}} is a parameter called parameters, or the declaration of
+     * url one level down; {properties: {title: "string", description: "string"}} is a parameter
+     * called properties whose description is the word "string", or a schema of two in shorthand.
+     * Read in full as the first, a call naming url, or title, was refused (the third review of
+     * the reader, 18 Nov 2026). And written by skill_create as the one shape it writes, a
+     * declaration of one such parameter is that same map, whatever shape said it first.
+     */
+    private static boolean aWrapper(Collection<String> names) {
+        var own = names.stream().filter(name -> !name.startsWith("$")).toList();
+        return own.size() == 1 && WRAPPERS.contains(own.getFirst());
     }
 
     /** Whether a map reads as one parameter's definition: it says a type or a description, in plain words. */
