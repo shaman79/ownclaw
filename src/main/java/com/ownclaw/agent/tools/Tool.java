@@ -32,6 +32,22 @@ public interface Tool {
     Map<String, ToolParam> inputSchema();
 
     /**
+     * Whether {@link #inputSchema} is all the tool declares. False for a skill whose declaration
+     * of its parameters could not be read in full ({@code DynamicSkillRegistry#readParameters}):
+     * the names read are then not known to be all it takes, so a call of it is not refused for a
+     * name outside them, and a model that is listed them is told the list may not be whole.
+     */
+    default boolean declaredInFull() { return true; }
+
+    /**
+     * Whether the tool's own code reads a parameter of this name, declared or not: a skill reads
+     * an alias, or an optional setting, that its declaration never mentions. A call that writes
+     * such a name is not refused for it ({@code LocalExecutor#misfit}) -- the name is not one the
+     * tool would ignore. False where that is not known, as for a tool whose code cannot be read.
+     */
+    default boolean readsParameter(String name) { return false; }
+
+    /**
      * Execute the tool with the given parameters.
      *
      * @param params   the parameters provided by the agent

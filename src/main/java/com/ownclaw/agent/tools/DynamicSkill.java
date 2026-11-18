@@ -96,6 +96,8 @@ public class DynamicSkill implements Tool {
     private final String name;
     private final String description;
     private final Map<String, ToolParam> parameters;
+    /** Whether {@link #parameters} is all its SKILL.yaml declares: false when part of that could not be read. */
+    private final boolean declaredInFull;
     private final Path skillDir;
     private final boolean requiresNetwork;
     private final boolean hasSideEffects;
@@ -148,11 +150,29 @@ public class DynamicSkill implements Tool {
                         List<String> systemPackages, String containerImage,
                         ContainerSandbox containerSandbox,
                         com.ownclaw.conversation.FileStorageService fileStorage) {
+        this(name, description, parameters, true, skillDir, requiresNetwork, declaredSideEffects, timeoutSec,
+                sandbox, pythonEnv, requiredCredentials, credentialVault, systemPackages, containerImage,
+                containerSandbox, fileStorage);
+    }
+
+    /**
+     * @param declaredInFull      whether {@code parameters} is all its SKILL.yaml declares
+     *                            ({@link DynamicSkillRegistry.Declaration#whole})
+     * @param declaredSideEffects what SKILL.yaml says of its side effects: true, false, or null for nothing
+     */
+    public DynamicSkill(String name, String description, Map<String, ToolParam> parameters, boolean declaredInFull,
+                        Path skillDir, boolean requiresNetwork, Boolean declaredSideEffects,
+                        int timeoutSec, SandboxManager sandbox, PythonEnvironmentService pythonEnv,
+                        List<String> requiredCredentials, CredentialVault credentialVault,
+                        List<String> systemPackages, String containerImage,
+                        ContainerSandbox containerSandbox,
+                        com.ownclaw.conversation.FileStorageService fileStorage) {
         this.declaredSideEffects = declaredSideEffects;
         boolean hasSideEffects = Boolean.TRUE.equals(declaredSideEffects);
         this.name = name;
         this.description = description;
         this.parameters = parameters;
+        this.declaredInFull = declaredInFull;
         this.skillDir = skillDir;
         this.requiresNetwork = requiresNetwork;
         this.hasSideEffects = hasSideEffects;
@@ -170,11 +190,48 @@ public class DynamicSkill implements Tool {
     @Override public String name() { return name; }
     @Override public String description() { return description; }
     @Override public Map<String, ToolParam> inputSchema() { return parameters; }
+    @Override public boolean declaredInFull() { return declaredInFull; }
     @Override public boolean requiresNetwork() { return requiresNetwork; }
     @Override public boolean hasSideEffects() { return hasSideEffects; }
     @Override public Boolean declaredSideEffects() { return declaredSideEffects; }
     @Override public int estimatedMaxDurationSeconds() { return timeoutSec; }
     @Override public List<String> requiredCredentials() { return requiredCredentials; }
+
+    /**
+     * Whether skill.py reads {@code name} from the parameters it is handed, read from the file
+     * when asked: the code may have changed since the skill was loaded.
+     */
+    @Override
+    public boolean readsParameter(String name) {
+        try {
+            String code = SkillJail.readAuthored(skillDir.resolve("skill.py"));
+            return code != null && readsParameter(code, name);
+        } catch (IOException e) {
+            return false;
+        }
+    }
+
+    /**
+     * Whether a skill's source reads {@code name} from {@code params} by that name:
+     * {@code params.get('name'}, {@code params['name']}, {@code params.pop('name'},
+     * {@code params.setdefault('name'}, or {@code 'name' in params} -- in either quote.
+     * <p>
+     * A call the cloud wrote is refused for a name its skill does not declare, because a skill
+     * ignores such a name without a word: a mail's text passed as 'body', which the mailer does
+     * not read, is a mail sent without it. A name the code reads is not ignored. Production has
+     * two that their skills read and do not declare, an alias and an optional timeout, and the
+     * cloud had no way to pass either (the review of e16a1ff, 2026-11-18).
+     * <p>
+     * A plain pattern over the text, not a reading of the Python: it also finds the name in a
+     * comment or a string, and misses one read through another variable. Either way the worst
+     * is what held before the check -- a name let through that the skill ignores, or one refused
+     * that it would have read.
+     */
+    private static boolean readsParameter(String code, String name) {
+        String quoted = "(?:'" + Pattern.quote(name) + "'|\"" + Pattern.quote(name) + "\")";
+        return Pattern.compile("\\bparams\\s*(?:\\.\\s*(?:get|pop|setdefault)\\s*\\(|\\[)\\s*" + quoted
+                + "|" + quoted + "\\s+(?:not\\s+)?in\\s+params\\b").matcher(code).find();
+    }
 
     @Override
     public List<String> ungranted(String userId) {

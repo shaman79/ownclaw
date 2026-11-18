@@ -448,7 +448,15 @@ public class DynamicSkillRegistry {
             return null;
         }
 
-        Map<String, ToolParam> parameters = parseParameters(yaml);
+        Declaration declared = readParameters(yaml.get("parameters"));
+        if (!declared.whole()) {
+            // Its name alone: once per load, for whoever reads the log to put the declaration right.
+            log.warn("Skill '{}': the declaration of its parameters in SKILL.yaml could not be read in full, so "
+                    + "a call of it is not held to the names that were read, and a model listed them is told "
+                    + "so. A declaration is a map of each parameter's name to its type, its description and "
+                    + "whether it is required.", name);
+        }
+        Map<String, ToolParam> parameters = toolParams(declared);
         boolean requiresNetwork = Boolean.TRUE.equals(yaml.get("requires_network"));
         // Three states: a SKILL.yaml that says nothing is not one that says false (Tool#declaredSideEffects).
         Boolean hasSideEffects = yaml.get("has_side_effects") instanceof Boolean b ? b : null;
@@ -457,7 +465,7 @@ public class DynamicSkillRegistry {
         List<String> systemPackages = parseStringList(yaml, "system_packages");
         String containerImage = getString(yaml, "container_image");
 
-        return new DynamicSkill(name, description, parameters, skillDir,
+        return new DynamicSkill(name, description, parameters, declared.whole(), skillDir,
                 requiresNetwork, hasSideEffects, timeout, sandbox, pythonEnv,
                 credentials, credentialVault, systemPackages, containerImage, containerSandbox,
                 fileStorage);
@@ -531,40 +539,235 @@ public class DynamicSkillRegistry {
     }
 
     /**
-     * The parameters a SKILL.yaml declares, in its order: each name with its definition -- its
-     * type, its description, whether it is required.
-     * <p>
-     * Or the same written as a JSON Schema -- {@code type: object}, the definitions under
-     * {@code properties}, the required names in a list -- as the model that writes a skill
-     * sometimes declares them; skill_create keeps what it is handed. Read as a map of names, that
-     * was one parameter called "properties" and no other: imap_move_to_bin_by_sender_gmail,
-     * declared so, was offered to the model with that one parameter, and its own five nowhere. A
-     * call the cloud writes is held to what its skill declares (LocalExecutor#misfit): held to
-     * that reading, a call naming the skill's real parameters would be refused.
+     * A skill's parameters as its declaration was read ({@link #readParameters}).
+     *
+     * @param byName each parameter's definition by its name, in the declaration's order: its
+     *               {@code type}, its {@code description} and whether it is {@code required},
+     *               where the declaration says them
+     * @param whole  whether all of the declaration was read. Where part of it was not -- a shape
+     *               nobody foresaw -- the names read are not known to be all the skill takes: a
+     *               call of it is not refused for a name outside them (LocalExecutor#misfit), and
+     *               a model that is listed them is told so (ToolFinder#parameters)
      */
-    @SuppressWarnings("unchecked")
-    private Map<String, ToolParam> parseParameters(Map<String, Object> yaml) {
-        Object paramsObj = yaml.get("parameters");
-        if (!(paramsObj instanceof Map)) return Map.of();
+    public record Declaration(Map<String, Map<String, Object>> byName, boolean whole) {}
 
-        Map<String, Object> paramsMap = (Map<String, Object>) paramsObj;
-        List<?> requiredNames = List.of();
-        if ("object".equals(paramsMap.get("type")) && paramsMap.get("properties") instanceof Map<?, ?> properties) {
-            if (paramsMap.get("required") instanceof List<?> names) requiredNames = names;
-            paramsMap = (Map<String, Object>) properties;
+    /**
+     * The parameters a skill declares: the one reader of a declaration, for what skill_create is
+     * handed -- SkillManager writes SKILL.yaml from this reading -- and for a SKILL.yaml as it is
+     * loaded, so the two cannot read one declaration two ways.
+     * <p>
+     * A declaration is a map of each name to its definition: its type, its description, whether
+     * it is required. No entry of it is dropped. A definition written as a scalar is a parameter
+     * too -- its text the type when it names one, its description otherwise -- and one left empty
+     * is a string. Only definitions that were maps used to be read, and skill_create wrote a
+     * declaration handed as a JSON string as it came: {"url": "string", "timeout": {"type":
+     * "integer"}} made a skill that declared timeout alone, and a delegated call naming url,
+     * which its code reads, was refused as naming a parameter the skill does not have -- with a
+     * list of its parameters that left url out, so the cloud could not correct the call; one in
+     * shorthand throughout declared nothing, and the cloud was told "(no parameters)" (the review
+     * of e16a1ff, 2026-11-18).
+     * <p>
+     * The same written as a JSON Schema is read as its properties ({@link #schemaProperties}):
+     * read as a map of names, that was one parameter called "properties" and no other, which is
+     * how imap_move_to_bin_by_sender_gmail was offered to the model, its own five nowhere. A list
+     * of definitions that each give their name is read too.
+     * <p>
+     * What is none of these is not guessed at, and not passed off as read: a declaration that is
+     * no map and no list, an entry of a list that names no parameter, a schema whose type is not
+     * an object's, a keyword of a schema this does not know -- one that may hold more names, or
+     * say that others are taken -- and a map under "properties" that is neither shown to be a
+     * schema's nor reads as the definition of a parameter of that name. The rest is read, and the
+     * declaration is said not to have been read in full ({@link Declaration#whole}).
+     *
+     * @param declared what SKILL.yaml holds under {@code parameters}, or skill_create was handed
+     */
+    public static Declaration readParameters(Object declared) {
+        var byName = new LinkedHashMap<String, Map<String, Object>>();
+        if (declared == null) return new Declaration(byName, true);
+        if (declared instanceof Map<?, ?> map) {
+            Map<?, ?> properties = schemaProperties(map);
+            if (properties == null) {
+                // A map of names that lists its required ones the schema's way: no parameter.
+                List<String> required = requiredNames(map.get("required"));
+                boolean ofItsNames = required != null && !required.isEmpty()
+                        && required.stream().allMatch(n -> !n.equals("required") && map.containsKey(n));
+                map.forEach((name, def) -> {
+                    if (!ofItsNames || !"required".equals(name)) byName.put(String.valueOf(name), definition(def));
+                });
+                if (ofItsNames) required.forEach(n -> byName.get(n).put("required", true));
+                // What stands under "properties" and was shown to be no schema's is the definition
+                // of a parameter of that name. Where it does not read as one either -- a list, a
+                // map with a key no definition is written in, a type beside it that says "object"
+                // -- it is read as that parameter all the same, and the names read are not known
+                // to be the skill's.
+                Object under = map.get("properties");
+                boolean whole = !map.containsKey("properties") || !isObject(map.get("type"))
+                        && !(under instanceof Collection<?>)
+                        && (!(under instanceof Map<?, ?> defined) || definitionWords(defined) == defined.size());
+                return new Declaration(byName, whole);
+            }
+            boolean whole = true;
+            properties.forEach((name, def) -> byName.put(String.valueOf(name), definition(def)));
+            for (var e : map.entrySet()) {
+                String keyword = String.valueOf(e.getKey());
+                Object value = e.getValue();
+                switch (keyword) {
+                    case "properties" -> { }
+                    // An object's. Any other type is a schema of something this does not know.
+                    case "type" -> whole &= value == null || isObject(value);
+                    case "required" -> {
+                        List<String> names = requiredNames(value);
+                        if (names == null) {
+                            whole = false;
+                        } else {
+                            // A name it requires and does not define is a parameter all the same.
+                            names.forEach(n -> byName.computeIfAbsent(n, x -> new LinkedHashMap<>()).put("required", true));
+                        }
+                    }
+                    // No other name is taken: what this reading holds anyway.
+                    case "additionalProperties" -> whole &= Boolean.FALSE.equals(value);
+                    // Words about the schema, or -- $schema, $id -- for whoever reads one: none a parameter.
+                    default -> whole &= (keyword.equals("title") || keyword.equals("description")
+                            || keyword.startsWith("$")) && !(value instanceof Map<?, ?>) && !(value instanceof Collection<?>);
+                }
+            }
+            return new Declaration(byName, whole);
         }
-        Map<String, ToolParam> result = new LinkedHashMap<>();
+        if (declared instanceof List<?> list) {
+            boolean whole = true;
+            for (Object item : list) {
+                if (item instanceof Map<?, ?> named && nameOf(named.get("name")) != null) {
+                    Map<String, Object> def = definition(named);
+                    def.remove("name");
+                    byName.put(nameOf(named.get("name")), def);
+                } else if (nameOf(item) != null) {
+                    byName.put(nameOf(item), definition(null));
+                } else {
+                    whole = false;
+                }
+            }
+            return new Declaration(byName, whole);
+        }
+        return new Declaration(byName, false);
+    }
 
-        for (var entry : paramsMap.entrySet()) {
-            if (entry.getValue() instanceof Map paramDef) {
-                String type = paramDef.containsKey("type") ? String.valueOf(paramDef.get("type")) : "string";
-                String desc = paramDef.containsKey("description") ? String.valueOf(paramDef.get("description")) : "";
-                boolean required = Boolean.TRUE.equals(paramDef.get("required"))
-                        || requiredNames.contains(entry.getKey());
-                result.put(entry.getKey(), new ToolParam(type, desc, required));
+    /** What a model writes for a type where a definition is asked for: {"url": "string"}. */
+    private static final java.util.regex.Pattern TYPE_NAME = java.util.regex.Pattern.compile(
+            "(?i)string|str|int|integer|number|float|bool|boolean|array|list|object");
+
+    /**
+     * One parameter's definition as it is read: a map as it stands; nothing at all as a string;
+     * anything else by its text -- the type when it names one, the description otherwise. Either
+     * way the parameter is there, which is the point: dropped, the skill registered without it,
+     * the model was told the skill takes no such argument, and the Python died on a missing key
+     * while skill_create had reported success.
+     */
+    private static Map<String, Object> definition(Object def) {
+        var out = new LinkedHashMap<String, Object>();
+        if (def instanceof Map<?, ?> map) {
+            map.forEach((key, value) -> out.put(String.valueOf(key), value));
+        } else if (def == null) {
+            out.put("type", "string");
+        } else {
+            String text = String.valueOf(def).trim();
+            if (TYPE_NAME.matcher(text).matches()) {
+                out.put("type", text.toLowerCase(Locale.ROOT));
+            } else {
+                out.put("type", "string");
+                out.put("description", text);
             }
         }
+        return out;
+    }
 
+    /**
+     * The properties of a declaration written as a JSON Schema, or null when it is read as a map
+     * of names. A map under {@code properties} is a schema's where something shows it: every
+     * value in it is a map, which the definition of a parameter called "properties" is not --
+     * a definition's type and description are text; or the declaration's {@code required} names
+     * are names in it; or its {@code type} says "object" ({@link #isObject}) and no key in it is
+     * a word a definition is written in ({@link #definitionWords}). The type need not be there:
+     * models leave it out. A {@code properties} with nothing in it is a schema's only beside a
+     * type that says so -- alone, nothing tells it from a parameter of that name.
+     * <p>
+     * The properties may themselves be in shorthand, as a map of names may be: {"type": "object",
+     * "properties": {"url": "string"}}. Taken for a map of names because not every value is a
+     * map, that is a skill with the parameters type and properties, read in full, and a call
+     * naming url is refused -- the refusal this reading is there to end.
+     */
+    private static Map<?, ?> schemaProperties(Map<?, ?> declared) {
+        if (!(declared.get("properties") instanceof Map<?, ?> properties)) return null;
+        boolean object = isObject(declared.get("type"));
+        if (properties.isEmpty()) return object ? properties : null;
+        if (properties.values().stream().allMatch(def -> def instanceof Map<?, ?>)) return properties;
+        List<String> required = requiredNames(declared.get("required"));
+        if (required != null && !required.isEmpty() && required.stream().allMatch(properties::containsKey)) {
+            return properties;
+        }
+        return object && definitionWords(properties) == 0 ? properties : null;
+    }
+
+    /** What a parameter's definition says of it: the words it is written in. */
+    private static final Set<String> DEFINITION_WORDS = Set.of("type", "description", "required", "default",
+            "enum", "items", "properties", "example", "examples", "format", "nullable", "minimum", "maximum");
+
+    /**
+     * How many keys of a map are words a parameter's definition is written in. All of them: it
+     * reads as a definition. None: it is no definition, but names -- "url", "depth". Some: either.
+     */
+    private static long definitionWords(Map<?, ?> map) {
+        return map.keySet().stream().filter(key -> key instanceof String word && DEFINITION_WORDS.contains(word)).count();
+    }
+
+    /**
+     * Whether a schema's {@code type} says "object": in any case -- or as {type: object}, which is
+     * what skill_create's reading of a schema handed as an object once made of the word, taking
+     * it for a parameter's type in shorthand.
+     */
+    private static boolean isObject(Object type) {
+        if (type instanceof Map<?, ?> rewritten && rewritten.size() == 1) type = rewritten.get("type");
+        return type instanceof String object && object.strip().equalsIgnoreCase("object");
+    }
+
+    /**
+     * The names a schema's {@code required} holds, or null when it is no list of names: a list
+     * of them -- or the definition skill_create's reading once made of one, whose description
+     * is the list's text, "[url, depth]".
+     */
+    private static List<String> requiredNames(Object required) {
+        if (required instanceof Map<?, ?> rewritten && rewritten.get("description") instanceof String text
+                && text.strip().startsWith("[") && text.strip().endsWith("]")) {
+            String inside = text.strip();
+            required = Arrays.stream(inside.substring(1, inside.length() - 1).split(","))
+                    .map(String::strip).filter(n -> !n.isEmpty()).toList();
+        }
+        if (!(required instanceof List<?> list)) return null;
+        var names = new ArrayList<String>();
+        for (Object item : list) {
+            if (nameOf(item) == null) return null;
+            names.add(nameOf(item));
+        }
+        return names;
+    }
+
+    /** {@code item} as a parameter's name -- text with no blank in it -- or null when it is none. */
+    private static String nameOf(Object item) {
+        return item instanceof String name && !name.isBlank() && !name.strip().matches(".*\\s.*")
+                ? name.strip() : null;
+    }
+
+    /** The declared parameters as a tool's schema holds them. */
+    private static Map<String, ToolParam> toolParams(Declaration declared) {
+        Map<String, ToolParam> result = new LinkedHashMap<>();
+        declared.byName().forEach((name, def) -> {
+            // A description written as null is none given, not the word "null" -- which is what a
+            // model was listed, "(string, optional): null". A type written so is a missing one's.
+            Object type = def.get("type");
+            Object description = def.get("description");
+            result.put(name, new ToolParam(type == null ? "string" : String.valueOf(type),
+                    description == null ? "" : String.valueOf(description),
+                    Boolean.TRUE.equals(def.get("required"))));
+        });
         return result;
     }
 

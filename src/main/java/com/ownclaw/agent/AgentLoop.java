@@ -2226,10 +2226,12 @@ public class AgentLoop {
 
     /**
      * find_tools: one page of the skills that match the query, best first, each with the first
-     * sentence of its description and its parameters ({@link ToolFinder#listed}); the matches join
-     * the task's tools ({@link AgentContext#addTaskTools}), so from the next step a model that
-     * calls skills has their whole descriptions and schemas. The cloud orchestrating only never
-     * has: what this lists is all it is shown of a skill it writes exact calls for.
+     * sentence of its description; the matches join the task's tools
+     * ({@link AgentContext#addTaskTools}), so from the next step a model that calls skills has
+     * their whole descriptions and schemas, and is listed no more than that sentence. The cloud
+     * orchestrating only never has them, and writes exact calls for the skills all the same:
+     * it is listed each match with its parameters ({@link ToolFinder#listed}), which is all it
+     * is shown of one.
      */
     private String findTools(Map<String, Object> params, AgentContext context) {
         Object query = params.get("query");
@@ -2267,11 +2269,17 @@ public class AgentLoop {
               .append(", best first");
         }
         // On local-first work -- unattended, or a chat that prefers cost -- the cloud calls no
-        // skill: it names them to delegate.
-        sb.append(context.offeredTools() != null
+        // skill: it names them to delegate, and writes their calls without a schema of any, so
+        // its list has each one's parameters. A model that calls skills itself is sent their
+        // schemas on its next step: listed here as well, it would pay for them twice.
+        boolean orchestrating = context.offeredTools() != null;
+        sb.append(orchestrating
                 ? ". They are for delegate's 'tools': you do not call them yourself:\n"
                 : ". You can call them from your next step:\n");
-        for (var tool : found.tools()) sb.append(ToolFinder.listed(tool)).append('\n');
+        for (var tool : found.tools()) {
+            sb.append(orchestrating ? ToolFinder.listed(tool)
+                    : "- " + tool.name() + ": " + ToolFinder.gist(tool.description())).append('\n');
+        }
         if (found.page() < found.pages()) {
             sb.append("More: find_tools with the same query and page ").append(found.page() + 1)
               .append(" (of ").append(found.pages()).append(").");

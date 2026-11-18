@@ -354,6 +354,28 @@ class FailedDelegationRecordTest {
         // the line that says no tool ran is gone from ranNothing's.
     }
 
+    @Test
+    @DisplayName("what a failed delegation is told before its report -- that its goal named a result that does not exist, that it named a tool that does not -- is in how it failed too, as it stands in the report")
+    void theNotesAreInTheAccount() {
+        var plan = new DelegationPlan("Then page the owner about {{7}}.", List.of(), List.of(),
+                List.of("ha_entities", "notify", "pager"), Map.of(),
+                List.of(c("ha_entities", Map.of()), c("notify", Map.of("message", "{{call1}}"))));
+
+        var report = executor(new DelegationBehaviourTest.Scripted(), new DelegationBehaviourTest.Usage(), entities(), notifier())
+                .execute(plan, task(), UNCOUNTED);
+
+        assertFalse(report.ok());
+        String notes = report.text().substring(0, report.text().indexOf("ALREADY DONE"));
+        assertTrue(notes.startsWith("NOTE: the delegation's goal named results that do not exist,")
+                && notes.contains("\n\nNOTE: no tool is named pager, so ") && notes.endsWith("\n\n"), report.text());
+        assertTrue(report.howFailed().startsWith(notes + "ALREADY DONE — these succeeded and must NOT be repeated: "
+                + "ha_entities."), report.howFailed());
+        assertTrue(report.howFailed().endsWith("ERROR: " + UNAVAILABLE), report.howFailed());
+        assertFalse(report.howFailed().contains(MARK), report.howFailed());
+        // Mutation: how it failed without the notes its report begins with -> a later turn reads
+        // that the calls stopped, and not that the tool the goal was to page with does not exist.
+    }
+
     // ───────────────────────── the rows ─────────────────────────
 
     static AgentAction delegate() {
@@ -384,8 +406,9 @@ class FailedDelegationRecordTest {
     }
 
     @Test
-    @DisplayName("how a delegation failed is scrubbed of the vault's values as its reason is, and is not kept when it holds what the gateway would not send")
-    void theAccountIsScrubbedAsTheReasonIs() {
+    @DisplayName("how a delegation failed is scrubbed of the vault's values as its reason is, and is not kept when it holds what the gateway would not send -- in the step's row, and so in what a later turn of the chat is given of the task")
+    void theAccountIsScrubbedAsTheReasonIs(@TempDir Path tmp) throws Exception {
+        var events = events(tmp);
         String secret = "notify-canary-pass-88";
         var ctx = new AgentContext("u1", "t1", "list the entities");
         ctx.setSecretValues(Map.of("NOTIFY_PASS", secret));
@@ -398,6 +421,12 @@ class FailedDelegationRecordTest {
         assertFalse(String.valueOf(details.get(AgentLoop.HOW_FAILED)).contains(secret), String.valueOf(details));
         assertTrue(String.valueOf(details.get(AgentLoop.HOW_FAILED)).endsWith("ERROR: HTTP 401: «vault:NOTIFY_PASS» was refused"),
                 String.valueOf(details.get(AgentLoop.HOW_FAILED)));
+        // The record a later turn is sent is made of that row: the name where the value stood.
+        String later = TaskRecord.forLaterTask("t1",
+                new Rows(events, ctx).step(delegate(), failed(report)).ended("COMPLETED").trace());
+        assertFalse(later.contains(secret), later);
+        assertTrue(later.contains("ERROR: HTTP 401: «vault:NOTIFY_PASS» was refused\nIt answered after "), later);
+        assertFalse(later.contains(MARK), later);
 
         // A private result of the task, which the failed call's error quotes: nothing of it is kept.
         var quoting = new AgentContext("u1", "t2", "parse the statement");
@@ -409,13 +438,19 @@ class FailedDelegationRecordTest {
         // Asked of how it failed by itself too: it is the report's parts joined anew.
         var apart = new LinkedHashMap<String, Object>();
         apart.put(AgentLoop.HOW_FAILED, "Delegation incomplete: could not send: " + statement);
-        var alone = AgentLoop.stepDetails(quoting, delegate(),
-                AgentObservation.failure(AgentAction.DELEGATE, "Delegation incomplete: could not send.", apart, 5), 2);
+        var saidApart = AgentObservation.failure(AgentAction.DELEGATE, "Delegation incomplete: could not send.", apart, 5);
+        var alone = AgentLoop.stepDetails(quoting, delegate(), saidApart, 2);
         assertTrue(alone.containsKey("reason"), String.valueOf(alone));
         assertFalse(alone.containsKey(AgentLoop.HOW_FAILED), String.valueOf(alone));
+        // A later turn reads that the first failed and no more, and of the second its reason alone.
+        String laterQuoting = TaskRecord.forLaterTask("t2", new Rows(events, quoting).step(delegate(), failed(leaking))
+                .step(delegate(), saidApart).ended("COMPLETED").trace());
+        assertFalse(laterQuoting.contains("CZ65") || laterQuoting.contains("41200"), laterQuoting);
+        assertTrue(laterQuoting.contains("\n1. ✗ delegate · 1.2s\n2. ✗ delegate · 5ms — Delegation incomplete: could "
+                + "not send.\nIt answered after "), laterQuoting);
         // Mutations: how it failed stored as the delegation wrote it -> the vault's value is in the
         // row, and in every later turn of the chat; not asked the gateway's question by itself ->
-        // the last row keeps the statement's line.
+        // the last row keeps the statement's line, and the later turn is sent it.
     }
 
     @Test

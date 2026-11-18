@@ -307,8 +307,9 @@ public class LocalExecutor {
      * the cloud planned on no longer holds. The cloud is told what ran, what stopped them, and
      * that the rest did not run; the local model is not given the goal.
      * <p>
-     * None of them runs when one does not fit the parameters its skill declares: that is asked of
-     * all of them first ({@link #callsThatDoNotFit}).
+     * None of them runs when one cannot run as written -- its tool does not exist, or it does not
+     * fit the parameters its skill declares: that is asked of all of them first
+     * ({@link #callsThatCannotRun}).
      *
      * @param mine the delegation's results, which the calls' join
      * @return how the delegation ends: with the calls when they are all of it, or when one of them
@@ -318,9 +319,9 @@ public class LocalExecutor {
                              List<Artifact> mine) {
         List<DelegationPlan.Call> calls = plan.calls();
         if (calls.isEmpty()) return null;
-        // Every call against its skill's parameters, before the first of them runs.
-        Outcome unfit = callsThatDoNotFit(plan);
-        if (unfit != null) return unfit;
+        // Every call against the tools there are and its skill's parameters, before the first of them runs.
+        Outcome cannot = callsThatCannotRun(plan);
+        if (cannot != null) return cannot;
         for (int i = 0; i < calls.size(); i++) {
             if (parentContext.isCancelled()) return byCode(partial("Task cancelled during delegation.", mine));
             DelegationPlan.Call call = calls.get(i);
@@ -351,10 +352,11 @@ public class LocalExecutor {
     }
 
     /**
-     * The delegation refused because a call the cloud wrote does not fit the parameters its skill
-     * declares ({@link #misfit}), or null when every call fits. Asked of every call before the
-     * first of them runs, and one that does not fit refuses them all: nothing has run, so there
-     * is nothing to keep from running twice, and the cloud sends the calls again, corrected.
+     * The delegation refused because a call the cloud wrote cannot run as written, or null when
+     * each of them can: a call of a tool that does not exist, or one that does not fit the
+     * parameters its skill declares ({@link #misfit}). Asked of every call before the first of
+     * them runs, and one that cannot run refuses them all: nothing has run, so there is nothing
+     * to keep from running twice, and the cloud sends the calls again, corrected.
      * <p>
      * The cloud writes these calls for skills whose schema it is never shown, and a wrong name was
      * found out only where the call ran -- by the skill, as its own failure, after the calls
@@ -363,46 +365,74 @@ public class LocalExecutor {
      * its skill takes ({@link ToolFinder#parameters}, the lines find_tools lists), so the next
      * attempt is written from the names and not from another guess.
      * <p>
+     * A call of a tool that does not exist is said in the words it is refused with where it
+     * runs ({@link #noSuchTool}, {@link #NO_SKILL_CREATE}). It used to be left to that refusal,
+     * at its turn: of a mail and a mistyped name after it, the mail went out and the delegation
+     * stopped at call 2 -- work the cloud wrote as one piece, half done (the review of e16a1ff,
+     * 2026-11-18). With a call that does not fit beside it, the two are one refusal.
+     * <p>
      * It leaves no result, as a call refused for a grant leaves none ({@link #act}): no skill ran,
      * so there is no failure of one for self-repair to take up, and the step is one that ran
-     * nothing ({@code AgentLoop#stepRanNothing}). A name no tool has is left to its own refusal,
-     * where its call would run.
+     * nothing ({@code AgentLoop#stepRanNothing}).
      */
-    private Outcome callsThatDoNotFit(DelegationPlan plan) {
+    private Outcome callsThatCannotRun(DelegationPlan plan) {
         List<DelegationPlan.Call> calls = plan.calls();
-        var unfit = new ArrayList<String>();
+        var cannot = new ArrayList<String>();
         var skills = new LinkedHashMap<String, Tool>();
+        int ofNoTool = 0;
         for (int i = 0; i < calls.size(); i++) {
-            Tool tool = toolRegistry.find(calls.get(i).tool()).orElse(null);
-            if (tool == null) continue;
+            String written = calls.get(i).tool();
+            Tool tool = "skill_create".equals(written) ? null : toolRegistry.find(written).orElse(null);
+            if (tool == null) {
+                cannot.add("- call " + (i + 1) + " (" + written + "): "
+                        + ("skill_create".equals(written) ? NO_SKILL_CREATE : noSuchTool(written, true)));
+                ofNoTool++;
+                continue;
+            }
             List<String> wrong = misfit(tool, calls.get(i).params());
             if (wrong.isEmpty()) continue;
-            unfit.add("- call " + (i + 1) + " (" + tool.name() + "): " + String.join("; ", wrong) + ".");
+            cannot.add("- call " + (i + 1) + " (" + tool.name() + "): " + String.join("; ", wrong) + ".");
             skills.putIfAbsent(tool.name(), tool);
         }
-        if (unfit.isEmpty()) return null;
+        if (cannot.isEmpty()) return null;
         boolean one = calls.size() == 1;
         var sb = new StringBuilder("Not run: ");
         if (one) {
-            sb.append("the call does not fit the parameters its skill declares, so it was not run:\n");
+            sb.append("the call cannot run as written, so it was not run:\n");
         } else {
-            sb.append(unfit.size() == 1
-                            ? "one of the " + calls.size() + " calls does not fit the parameters its skill declares"
-                            : unfit.size() + " of the " + calls.size() + " calls do not fit the parameters their "
-                                    + "skills declare")
-              .append(", so none of them was run -- every call is checked before the first one runs:\n");
+            sb.append(cannot.size() == 1 ? "one" : String.valueOf(cannot.size())).append(" of the ")
+              .append(calls.size()).append(" calls cannot run as written, so none of them was run -- every call "
+                      + "is checked before the first one runs:\n");
         }
-        sb.append(String.join("\n", unfit));
+        sb.append(String.join("\n", cannot));
         skills.forEach((name, tool) -> sb.append("\nParameters of ").append(name).append(":\n")
                 .append(ToolFinder.parameters(tool)));
-        sb.append(one ? "\nSend the call again with these names."
-                : "\nSend the calls again with these names -- all of them: nothing has run.");
+        sb.append(one ? "\nSend the call again, corrected."
+                : "\nSend the calls again, corrected -- all of them: nothing has run.");
         if (!plan.goal().isBlank()) sb.append(" The local model was not given the goal.");
         String text = sb + ledger(List.of());
-        // The skills' names only: what the call wrote is the task's to show, not the log's.
-        log.warn("Delegation not started: {} of its {} call(s) do not fit the parameters of {}.", unfit.size(),
-                calls.size(), skills.keySet());
+        // The skills' names only: what the call wrote is the task's to show, not the log's -- the
+        // name of a tool that does not exist is the call's own writing, and is counted here.
+        log.warn("Delegation not started: {} of its {} call(s) cannot run as written -- {} of a tool that does "
+                + "not exist, the rest not fitting the parameters of {}.", cannot.size(), calls.size(), ofNoTool,
+                skills.keySet());
         return new Outcome(text, List.of(), 0, false, List.of(), true, text);
+    }
+
+    /** Why a call of skill_create is not run in a delegation, as the model that wrote the call is told. */
+    private static final String NO_SKILL_CREATE = "skill_create is not available during delegation. "
+            + "Only existing tools can be used. Pick a different tool from the plan.";
+
+    /**
+     * Why a call of a name no tool has is not run, as the model that wrote the call is told: the
+     * cloud, of a call code was to run for it, or the local model of its own. One wording where
+     * the call is refused at its turn ({@link #act}) and where the cloud's calls are checked
+     * before the first of them runs ({@link #callsThatCannotRun}).
+     */
+    private static String noSuchTool(String name, boolean byCode) {
+        return "there is no tool named '" + name + "'. " + (byCode
+                ? "Use the exact name, as find_tools lists it."
+                : "Call one of the tools you were given, by its exact name.");
     }
 
     /**
@@ -414,18 +444,31 @@ public class LocalExecutor {
      * of a result, not a parameter. A name that begins with an underscore is the system's own,
      * and never the cloud's to write ({@link ToolFinder#systemName}).
      * <p>
+     * The second rule is there for the name a skill would ignore without a word -- 'body' for
+     * body_text, and the mail goes out without its text. A name the skill does not declare and
+     * its code reads ({@link Tool#readsParameter}) is not such a name, and is let through: an
+     * alias, an optional setting. Refused, the cloud had no way to pass one. The first rule
+     * holds whatever the code does: a parameter declared required is required, though the code
+     * has a default for it -- the declaration is what the cloud is told.
+     * <p>
      * A tool that declares no parameters at all is not held to the second rule: there is nothing
-     * to check a name against, and a skill whose declaration was lost -- written in a shape the
-     * registry does not read -- still takes the arguments its code reads.
+     * to check a name against. Nor is a skill whose declaration could not be read in full
+     * ({@link ToolFinder.Declared#whole}): the names that were read are not known to be all it
+     * takes. Held to a declaration read in part, a call that named the skill's own parameters was
+     * refused as naming one it does not have, and the refusal listed the part -- the cloud had
+     * nothing to correct the call by (the review of e16a1ff, 2026-11-18). What was read still
+     * says what is required.
      */
     static List<String> misfit(Tool tool, Map<String, Object> params) {
-        Map<String, ToolParam> declared = ToolFinder.declared(tool);
+        ToolFinder.Declared reading = ToolFinder.declared(tool);
+        Map<String, ToolParam> declared = reading.byName();
         Map<String, Object> written = params == null ? Map.of() : params;
         var wrong = new ArrayList<String>();
         for (String name : written.keySet()) {
             if (ToolFinder.systemName(name)) {
                 wrong.add("'" + name + "' is not yours to pass: a name that begins with _ is the system's own");
-            } else if (!declared.isEmpty() && !declared.containsKey(name)) {
+            } else if (reading.whole() && !declared.isEmpty() && !declared.containsKey(name)
+                    && !tool.readsParameter(name)) {
                 wrong.add("'" + name + "' is not one of its parameters");
             }
         }
@@ -1212,8 +1255,7 @@ public class LocalExecutor {
 
         // Prevent skill_create — local executor cannot create skills
         if ("skill_create".equals(action.tool)) {
-            return "ERROR: skill_create is not available during delegation. "
-                    + "Only existing tools can be used. Pick a different tool from the plan.";
+            return "ERROR: " + NO_SKILL_CREATE;
         }
 
         // A name no tool has runs nothing, and leaves no result. Recorded, the name would be the
@@ -1224,9 +1266,7 @@ public class LocalExecutor {
         if (target == null) {
             log.warn("Delegation {} {}: a call to a tool that does not exist — refused.",
                     byCode ? "call" : "turn", turn);
-            return "Not run: there is no tool named '" + action.tool + "'. " + (byCode
-                    ? "Use the exact name, as find_tools lists it."
-                    : "Call one of the tools you were given, by its exact name.");
+            return "Not run: " + noSuchTool(action.tool, byCode);
         }
 
         // A self-repair calls no tool that changes anything, here as in the loop's own steps: the
@@ -1498,6 +1538,17 @@ public class LocalExecutor {
     }
 
     /**
+     * 'calls' as a model that wrote them in another shape is shown them. The names are the
+     * skills' own, and the reference the one a call's result has: the example used to send
+     * smtp_send_email a 'body', which the skill does not take. And each call in it is one that
+     * would run -- a model copies what it is shown, and the mailer's call without its 'to' and
+     * its 'subject' was a call the check of a call's parameters refuses ({@link #misfit}).
+     */
+    static final String CALLS_EXAMPLE = "\"calls\": [{\"tool\": \"daily_news_digest\", \"params\": {}}, "
+            + "{\"tool\": \"smtp_send_email\", \"params\": {\"to\": \"<address>\", \"subject\": \"<subject>\", "
+            + "\"body_text\": \"{{call1.body_text}}\"}}]";
+
+    /**
      * The exact calls of a delegate action, in their order: a list of {@code {"tool": name,
      * "params": {...}}} -- or that list written as a JSON string, as a model will sometimes send
      * one. A call is run exactly as written, so one that is not in that shape is refused, never
@@ -1516,11 +1567,7 @@ public class LocalExecutor {
             }
         }
         if (!(list instanceof List<?> items)) {
-            // The example's names are the skills' own, and its reference the one a call's result has:
-            // it used to send smtp_send_email a 'body', which the skill does not take.
-            throw new IllegalArgumentException("'calls' must be a list of calls, as in \"calls\": "
-                    + "[{\"tool\": \"daily_news_digest\", \"params\": {}}, {\"tool\": \"smtp_send_email\", "
-                    + "\"params\": {\"body_text\": \"{{call1.body_text}}\"}}].");
+            throw new IllegalArgumentException("'calls' must be a list of calls, as in " + CALLS_EXAMPLE + ".");
         }
         var calls = new ArrayList<DelegationPlan.Call>();
         for (int i = 0; i < items.size(); i++) {
