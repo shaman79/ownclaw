@@ -199,8 +199,12 @@ public final class CloudGateway implements LlmProvider {
             // removes is let off because a marker stands in it -- and goes on marked. So is a
             // message that names the beginning it will be on the next step: filtered as one text,
             // and its beginning named again for the text that leaves (lasting).
+            // What each text the task declared goes out as is kept under the context
+            // (EgressContext.SentAs): the caller that changes a skill's code by the lines the model
+            // names must change the text the model read, and only this pass knows it -- the second
+            // reading, which finds the beginning (lasting), sends nothing and says nothing there.
             String content = m.authored() ? Redactor.filterAuthored(m.content(), vault, tally)
-                    : redactor.filter(user, m.content(), vault, tally, egress.skillCode());
+                    : redactor.filter(user, m.content(), vault, tally, egress.skillCode(), egress.sentAs()::put);
             filteredMessages.add(new LlmMessage(m.role(), content, m.authored(), m.marked(), m.images(),
                     lasting(m, content, user, vault, egress)));
         }
