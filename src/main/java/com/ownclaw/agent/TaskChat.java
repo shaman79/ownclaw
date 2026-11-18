@@ -222,22 +222,19 @@ public final class TaskChat {
     }
 
     /**
-     * The provider stopped step {@code step} as reasoning extraction, and the step is asked again
-     * ({@code AgentLoop}). Said, because from here on the steps come with no words beside them,
-     * and the owner would otherwise see the progress updates simply stop.
-     *
-     * @param again it had stopped a step so before, and the model is now no longer shown the
-     *              progress updates it wrote either
+     * The provider stopped step {@code step} as reasoning extraction, and the step is asked again,
+     * once, with nothing asked for beside the call ({@code AgentLoop}). Said, because from here on
+     * the steps come with no words beside them, and the owner would otherwise see the progress
+     * updates simply stop -- and what follows if the provider stops it again, since a step that
+     * asks for nothing has nothing left to take away.
      */
-    void askedAgainQuietly(int step, boolean again) {
+    void askedAgainQuietly(int step) {
         if (sessionId == null) return;
-        note(again
-                ? "⚠️ The cloud model's provider stopped step " + step + " as reasoning extraction "
-                        + "again. Asking once more, without showing the model the progress updates it "
-                        + "wrote before."
-                : "⚠️ The cloud model's provider stopped step " + step + " as reasoning extraction: a "
-                        + "safety check against giving away the model's hidden reasoning, most likely set "
-                        + "off by the progress updates. Asking again; the steps from here on come without them.");
+        note("⚠️ The cloud model's provider stopped step " + step + " as reasoning extraction: a safety "
+                + "check against giving away the model's hidden reasoning, most likely set off by the "
+                + "progress update it is asked for beside each call. Asking again, once, without asking for "
+                + "one; the steps from here on come without them. If the provider stops a step again, the "
+                + "task goes on on the local model, or ends where there is none.");
     }
 
     /**

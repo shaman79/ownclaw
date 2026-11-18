@@ -115,7 +115,7 @@ class WholePromptTest {
     }
 
     @Test
-    @DisplayName("once the provider declined a step as reasoning extraction, no protocol asks for words beside a call; declined again, the earlier words are not shown either")
+    @DisplayName("once the provider declined a step as reasoning extraction, no protocol asks for words beside a call, and the cached system prompt is as it was")
     void aDeclinedTaskIsAskedForNoWords() {
         var engine = new ThinkingEngine(new ToolRegistry(List.of()), new OwnClawConfig(), null);
         var ctx = new AgentContext("u1", "t1", "check the network");
@@ -123,22 +123,43 @@ class WholePromptTest {
                 AgentObservation.success("noop", "nothing to report", Map.of(), 5));
         var mode = new ThinkingEngine.StepMode(false, false, false);
         String system = engine.buildMessages(ctx, "anthropic", mode).get(0).content();
-        assertTrue(all(engine.buildMessages(ctx, "anthropic", mode)).contains("\"reasoning\""), "the premise");
+        assertTrue(all(engine.buildMessages(ctx, "anthropic", mode)).contains("write \"reasoning\""), "the premise");
         ctx.markDeclinedAsReasoning();
         for (String provider : List.of("anthropic", "openai")) {
             var messages = engine.buildMessages(ctx, provider, mode);
             String prompt = all(messages);
             assertTrue(prompt.contains("Single JSON: {\"tool\": \"name\", \"params\": {...}}"), prompt);
             assertFalse(prompt.contains("write \"reasoning\"") || prompt.contains(ThinkingEngine.NARRATION), prompt);
-            assertTrue(prompt.contains("Checking the network first."), "shown as the provider has cached it: " + prompt);
             assertEquals(system, messages.get(0).content(), "the system prompt is the one cached");
         }
-        ctx.markDeclinedAsReasoning();
-        for (String provider : List.of("anthropic", "openai")) {
-            String prompt = all(engine.buildMessages(ctx, provider, mode));
-            assertFalse(prompt.contains("\"reasoning\"") || prompt.contains(ThinkingEngine.NARRATION)
-                    || prompt.contains("Checking the network first."), prompt);
+        // Mutation: beside() asked with quiet false whatever was declined -> "write \"reasoning\"" stays.
+    }
+
+    @Test
+    @DisplayName("the words a model wrote beside an earlier call are never replayed to Anthropic, declined or not; the history every other provider reads has them")
+    void theEarlierWordsAreNotReplayedToAnthropic() {
+        // Until 2026-11-18 Anthropic was replayed them until a second decline, and then no provider
+        // was shown them: the replay under a key called "reasoning" is what was declined, so it is
+        // gone from the first step, and the other providers' history is as it was before any decline.
+        var engine = new ThinkingEngine(new ToolRegistry(List.of()), new OwnClawConfig(), null);
+        for (boolean nativeTools : new boolean[] {true, false}) {
+            for (boolean declined : new boolean[] {false, true}) {
+                var ctx = new AgentContext("u1", "t1", "check the network");
+                ctx.trajectory().record(new AgentAction("noop", Map.of("host", "192.0.2.1"), "Checking the network first."),
+                        AgentObservation.success("noop", "nothing to report", Map.of(), 5));
+                if (declined) ctx.markDeclinedAsReasoning();
+                var mode = new ThinkingEngine.StepMode(nativeTools, false, false);
+                var anthropic = engine.buildMessages(ctx, "anthropic", mode);
+                assertFalse(all(anthropic).contains("Checking the network first."), all(anthropic));
+                assertTrue(anthropic.stream().anyMatch(m -> m.role() == LlmMessage.Role.ASSISTANT
+                        && m.content().equals("{\"tool\":\"noop\",\"params\":{\"host\":\"192.0.2.1\"}}")),
+                        "the step is replayed as its tool and its arguments: " + all(anthropic));
+                String history = all(engine.buildMessages(ctx, "openai", mode));
+                assertTrue(history.contains("{\"reasoning\":\"Checking the network first.\",\"tool\":\"noop\","
+                        + "\"params\":{\"host\":\"192.0.2.1\"}}"), history);
+            }
         }
+        // Mutation: the Anthropic replay's assistant turn written with the words (actionText(true)) -> it holds them.
     }
 
     @Test

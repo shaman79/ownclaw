@@ -1067,33 +1067,30 @@ public class AgentContext {
     }
 
     /**
-     * How many steps of this task the provider has declined as reasoning extraction. After the
-     * first the model is asked for no words beside its calls ({@code ThinkingEngine}): the
-     * progress update it is asked for is the likely cause. That is asked at the end of the
-     * conversation, so the request is the one the provider has cached up to there. After the
-     * second it is no longer shown the words it wrote beside its earlier calls either, the other
-     * likely cause -- which rewrites the steps it is shown, so the provider writes them all to its
-     * cache again. A third ends the task ({@code AgentLoop}).
+     * Whether the provider has declined a step of this task as reasoning extraction. From then on
+     * the model is asked for no words beside its calls ({@code ThinkingEngine#quiet}): the progress
+     * update a chat's steps ask for is what is left that could set the check off -- the words the
+     * model wrote beside its earlier calls are never replayed to the cloud
+     * ({@link AgentTrajectory.Turn#actionText}). That is asked at the end of the conversation, so
+     * the request is the one the provider has cached up to there. A step declined although it
+     * asked for nothing is the same request again: it goes the way of any refusal
+     * ({@code AgentLoop}).
+     * <p>
+     * There was a second stage, after a second decline: the earlier words no longer replayed,
+     * which rewrote every step the provider had cached. In the two weeks to 18 Nov 2026 the first
+     * stage's retry -- nothing asked for, the earlier words still replayed under a key called
+     * "reasoning" -- was declined 9 times out of 10 and the second's passed 10 times out of 10, so
+     * what the second stage withheld is withheld from every task's first step, and the stage is gone.
      */
-    private volatile int declinedAsReasoning;
+    private volatile boolean declinedAsReasoning;
 
     /** Whether the provider has declined a step of this task as reasoning extraction. */
     public boolean declinedAsReasoning() {
-        return declinedAsReasoning > 0;
-    }
-
-    /** Whether the model is no longer shown the words it wrote beside its earlier calls. */
-    public boolean earlierWordsWithheld() {
-        return declinedAsReasoning > 1;
-    }
-
-    /** How many steps of this task the provider has declined as reasoning extraction. */
-    public int timesDeclinedAsReasoning() {
         return declinedAsReasoning;
     }
 
-    public synchronized void markDeclinedAsReasoning() {
-        declinedAsReasoning++;
+    public void markDeclinedAsReasoning() {
+        declinedAsReasoning = true;
     }
 
     /** The steps whose results are shown folded ({@link ContextFit}), by their index in the trajectory. */

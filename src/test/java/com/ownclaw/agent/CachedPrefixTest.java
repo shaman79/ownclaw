@@ -60,7 +60,7 @@ class CachedPrefixTest {
         // skills, deferred like the rest where it orchestrates.
         rig.jdbc.update("INSERT INTO skill_usage (tool_name, user_id, task_id, success, duration_ms) "
                 + "VALUES ('smtp_send_email', 'u1', 't0', 1, 5)");
-        // With words beside the calls, which the steps after a decline still show as they were.
+        // With words beside the calls, which no request shows the model again.
         var api = ScriptedAnthropic.replying(
                 calling("Looking for the skills first.", AgentAction.FIND_TOOLS, "{\"query\": \"weather\"}"),
                 calling("Handing the check to the local model.", AgentAction.DELEGATE,
@@ -141,13 +141,31 @@ class CachedPrefixTest {
         String quiet = newestUser(sent.get(4));
         assertTrue(quiet.contains(ThinkingEngine.beside(true, true)) && !quiet.contains(ThinkingEngine.NARRATION), quiet);
         assertFalse(sent.get(4).toString().contains(ThinkingEngine.NARRATION), "no words asked for anywhere");
-        assertTrue(sent.get(4).path("messages").toString().contains("Looking for the skills first."),
-                "the words beside the earlier calls are shown as they were cached");
+        // Until 2026-11-18 this held that the words beside the earlier calls were replayed as they
+        // had been cached. They are in no request now, from the first step on: replayed under a
+        // key called "reasoning", they were what the provider declined. Each earlier step's
+        // assistant turn is its tool and its arguments, the same bytes in every later request.
+        for (JsonNode body : sent) {
+            String conversation = body.path("messages").toString();
+            for (String words : List.of("Looking for the skills first.", "Handing the check to the local model.",
+                    "The local model could not; checking it myself.")) {
+                assertFalse(conversation.contains(words), "an earlier step's words were replayed: " + conversation);
+            }
+            assertFalse(conversation.contains("reasoning\\\":"), "a step is replayed under a key called reasoning: " + conversation);
+        }
+        List<String> replayed = new ArrayList<>();
+        for (JsonNode m : sent.get(4).path("messages")) {
+            if ("assistant".equals(m.path("role").asText())) replayed.add(unmarked(m).path("content").asText());
+        }
+        assertEquals(List.of("{\"tool\":\"find_tools\",\"params\":{\"query\":\"weather\"}}",
+                "{\"tool\":\"delegate\",\"params\":{\"goal\":\"check the router's status\",\"tools\":\"router_status\"}}",
+                "{\"tool\":\"router_status\"}"), replayed);
 
         // Mutation: the valve hands the registry back as tools of their own -> the tools differ
         // from request 3 on. The quiet retry's instruction in the system prompt -> the system
         // block differs at request 5. An addition placed where it was made -> request 3 inserts
-        // a message request 2 cached.
+        // a message request 2 cached. The replay's assistant turn with the words beside the call
+        // (actionText(true)) -> requests 2 to 5 hold them.
     }
 
     /** The tools sent that are not deferred: the part of the array in the cached prefix. */

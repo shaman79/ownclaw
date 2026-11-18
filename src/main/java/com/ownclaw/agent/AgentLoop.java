@@ -1144,14 +1144,16 @@ public class AgentLoop {
                         context.trajectory(), context.elapsedMs());
             } catch (ProviderRefused declined) {
                 // Declined as reasoning extraction: the provider judged the step to be giving away
-                // the model's hidden reasoning, most likely because of the words the prompt asks
-                // for beside each call, which ended the owner's task on 2026-10-01. The step is
-                // asked again with no such words asked for, which changes only the end of the
-                // request, so the provider reads the rest from its cache; declined again, it is
-                // asked once more without the words the model wrote beside its earlier calls,
-                // which rewrites the steps it is shown (AgentContext#declinedAsReasoning); declined
-                // a third time, it ends like any refusal.
-                if (!declined.asReasoningExtraction() || context.timesDeclinedAsReasoning() == 2) {
+                // the model's hidden reasoning, which ended the owner's task on 2026-10-01. What set
+                // it off, by the two weeks to 18 Nov 2026, was the replay of the words the model had
+                // written beside its earlier calls -- the retry that still replayed them was declined
+                // 9 times out of 10, the one without them never -- and no task replays them now
+                // (ThinkingEngine). What is left that could is the progress update a chat's step asks
+                // for beside its call: such a step is asked again, once, asking for none, which changes
+                // only the end of the request, so the provider reads the rest from its cache. A step
+                // that asked for nothing already -- unattended work's every step, a chat's after a
+                // decline -- would be the same request again: it ends like any refusal.
+                if (!declined.asReasoningExtraction() || ThinkingEngine.quiet(context, local)) {
                     // The cloud model would not do the step. The owner asked that a refusal fall
                     // back to the local model rather than stop the task, so the rest of it runs
                     // there, when the local model can be used, and the step is taken again; the
@@ -1165,10 +1167,9 @@ public class AgentLoop {
                 account(context, local, provider, declined.reply());
                 context.markProgress(); // the model replied
                 context.markDeclinedAsReasoning();
-                log.warn("Task {} step {}: declined as reasoning extraction; asking again with no "
-                        + "words beside the call{}", context.taskId(), step + 1,
-                        context.earlierWordsWithheld() ? ", nor those beside the earlier ones" : "");
-                context.chat().askedAgainQuietly(step + 1, context.earlierWordsWithheld());
+                log.warn("Task {} step {}: declined as reasoning extraction; asking again, once, with no "
+                        + "words asked for beside the call", context.taskId(), step + 1);
+                context.chat().askedAgainQuietly(step + 1);
                 step--; // the same step, asked again
                 continue;
             } catch (OutputTruncated cut) {
@@ -3860,7 +3861,7 @@ public class AgentLoop {
         log.warn("Task {}: no usable reply from the model — {}", context.taskId(), why.getMessage());
         String clause;
         if (why instanceof ProviderRefused declined) {
-            clause = TaskEnding.declined(declined);
+            clause = TaskEnding.declined(declined, context.declinedAsReasoning());
         } else if (why.unreachable()) {
             clause = TaskEnding.unreachable(why, local, context.options().localOnly());
         } else {

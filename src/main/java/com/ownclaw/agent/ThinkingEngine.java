@@ -188,8 +188,8 @@ public class ThinkingEngine {
             // declined to answer it; the reply or the conversation reached a limit of the model.
             // Asked again as steps that had gone wrong, a refusal and a cut-off came back the
             // same way until the owner was told "3 consecutive reasoning failures". The loop
-            // ends the task on each, saying which -- but for a first refusal as reasoning
-            // extraction, whose step it asks again with no words asked for beside the call.
+            // ends the task on each, saying which -- but for a refusal as reasoning extraction of a
+            // step that asked for words beside its call, which it asks again asking for none.
             throw notToAskAgain;
         } catch (MalformedToolCall malformed) {
             // The reply came, whole, and was billed; a tool call in it cannot be run: its arguments
@@ -348,7 +348,7 @@ public class ThinkingEngine {
                 messages.add(LlmMessage.user(task));
                 withToolsAdded(messages, toolsAdded(context, mode), 0, Integer.MAX_VALUE);
                 messages.add(LlmMessage.user("## History\n"
-                        + trajectory.toPromptSummary(!context.earlierWordsWithheld(), context::observationShown) + step));
+                        + trajectory.toPromptSummary(true, context::observationShown) + step));
             }
         }
 
@@ -425,7 +425,7 @@ public class ThinkingEngine {
             messages.add(first ? LlmMessage.marked(user.toString(), task.images()) : LlmMessage.user(user.toString()));
             first = false;
             next = withToolsAdded(messages, added, next, steps);
-            messages.add(LlmMessage.assistant(turn.actionText(!context.earlierWordsWithheld())));
+            messages.add(LlmMessage.assistant(turn.actionText(false)));
             user = new StringBuilder(context.observationShown(i, turn));
             steps++;
         }
@@ -778,12 +778,12 @@ public class ThinkingEngine {
      * The per-step block (datetime, attendance, what to write beside a call, tools, vault, what
      * next): what changes from one step to the next, at the end of the last user
      * message for every provider ({@link #buildMessages}), so the system prompt stays the same
-     * bytes and is cached. What changes partway through a task is said here too -- the words
-     * asked for beside a call once the provider has declined a step as reasoning extraction, the
-     * skills given once a delegation has failed -- for the same reason: the tools and the system
-     * prompt are the front of the provider's cached prefix, and a change there writes the whole
-     * conversation to the cache again. Only a task the local model takes over has another system
-     * prompt, the local model's own.
+     * bytes and is cached. What changes partway through a task is said here too -- that nothing
+     * is asked for beside a call once the provider has declined a step as reasoning extraction,
+     * the skills given once a delegation has failed -- for the same reason: the tools and the
+     * system prompt are the front of the provider's cached prefix, and a change there writes the
+     * whole conversation to the cache again. Only a task the local model takes over has another
+     * system prompt, the local model's own.
      */
     private String buildDynamicContext(AgentContext context, StepMode mode) {
         var sb = new StringBuilder();
@@ -856,7 +856,7 @@ public class ThinkingEngine {
             sb.append("- Skills: a delegation of this task has failed, so from here you are given the "
                     + "skills to run yourself as well.\n");
         }
-        sb.append(beside(mode.nativeTools(), context.declinedAsReasoning())).append("\n\n");
+        sb.append(beside(mode.nativeTools(), quiet(context, mode.local()))).append("\n\n");
 
         // The full manifest on EVERY step, not just step 0.
         //
@@ -929,10 +929,11 @@ public class ThinkingEngine {
      * step, never shortened, and the same for every provider, task and step: what changes goes in
      * the per-step block at the end of the last user message ({@link #buildDynamicContext}), so
      * the provider's prompt cache holds all of this. So it says nothing that holds only while the
-     * cloud orchestrates, nor what to write beside a call, which changes in a task the provider
-     * has stopped as reasoning extraction: changed here, it wrote the whole conversation to the
-     * cache again -- $1.40 of one task on 2026-10-08. The one exception is the local model's own
-     * prompt ({@link StepMode#local}).
+     * cloud orchestrates, nor what to write beside a call, which differs between attended and
+     * unattended work and changes in a task the provider has stopped as reasoning extraction
+     * ({@link #quiet}): changed here, it wrote the whole conversation to the cache again -- $1.40
+     * of one task on 2026-10-08. The one exception is the local model's own prompt
+     * ({@link StepMode#local}).
      *
      * @param mode when {@code nativeTools} is set, the action list and the JSON-envelope
      *             instruction are omitted. The tools array carries both, and this claim used to
@@ -1418,21 +1419,21 @@ public class ThinkingEngine {
      * ({@code stop_details.category} "reasoning_extraction"), which ended the owner's task on
      * 2026-10-01. No length is asked for either way: a sentence count is a cap. A step declined so
      * all the same is asked again with nothing asked for beside the call ({@code AgentLoop},
-     * {@link #beside}). Only what is new: on 2026-10-07 every update of a 30-step router task
-     * restated the same suspicion, so different checks read as the same step done again.
+     * {@link #beside}). It used to ask for "only what is new since your last update", after every
+     * update of a 30-step router task on 2026-10-07 restated the same suspicion: the cloud is no
+     * longer shown its earlier updates ({@link AgentTrajectory.Turn#actionText}), so it cannot
+     * tell what is new since them, and nothing is asked in that clause's place.
      */
     static final String NARRATION = "write it for them, in their language, as a progress update on "
-            + "the work -- what the last result showed and what you are doing next, only what is "
-            + "new since your last update -- not your reasoning.";
+            + "the work -- what the last result showed and what you are doing next -- not your "
+            + "reasoning.";
 
     /**
      * What to write beside a call, on either protocol: a line of the per-step block, not of the
-     * system prompt, so that in a task the provider has declined as reasoning extraction it can
-     * ask for nothing -- and the request no longer asks for words anywhere -- while the system
-     * prompt the provider has cached stays the same bytes.
+     * system prompt, so that a step can ask for nothing -- and the request then asks for words
+     * nowhere -- while the system prompt the provider has cached stays the same bytes.
      *
-     * @param quiet the provider has declined a step of this task as reasoning extraction
-     *              ({@link AgentContext#declinedAsReasoning})
+     * @param quiet the step asks for nothing beside its call ({@link #quiet})
      */
     static String beside(boolean nativeTools, boolean quiet) {
         if (quiet) {
@@ -1447,9 +1448,29 @@ public class ThinkingEngine {
     }
 
     /**
+     * Whether a step asks for nothing beside its call. A step the cloud takes on unattended work
+     * -- a scheduled run, /bg, a self-repair -- from the task's first: nobody reads a progress
+     * update live there, and a request that asks the model for words about its work is one the
+     * provider can decline as reasoning extraction, each declined call billed. From 14 to 18 Nov
+     * 2026 it declined a step of every self-repair; what set those off was the replay of the
+     * model's earlier words, which no request holds any more
+     * ({@link AgentTrajectory.Turn#actionText}), and this takes away what is left to ask for. And
+     * every step of a task once the provider has declined one so
+     * ({@link AgentContext#declinedAsReasoning}): a chat's, asked again. The local model, which no
+     * such check reads, is asked on unattended work as it was: what it writes beside a call is in
+     * the history it reads of its own steps. The loop asks this too, of a step that was declined:
+     * one that asked for nothing already is not asked again ({@code AgentLoop}).
+     *
+     * @param local the local model takes the step ({@link StepMode#local})
+     */
+    static boolean quiet(AgentContext context, boolean local) {
+        return context.declinedAsReasoning() || context.isUnattended() && !local;
+    }
+
+    /**
      * The text protocol's action, restated to a model whose reply was not one: what makes it an
-     * action, without the 'reasoning' the per-step block asks for ({@link #beside}) -- or, in a
-     * task the provider declined as reasoning extraction, does not.
+     * action, without the 'reasoning' the per-step block asks for ({@link #beside}) -- or, on a
+     * step that asks for nothing beside its call ({@link #quiet}), does not.
      */
     private static final String ACTION_FORMAT = "Reply with one JSON object: {\"tool\": \"name\", "
             + "\"params\": {...}}. To answer: {\"tool\": \"respond\", \"params\": {\"message\": \"...\"}}.";

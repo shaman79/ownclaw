@@ -83,7 +83,7 @@ class ObservationRetentionTest {
     }
 
     @Test
-    @DisplayName("the model's own older reasoning is replayed whole")
+    @DisplayName("the model's own older reasoning is whole in the history a provider reads it in, and never cut where it is kept; the replay to Anthropic leaves it out altogether")
     void olderReasoningIsWhole() {
         String reasoning = "Comparing the two pages first, because ".repeat(20);   // ~800 chars
         var ctx = new AgentContext("u1", "t1", "Compare them.");
@@ -93,8 +93,14 @@ class ObservationRetentionTest {
                 AgentObservation.success("fetch_page", page("B", 70_000), Map.of(), 10));
 
         assertTrue(openai(ctx).contains("{\"reasoning\":\"" + reasoning.strip()));
+        // Until 2026-11-18 the Anthropic replay carried it whole too. It carries none of it now --
+        // replayed under a key called "reasoning", the model's earlier words were what the provider
+        // declined as reasoning extraction -- which is no cut: the step is its tool and arguments,
+        // whole, and the words stay whole where they are kept, for the chat and the task page.
         String replay = engine().buildMessages(ctx, "anthropic", NATIVE).stream()
                 .filter(m -> m.role() == LlmMessage.Role.ASSISTANT).findFirst().orElseThrow().content();
-        assertTrue(replay.contains(reasoning.strip()), "the replayed turn carries it whole: " + replay);
+        assertEquals("{\"tool\":\"fetch_page\",\"params\":{\"n\":1}}", replay);
+        assertEquals(reasoning, ctx.trajectory().turns().get(0).action().reasoning(), "kept whole");
+        // Mutation: the replay's assistant turn written with the words (actionText(true)) -> it carries them.
     }
 }
