@@ -267,7 +267,9 @@ public class SkillManager {
         //   b) Map object: {url={type=string}} (common from local LLM)
         //   c) List/Array: [{name: "url", type: "string"}] (rare but happens)
         //   d) null/missing (error)
-        Map<String, Object> parametersDef;
+        // The map of names in every case but one: a declaration that could not be read in full
+        // is kept as it was handed (normalizeParameters).
+        Object parametersDef;
         try {
             parametersDef = normalizeParameters(params.get("parameters"));
         } catch (Exception e) {
@@ -872,7 +874,7 @@ public class SkillManager {
         return null;
     }
 
-    private String buildSkillYaml(String name, String author, String description, Map<String, Object> parametersDef,
+    private String buildSkillYaml(String name, String author, String description, Object parametersDef,
                                   boolean requiresNetwork, Boolean hasSideEffects, int timeout,
                                   List<String> credentials, String systemPackages, String containerImage)
             throws IOException {
@@ -882,7 +884,7 @@ public class SkillManager {
         if (author != null) yaml.put("author", author);
         yaml.put("description", description);
         yaml.put("version", 1);
-        if (parametersDef != null && !parametersDef.isEmpty()) {
+        if (parametersDef != null && !(parametersDef instanceof Map<?, ?> none && none.isEmpty())) {
             yaml.put("parameters", parametersDef);
         }
         yaml.put("requires_network", requiresNetwork);
@@ -913,85 +915,54 @@ public class SkillManager {
     }
 
     /**
-     * Normalize the parameters field from LLM output into a proper Map.
-     * <p>Handles multiple formats that LLMs produce:
-     * <ul>
-     *   <li>String: parse as JSON (the intended format)</li>
-     *   <li>Map: already deserialized by Jackson (common when local LLM produces nested object)</li>
-     *   <li>List: convert [{name: "x", type: "string"}] → {"x": {type: "string"}}</li>
-     *   <li>null: returns null</li>
-     * </ul>
+     * The parameters skill_create was handed, as SKILL.yaml is to hold them: the map of each
+     * parameter's name to its definition, a required one marked in it -- one shape on disk,
+     * whatever shape a model wrote. Null when it was handed none.
+     * <p>
+     * A model writes the field as a JSON string (what skill_create asks for), as an object, or as
+     * a list of definitions that give their names; and in any of them as definitions, as
+     * shorthand ({"url": "string"}), or as a JSON Schema. Whichever it is, it is read by the
+     * reader that reads SKILL.yaml when the skill is loaded
+     * ({@link DynamicSkillRegistry#readParameters}), and what is written is what that read: the
+     * two cannot disagree about one declaration. They did. Only an object was normalised here,
+     * and a string -- the usual case -- was written as it came, shorthand and all, for a registry
+     * that read definitions alone: of {"url": "string", "timeout": {"type": "integer"}} the skill
+     * declared timeout, and a delegated call naming url was refused. And the normalising of an
+     * object took a JSON Schema's own words for parameters: its {@code required} list became a
+     * parameter of that name (the review of e16a1ff, 2026-11-18).
+     * <p>
+     * A declaration that could not be read in full is written as it was handed: nothing of it is
+     * lost, and the registry says of the skill, at every load, that it could not
+     * ({@link DynamicSkillRegistry.Declaration#whole}).
      */
-    @SuppressWarnings("unchecked")
-    private Map<String, Object> normalizeParameters(Object raw) throws Exception {
-        if (raw == null) return null;
+    private Object normalizeParameters(Object raw) throws Exception {
+        Object handed = raw;
+        if (!(raw instanceof Map<?, ?>) && !(raw instanceof List<?>)) {
+            if (raw == null) return null;
+            String jsonStr = raw.toString();
+            if (jsonStr.isBlank()) return null;
 
-        // Already a Map (Jackson deserialized it from nested JSON object)
-        if (raw instanceof Map<?, ?> map) {
-            // Normalise the shorthand the model very often emits: {"url": "string"} instead of
-            // {"url": {"type": "string"}}. Passed through unchanged, that reached the YAML writer
-            // as a String where a parameter definition was expected, the entry was dropped, and
-            // the skill registered with NO input schema. The agent was then told the skill takes
-            // no arguments, called it with none, and the Python died on a missing key -- while
-            // skill_create had reported success. Nothing in the loop could work out why, because
-            // the manifest it reads and the code on disk disagreed.
-            Map<String, Object> normalised = new LinkedHashMap<>();
-            for (Map.Entry<?, ?> e : map.entrySet()) {
-                String key = String.valueOf(e.getKey());
-                Object def = e.getValue();
-                if (def instanceof Map) {
-                    normalised.put(key, def);
-                } else if (def == null) {
-                    normalised.put(key, new LinkedHashMap<>(Map.of("type", "string")));
-                } else {
-                    // "string" / "int" / a one-line description -- treat it as the type when it
-                    // looks like one, otherwise as the description. Either way the parameter
-                    // survives, which is the point.
-                    String text = String.valueOf(def).trim();
-                    var d = new LinkedHashMap<String, Object>();
-                    if (text.matches("(?i)string|str|int|integer|number|float|bool|boolean|array|list|object")) {
-                        d.put("type", text.toLowerCase(java.util.Locale.ROOT));
-                    } else {
-                        d.put("type", "string");
-                        d.put("description", text);
-                    }
-                    normalised.put(key, d);
-                }
+            // Handle Java Map.toString() format: {type=string, description=...}
+            // This happens when str() calls toString() on a Map object
+            if (jsonStr.contains("=") && !jsonStr.contains(":") && !jsonStr.contains("\"")) {
+                // Convert {key=value, ...} to {"key": "value", ...}
+                jsonStr = jsonStr.replaceAll("(\\w+)=", "\"$1\":");
+                // Wrap unquoted values
+                jsonStr = jsonStr.replaceAll(":\\s*([^,{}\"\\[\\]]+)", ": \"$1\"");
             }
-            return normalised;
-        }
 
-        // List/Array format: [{"name": "url", "type": "string", ...}, ...]
-        // Convert to Map format: {"url": {"type": "string", ...}}
-        if (raw instanceof List<?> list) {
-            Map<String, Object> result = new LinkedHashMap<>();
-            for (Object item : list) {
-                if (item instanceof Map<?, ?> entry) {
-                    String paramName = entry.get("name") != null ? entry.get("name").toString() : null;
-                    if (paramName != null) {
-                        Map<String, Object> paramDef = new LinkedHashMap<>((Map<String, Object>) entry);
-                        paramDef.remove("name");
-                        result.put(paramName, paramDef);
-                    }
-                }
+            // Parsed with the lenient mapper, then read as an object or a list handed so is.
+            handed = jsonMapper.readValue(jsonStr, Object.class);
+            if (handed == null) return null;
+            if (!(handed instanceof Map<?, ?>) && !(handed instanceof List<?>)) {
+                throw new IllegalArgumentException("a JSON object of parameter definitions is expected, "
+                        + "{\"arg\": {\"type\": ..., \"description\": ..., \"required\": ...}}");
             }
-            return result.isEmpty() ? null : result;
         }
-
-        // String: parse as JSON with lenient mapper
-        String jsonStr = raw.toString();
-        if (jsonStr.isBlank()) return null;
-
-        // Handle Java Map.toString() format: {type=string, description=...}
-        // This happens when str() calls toString() on a Map object
-        if (jsonStr.contains("=") && !jsonStr.contains(":") && !jsonStr.contains("\"")) {
-            // Convert {key=value, ...} to {"key": "value", ...}
-            jsonStr = jsonStr.replaceAll("(\\w+)=", "\"$1\":");
-            // Wrap unquoted values
-            jsonStr = jsonStr.replaceAll(":\\s*([^,{}\"\\[\\]]+)", ": \"$1\"");
-        }
-
-        return jsonMapper.readValue(jsonStr, new TypeReference<>() {});
+        DynamicSkillRegistry.Declaration read = DynamicSkillRegistry.readParameters(handed);
+        // A list that names no parameter declares none: handed nothing, as before.
+        if (handed instanceof List<?> && read.byName().isEmpty()) return null;
+        return read.whole() ? read.byName() : handed;
     }
 
     /**

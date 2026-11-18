@@ -415,17 +415,22 @@ public class LocalExecutor {
      * and never the cloud's to write ({@link ToolFinder#systemName}).
      * <p>
      * A tool that declares no parameters at all is not held to the second rule: there is nothing
-     * to check a name against, and a skill whose declaration was lost -- written in a shape the
-     * registry does not read -- still takes the arguments its code reads.
+     * to check a name against. Nor is a skill whose declaration could not be read in full
+     * ({@link ToolFinder.Declared#whole}): the names that were read are not known to be all it
+     * takes. Held to a declaration read in part, a call that named the skill's own parameters was
+     * refused as naming one it does not have, and the refusal listed the part -- the cloud had
+     * nothing to correct the call by (the review of e16a1ff, 2026-11-18). What was read still
+     * says what is required.
      */
     static List<String> misfit(Tool tool, Map<String, Object> params) {
-        Map<String, ToolParam> declared = ToolFinder.declared(tool);
+        ToolFinder.Declared reading = ToolFinder.declared(tool);
+        Map<String, ToolParam> declared = reading.byName();
         Map<String, Object> written = params == null ? Map.of() : params;
         var wrong = new ArrayList<String>();
         for (String name : written.keySet()) {
             if (ToolFinder.systemName(name)) {
                 wrong.add("'" + name + "' is not yours to pass: a name that begins with _ is the system's own");
-            } else if (!declared.isEmpty() && !declared.containsKey(name)) {
+            } else if (reading.whole() && !declared.isEmpty() && !declared.containsKey(name)) {
                 wrong.add("'" + name + "' is not one of its parameters");
             }
         }

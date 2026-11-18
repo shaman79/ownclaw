@@ -453,7 +453,7 @@ class CallParametersTest {
     @Test
     @DisplayName("a skill that declares no parameters is not held to its names -- there is nothing to check them against -- and a call of the local model's own is not checked at all")
     void whatIsNotChecked() {
-        // Declares nothing, as a skill whose declaration the registry could not read does.
+        // Declares nothing: its SKILL.yaml has no 'parameters'.
         var undeclared = new Skill("legacy_report", "Builds the report.", Map.of(), p -> ToolResult.success("built"));
         var byCode = executor(new DelegationBehaviourTest.Scripted(), new DelegationBehaviourTest.Usage(), undeclared)
                 .execute(calls("", c("legacy_report", Map.of("month", "2026-10"))), task(), UNCOUNTED);
@@ -480,7 +480,7 @@ class CallParametersTest {
         assertEquals(1, smtp.calls.size(), "the local model's own call ran, and the skill answered it: " + byGoal.text());
         assertTrue(local.allSeen().contains("ERROR: missing required parameter body_text"), local.allSeen());
         // Mutation: hold a skill with no declared parameters to the second rule -> 'month' is
-        // refused, and every skill whose declaration was lost can no longer be called by code.
+        // refused, and a skill that declares nothing can be handed nothing by code.
     }
 
     @Test

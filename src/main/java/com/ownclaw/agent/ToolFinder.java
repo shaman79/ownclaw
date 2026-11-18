@@ -166,10 +166,10 @@ final class ToolFinder {
      * from the one reading of the declaration ({@link #declared}).
      */
     static String parameters(Tool tool) {
-        Map<String, ToolParam> declared = declared(tool);
-        if (declared.isEmpty()) return "  (no parameters)";
+        Declared declared = declared(tool);
+        if (declared.byName().isEmpty()) return declared.whole() ? "  (no parameters)" : NOT_READ;
         var sb = new StringBuilder();
-        declared.forEach((name, param) -> {
+        declared.byName().forEach((name, param) -> {
             if (sb.length() > 0) sb.append('\n');
             String type = ToolSchemas.normalizeType(param.type());
             sb.append("  - ").append(name).append(" (").append(type == null ? "" : type + ", ")
@@ -177,23 +177,46 @@ final class ToolFinder {
             String what = gist(param.description());
             if (!what.isEmpty()) sb.append(": ").append(what);
         });
+        if (!declared.whole()) sb.append('\n').append(NOT_READ_IN_FULL);
         return sb.toString();
     }
 
     /**
+     * What a model is told of a skill whose declaration of its parameters could not be read in
+     * full ({@code Tool#declaredInFull}): after the ones that were read, or in their place. Never
+     * "(no parameters)", and never the ones read as if they were all: told either, the cloud
+     * writes a call without what the skill needs, or drops a name the skill reads because the
+     * list does not show it.
+     */
+    static final String NOT_READ_IN_FULL =
+            "  (it may take others: the declaration of its parameters could not be read in full)";
+    static final String NOT_READ = "  (its parameters are not known: their declaration could not be read)";
+
+    /**
+     * What a tool declares of its parameters, for a model that writes a call of it.
+     *
+     * @param byName the parameters a model may write, in the order the tool's schema sends them
+     * @param whole  whether they are all it declares ({@code Tool#declaredInFull}): where they
+     *               are not known to be, a name outside them is not known to be wrong
+     */
+    record Declared(Map<String, ToolParam> byName, boolean whole) {}
+
+    /**
      * The parameters a model may write in a call of the tool, in the order its schema sends them
      * ({@link ToolSchemas#inAStableOrder}): what it declares, but for {@link #systemName system
-     * names}. One reading of a declaration, for the list a model is shown and for the check of a
-     * call against it, so a call is never refused over a name the list does not show.
+     * names} -- and whether that is all of it. One reading of a declaration, for the list a model
+     * is shown and for the check of a call against it, so a call is never refused over a name the
+     * list does not show, nor held to a list that is said not to be whole.
      */
-    static Map<String, ToolParam> declared(Tool tool) {
+    static Declared declared(Tool tool) {
         var out = new java.util.LinkedHashMap<String, ToolParam>();
         Map<String, ToolParam> params = tool.inputSchema();
-        if (params == null) return out;
-        ToolSchemas.inAStableOrder(params).forEach((name, param) -> {
-            if (name != null && param != null && !systemName(name)) out.put(name, param);
-        });
-        return out;
+        if (params != null) {
+            ToolSchemas.inAStableOrder(params).forEach((name, param) -> {
+                if (name != null && param != null && !systemName(name)) out.put(name, param);
+            });
+        }
+        return new Declared(out, tool.declaredInFull());
     }
 
     /**

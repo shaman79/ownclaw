@@ -96,6 +96,8 @@ public class DynamicSkill implements Tool {
     private final String name;
     private final String description;
     private final Map<String, ToolParam> parameters;
+    /** Whether {@link #parameters} is all its SKILL.yaml declares: false when part of that could not be read. */
+    private final boolean declaredInFull;
     private final Path skillDir;
     private final boolean requiresNetwork;
     private final boolean hasSideEffects;
@@ -148,11 +150,29 @@ public class DynamicSkill implements Tool {
                         List<String> systemPackages, String containerImage,
                         ContainerSandbox containerSandbox,
                         com.ownclaw.conversation.FileStorageService fileStorage) {
+        this(name, description, parameters, true, skillDir, requiresNetwork, declaredSideEffects, timeoutSec,
+                sandbox, pythonEnv, requiredCredentials, credentialVault, systemPackages, containerImage,
+                containerSandbox, fileStorage);
+    }
+
+    /**
+     * @param declaredInFull      whether {@code parameters} is all its SKILL.yaml declares
+     *                            ({@link DynamicSkillRegistry.Declaration#whole})
+     * @param declaredSideEffects what SKILL.yaml says of its side effects: true, false, or null for nothing
+     */
+    public DynamicSkill(String name, String description, Map<String, ToolParam> parameters, boolean declaredInFull,
+                        Path skillDir, boolean requiresNetwork, Boolean declaredSideEffects,
+                        int timeoutSec, SandboxManager sandbox, PythonEnvironmentService pythonEnv,
+                        List<String> requiredCredentials, CredentialVault credentialVault,
+                        List<String> systemPackages, String containerImage,
+                        ContainerSandbox containerSandbox,
+                        com.ownclaw.conversation.FileStorageService fileStorage) {
         this.declaredSideEffects = declaredSideEffects;
         boolean hasSideEffects = Boolean.TRUE.equals(declaredSideEffects);
         this.name = name;
         this.description = description;
         this.parameters = parameters;
+        this.declaredInFull = declaredInFull;
         this.skillDir = skillDir;
         this.requiresNetwork = requiresNetwork;
         this.hasSideEffects = hasSideEffects;
@@ -170,6 +190,7 @@ public class DynamicSkill implements Tool {
     @Override public String name() { return name; }
     @Override public String description() { return description; }
     @Override public Map<String, ToolParam> inputSchema() { return parameters; }
+    @Override public boolean declaredInFull() { return declaredInFull; }
     @Override public boolean requiresNetwork() { return requiresNetwork; }
     @Override public boolean hasSideEffects() { return hasSideEffects; }
     @Override public Boolean declaredSideEffects() { return declaredSideEffects; }

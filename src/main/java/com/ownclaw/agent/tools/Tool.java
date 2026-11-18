@@ -32,6 +32,14 @@ public interface Tool {
     Map<String, ToolParam> inputSchema();
 
     /**
+     * Whether {@link #inputSchema} is all the tool declares. False for a skill whose declaration
+     * of its parameters could not be read in full ({@code DynamicSkillRegistry#readParameters}):
+     * the names read are then not known to be all it takes, so a call of it is not refused for a
+     * name outside them, and a model that is listed them is told the list may not be whole.
+     */
+    default boolean declaredInFull() { return true; }
+
+    /**
      * Execute the tool with the given parameters.
      *
      * @param params   the parameters provided by the agent
