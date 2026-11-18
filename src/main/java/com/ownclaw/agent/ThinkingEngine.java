@@ -110,6 +110,18 @@ public class ThinkingEngine {
         context.requestSize(requestChars(messages, requestConfig.tools()), provider.name() + "/" + provider.model(),
                 messages.stream().anyMatch(m -> !m.images().isEmpty()));
 
+        // To a cloud model: how long its provider is to keep what it caches of the task's steps,
+        // by how far apart the task's think requests are sent (AgentContext#cloudThinkSent) --
+        // counted here, as this one goes.
+        if (!mode.local()) {
+            boolean already = context.stepsFarApart();
+            requestConfig = requestConfig.withHourLongSteps(context.cloudThinkSent(now()));
+            if (requestConfig.hourLongSteps() && !already) {
+                log.info("Task {}: two think requests more than {} s apart, so the steps are cached for "
+                        + "an hour from here", context.taskId(), AgentContext.FIVE_MINUTE_CACHE_HOLDS_MS / 1000);
+            }
+        }
+
         // The task's progress hook keeps its stall watchdog from taking a long call for silence,
         // and lets its Stop end it; the call's own keeps what the owner is shown of it while it
         // runs (LiveCall).
@@ -228,6 +240,14 @@ public class ThinkingEngine {
                     "Continue from where the task stands."), messages, "ERROR: " + e.getMessage(),
                     null, e.getMessage());
         }
+    }
+
+    /**
+     * When a think request is sent, in milliseconds on a clock that only runs forward: two of
+     * them are compared, and the wall clock is set now and then. A test's own, to make minutes pass.
+     */
+    long now() {
+        return System.nanoTime() / 1_000_000;
     }
 
     /**
@@ -395,8 +415,10 @@ public class ThinkingEngine {
      * CapabilityResolver finds a missing capability is replayed as an action, and its arguments
      * and reasoning are the resolver's constants.
      * <p>
-     * Every message but the last is the same bytes on every later step, so the conversation is
-     * append-only and the provider's sliding cache breakpoint keeps hitting. The last user turn
+     * Every message but the last is the same bytes on every later step, and so is the beginning
+     * of the last -- the newest result, which is all that message is from the next step on
+     * ({@link LlmMessage#newest}) -- so the conversation is append-only and the provider's sliding
+     * cache breakpoint, which stands on that beginning, keeps hitting. After it the last user turn
      * carries what changes on every step (the date, the tools on the text protocol, the vault),
      * behind the cache breakpoints. The cache boundary marks where the task ends in the first
      * message, on every step: the task -- with the tools and the system prompt before it -- is
@@ -429,9 +451,15 @@ public class ThinkingEngine {
             user = new StringBuilder(context.observationShown(i, turn));
             steps++;
         }
-        String step = buildDynamicContext(context, mode);
-        user.append("\n\n---\n").append(first ? LlmMessage.unmarked(step) : step);
-        messages.add(first ? LlmMessage.marked(user.toString(), task.images()) : LlmMessage.user(user.toString()));
+        String step = "\n\n---\n" + buildDynamicContext(context, mode);
+        // From the second step on the newest message says which beginning of it is all it will be
+        // on every later step -- the last result, with what the loop said after it -- apart from
+        // what changes on every step (LlmMessage#newest): the provider caches up to there, and
+        // the next step reads the result back instead of paying for it in full again. Its text is
+        // the one text it was. On the first step the task's own boundary does this, in the
+        // marked message.
+        messages.add(first ? LlmMessage.marked(user.append(LlmMessage.unmarked(step)).toString(), task.images())
+                : LlmMessage.newest(user.toString(), step));
         withToolsAdded(messages, added, next, Integer.MAX_VALUE);
     }
 

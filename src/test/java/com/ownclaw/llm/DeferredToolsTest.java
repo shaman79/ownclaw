@@ -36,7 +36,8 @@ class DeferredToolsTest {
                 // web_fetch again, openwrt_run a second time, a tool offered from the start, one deleted since
                 LlmMessage.toolsAdded(List.of("web_fetch", "openwrt_run", "smtp_send_email", "gone_skill")),
                 LlmMessage.assistant("{\"tool\":\"web_fetch\"}"),
-                LlmMessage.user("the page"));
+                // The newest message as the engine writes it: the result, then what changes every step.
+                LlmMessage.newest("the page", "\n\n---\n## Environment"));
     }
 
     @Test
@@ -85,15 +86,20 @@ class DeferredToolsTest {
                 "each addition right after a user turn, before the next assistant turn");
         assertEquals("SYSTEM", body.path("system").get(0).path("text").asText(), "the TOOLS messages are not the system prompt");
 
-        assertEquals(5, marked(body), "the sliding mark on the message before the newest user turn");
+        // It stood on the message before, the model's call: the newest result is cached with it now.
+        assertEquals(6, marked(body), "the sliding mark on the newest user turn, on its result");
+        assertEquals("the page", body.path("messages").get(6).path("content").get(0).path("text").asText());
+        assertFalse(body.path("messages").get(6).path("content").get(1).has("cache_control"),
+                "not on what changes on every step");
 
         // A step that found tools: its addition comes after the newest user turn.
         var found = new ArrayList<>(conversation());
         found.add(LlmMessage.toolsAdded(List.of("openwrt_run_to_file")));
         var more = new ArrayList<>(TOOLS);
         more.add(new ToolSpec("openwrt_run_to_file", "run on a router, to a file", SCHEMA, true));
-        assertEquals(5, marked(provider.requestBody(found, new LlmRequestConfig(null, null, false, more),
-                "claude-opus-5", 128_000)), "not on the newest user turn, which changes on every step");
+        JsonNode after = provider.requestBody(found, new LlmRequestConfig(null, null, false, more), "claude-opus-5", 128_000);
+        assertEquals(6, marked(after), "still on the newest user turn: a tool addition is no turn of text");
+        assertEquals("system", after.path("messages").get(7).path("role").asText(), "the addition, after it");
     }
 
     /** The message the sliding five-minute mark is on. */

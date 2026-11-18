@@ -312,14 +312,108 @@ class CloudGatewayTest {
 
     /** The gateway's filtered message, as the provider behind it is handed it. */
     private static LlmMessage handed(LlmMessage first) {
+        return handed(first, Map.of());
+    }
+
+    /** {@link #handed(LlmMessage)}, for a user whose vault holds these values. */
+    private static LlmMessage handed(LlmMessage first, Map<String, String> vault) {
         var provider = new Recording();
         var gw = new CloudGateway(provider, new Recording(), config("anthropic", CloudGateway.Mode.ENFORCE), new Rows(),
                 null, new Redactor(null));
         gw.chat(List.of(LlmMessage.authoredSystem("SYSTEM"), first), new LlmRequestConfig(null, null, false)
-                .withEgress(egress(new PrivateIndex(), Map.of(), (h, w) -> false)));
+                .withEgress(egress(new PrivateIndex(), vault, (h, w) -> false)));
         LlmMessage got = provider.calls.get(0).get(1);
         assertEquals(first.marked(), got.marked(), "the engine's mark goes on to the provider");
         return got;
+    }
+
+    /** What changes on every step, as the engine ends a think call's newest message with it. */
+    static final String STEP = "\n\n---\n## Environment\n- DateTime: now\n\nVault: ROUTER_PASSWORD";
+
+    @Test
+    @DisplayName("the lasting beginning of the newest message is handed on as the filter writes it alone -- the message the next step sends, byte for byte -- and the text, the counts and the ledger's parts are those of the same message as one text")
+    void theLastingBeginningIsTheNextStepsMessage() {
+        String result = "[openwrtWifiConfig] OK (5ms)\nconfig wifi-iface 'default_radio0'\n"
+                + "\toption key 'correct horse battery staple'\n\toption macaddr '02:00:5e:10:20:30'\n"
+                + "admin contact: jan@example.org\nroot's password is hunter2-in-the-vault";
+        Map<String, String> vault = Map.of("ROUTER_PASSWORD", "hunter2-in-the-vault");
+        var before = List.of(LlmMessage.authoredSystem("SYSTEM"), LlmMessage.user("the task"),
+                LlmMessage.assistant("{\"tool\":\"openwrtWifiConfig\"}"));
+
+        var provider = new Recording(); var rows = new Rows();
+        var gw = new CloudGateway(provider, new Recording(), config("anthropic", CloudGateway.Mode.ENFORCE), rows, null,
+                new Redactor(null));
+        var cfg = new LlmRequestConfig(null, null, false).withEgress(egress(new PrivateIndex(), vault, (h, w) -> false));
+        var now = new ArrayList<>(before);
+        now.add(LlmMessage.newest(result, STEP));
+        gw.chat(now, cfg);
+
+        LlmMessage handed = provider.calls.get(0).get(3);
+        String filtered = "[openwrtWifiConfig] OK (5ms)\nconfig wifi-iface 'default_radio0'\n"
+                + "\toption key '«secret removed»'\n\toption macaddr '<mac_1>'\n"
+                + "admin contact: <email_1>\nroot's password is «vault:ROUTER_PASSWORD»";
+        assertEquals(filtered + STEP, handed.content(), "filtered whole, as every part is");
+        assertEquals(filtered, handed.lasting(), "and the beginning named again, for the text that leaves");
+        assertNotEquals(result.length(), filtered.length(),
+                "the premise: the result ends elsewhere in what is sent than in what the engine wrote");
+
+        // The next step: the same result is a message of its own -- that beginning, and no other bytes.
+        var next = new ArrayList<>(before);
+        next.add(LlmMessage.user(result));
+        next.add(LlmMessage.assistant("{\"tool\":\"respond\"}"));
+        next.add(LlmMessage.newest("[smtp_send_email] OK (1ms)\nsent", STEP));
+        gw.chat(next, cfg);
+        assertEquals(handed.lasting(), provider.calls.get(1).get(3).content());
+        assertNull(provider.calls.get(1).get(3).lasting(), "a message that is all of what it will be names none");
+        assertEquals("[smtp_send_email] OK (1ms)\nsent", provider.calls.get(1).get(5).lasting());
+
+        // The same message as one text, through a gateway of its own: nothing else differs.
+        var plain = new Recording(); var plainRows = new Rows();
+        var asOneText = new ArrayList<>(before);
+        asOneText.add(LlmMessage.user(result + STEP));
+        new CloudGateway(plain, new Recording(), config("anthropic", CloudGateway.Mode.ENFORCE), plainRows, null,
+                new Redactor(null)).chat(asOneText, new LlmRequestConfig(null, null, false)
+                .withEgress(egress(new PrivateIndex(), vault, (h, w) -> false)));
+        assertEquals(plain.calls.get(0).get(3).content(), handed.content(), "the text that leaves");
+        assertNull(plain.calls.get(0).get(3).lasting());
+        EgressLedger.Row with = rows.rows.get(0), without = plainRows.last();
+        assertEquals(without.parts(), with.parts(), "the ledger's parts: their lengths and hashes");
+        assertEquals(without.bytesOut(), with.bytesOut());
+        assertEquals(2, with.secretsRemoved(), "the key and the vault's value, each counted once");
+        assertEquals(without.secretsRemoved(), with.secretsRemoved());
+        assertEquals(without.identifiersReplaced(), with.identifiersReplaced());
+        // Mutation: hand on the beginning as the engine wrote it -> it is not how the filtered
+        // text begins, and the message goes on with none. Count what the second reading finds ->
+        // 4 secrets removed, where 2 were. Filter the two parts apart -> the same here, but a key
+        // that never ends no longer takes what follows it (aBoundaryTheFilterWroteAcross).
+    }
+
+    @Test
+    @DisplayName("where the filter removes something across the end of the lasting beginning the message goes on with none named; where it removes all that follows, the beginning is all of it")
+    void aBoundaryTheFilterWroteAcross() {
+        // A vault value that holds the very line break a result ends at.
+        LlmMessage across = handed(LlmMessage.newest("the result ends in a tail", "\n\n---\n## Environment"),
+                Map.of("ODD_VALUE", "tail\n\n---\n## Env"));
+        assertEquals("the result ends in a «vault:ODD_VALUE»ironment", across.content());
+        assertNull(across.lasting(), "the next step's message ends in 'tail': no block of this text is that message");
+
+        // A private key that never ends is removed to the end of the text, as it was: what changes
+        // every step goes with it, and what is left is the result as the next step sends it.
+        LlmMessage key = handed(LlmMessage.newest("[cat] OK (2ms)\n" + KEY_HEAD, "\n\n---\n## Environment"));
+        assertEquals("[cat] OK (2ms)\n«secret removed»", key.content());
+        assertEquals(key.content(), key.lasting());
+        assertEquals(key.content(), handed(LlmMessage.user("[cat] OK (2ms)\n" + KEY_HEAD)).content(),
+                "the premise: the next step's message");
+
+        // A name the per-step text gives a device is replaced in the result too, filtered as one
+        // text -- and is known when the result is read alone, so the two readings agree.
+        LlmMessage named = handed(LlmMessage.newest("fake-laptop is online", "\n\n---\nconfig host\n\toption name 'fake-laptop'"));
+        assertEquals("<host_1> is online\n\n---\nconfig host\n\toption name '<host_1>'", named.content());
+        assertEquals("<host_1> is online", named.lasting());
+        // Mutation: name the beginning by the length of the result filtered alone, unchecked ->
+        // the first case's block is "the result ends in a «vau". Read the beginning alone before
+        // the message whole -> in the last case the name is not known yet, the two readings
+        // differ, and no beginning is named.
     }
 
     static final String KEY_HEAD = "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAABG5vbmUfakeHEAD\n";

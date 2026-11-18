@@ -51,7 +51,15 @@ public record LlmRequestConfig(
      * own turn -- a skill's code written in parts -- and puts the values back itself, once, in what
      * it keeps ({@link LlmProvider#restored}). A provider that writes no placeholders ignores it.
      */
-    boolean asWritten
+    boolean asWritten,
+    /**
+     * The steps of the task this request is a think call of have been further apart than a
+     * five-minute cache entry lives ({@code AgentContext#cloudThinkSent}): Anthropic's provider
+     * then caches the steps for an hour, as it caches the task before them
+     * ({@code AnthropicProvider#requestBody}). The other providers have no cache to mark and
+     * ignore it.
+     */
+    boolean hourLongSteps
 ) {
     public LlmRequestConfig {
         progress = progress == null ? LlmProgress.NONE : progress;
@@ -59,47 +67,54 @@ public record LlmRequestConfig(
 
     /** Without native tools, a context or a progress hook. */
     public LlmRequestConfig(String model, Double temperature, boolean jsonMode) {
-        this(model, temperature, jsonMode, null, null, null, false, null, false);
+        this(model, temperature, jsonMode, null, null, null, false, null, false, false);
     }
 
     /** With tools, without a context or a progress hook. */
     public LlmRequestConfig(String model, Double temperature, boolean jsonMode, List<ToolSpec> tools) {
-        this(model, temperature, jsonMode, tools, null, null, false, null, false);
+        this(model, temperature, jsonMode, tools, null, null, false, null, false, false);
     }
 
     /** This request, but offering the model these tools natively. */
     public LlmRequestConfig withTools(List<ToolSpec> toolSpecs) {
         return new LlmRequestConfig(model, temperature, jsonMode, toolSpecs, egress, progress, withoutThinking,
-                effort, asWritten);
+                effort, asWritten, hourLongSteps);
     }
 
     /** This request, made on behalf of a task. */
     public LlmRequestConfig withEgress(EgressContext egressContext) {
         return new LlmRequestConfig(model, temperature, jsonMode, tools, egressContext, progress, withoutThinking,
-                effort, asWritten);
+                effort, asWritten, hourLongSteps);
     }
 
     /** This request, telling {@code hook} about every event of the reply as it streams in. */
     public LlmRequestConfig withProgress(LlmProgress hook) {
         return new LlmRequestConfig(model, temperature, jsonMode, tools, egress, hook, withoutThinking, effort,
-                asWritten);
+                asWritten, hourLongSteps);
     }
 
     /** This request, answered without reasoning first (see {@link #withoutThinking()}). */
     public LlmRequestConfig answeringDirectly() {
-        return new LlmRequestConfig(model, temperature, jsonMode, tools, egress, progress, true, effort, asWritten);
+        return new LlmRequestConfig(model, temperature, jsonMode, tools, egress, progress, true, effort, asWritten,
+                hourLongSteps);
     }
 
     /** This request, at this thinking effort (see {@link #effort()}). */
     public LlmRequestConfig withEffort(String level) {
         return new LlmRequestConfig(model, temperature, jsonMode, tools, egress, progress, withoutThinking, level,
-                asWritten);
+                asWritten, hourLongSteps);
     }
 
     /** This request, its reply handed back as the model wrote it (see {@link #asWritten()}). */
     public LlmRequestConfig repliesAsWritten() {
         return new LlmRequestConfig(model, temperature, jsonMode, tools, egress, progress, withoutThinking, effort,
-                true);
+                true, hourLongSteps);
+    }
+
+    /** This request, its steps cached for an hour or for five minutes (see {@link #hourLongSteps()}). */
+    public LlmRequestConfig withHourLongSteps(boolean hour) {
+        return new LlmRequestConfig(model, temperature, jsonMode, tools, egress, progress, withoutThinking, effort,
+                asWritten, hour);
     }
 
     /** Whether native tools are being offered on this call. */
