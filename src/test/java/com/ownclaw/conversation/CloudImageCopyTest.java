@@ -419,6 +419,21 @@ class CloudImageCopyTest {
         return peak.get() - base;
     }
 
+    /**
+     * {@link #heapPeak(Runnable)} of {@code run}, taken again -- three times at most -- while the
+     * reading is not under {@code limit}, and the least of the readings. What the heap holds while
+     * {@code run} works is what it needs and whatever the collector has not yet taken back, and on
+     * a busy machine the collector is late: 172 and 180 MB were read against a limit of 165 in full
+     * runs beside other builds, and never in a run alone. Lateness only adds to a reading, so the
+     * least of them is the nearest to what the run needs; code that really needs more than the
+     * limit reads over it every time.
+     */
+    private static long heapPeak(Runnable run, long limit) throws Exception {
+        long least = Long.MAX_VALUE;
+        for (int reading = 0; reading < 3 && least >= limit; reading++) least = Math.min(least, heapPeak(run));
+        return least;
+    }
+
     @Test
     @DisplayName("each accepted format at its largest size -- 65,535 x 65,535 -- is answered in bounded memory and time, from a file of a few hundred bytes")
     void theLargestDeclarationsAreBounded(@TempDir Path dir) throws Exception {
@@ -458,10 +473,11 @@ class CloudImageCopyTest {
         splt = null;
         Path f = file(dir, "palette.png", png);
         var result = new CloudImageCopy.Made[1];
-        long peak = heapPeak(() -> result[0] = CloudImageCopy.of(f));
+        long limit = 150L << 20;
+        long peak = heapPeak(() -> result[0] = CloudImageCopy.of(f), limit);
         assertNotNull(result[0].copy(), result[0].privateBecause());
         assertEquals("data of another program", result[0].copy().metadata());
-        assertTrue(peak < 150L << 20, (peak >> 20) + " MB of heap: the suggested palette was parsed");
+        assertTrue(peak < limit, (peak >> 20) + " MB of heap: the suggested palette was parsed");
         // Mutation: hand the reader the file whole -> hundreds of megabytes of arrays.
     }
 
@@ -482,13 +498,14 @@ class CloudImageCopyTest {
             // 4,400 x 3,300, stored on its side: 116 MB as 16-bit RGBA, 58 MB as 8-bit, from a file of kilobytes.
             Path f = file(dir, "turned" + depth + ".png", turnedPng(4400, 3300, depth, 6, 6));
             var result = new CloudImageCopy.Made[1];
-            long peak = heapPeak(() -> result[0] = CloudImageCopy.of(f));
+            long limit = (depth == 16 ? 100L : 165L) << 20;
+            long peak = heapPeak(() -> result[0] = CloudImageCopy.of(f), limit);
             var copy = result[0].copy();
             assertNotNull(copy, result[0].privateBecause());
             assertEquals(3300, copy.originalWidth());
             assertEquals(4400, copy.originalHeight());
             assertTrue(copy.height() > copy.width(), "upright: " + copy.width() + "x" + copy.height());
-            assertTrue(peak < (depth == 16 ? 100L : 165L) << 20, depth + "-bit: " + (peak >> 20) + " MB of heap");
+            assertTrue(peak < limit, depth + "-bit: " + (peak >> 20) + " MB of heap");
         }
         // Mutation: read a 16-bit photo at twice its copy's size -> 90 MB read; turn it before scaling,
         // the decoded image still held -> three times its size at once.
@@ -500,13 +517,14 @@ class CloudImageCopyTest {
         // Sixteen thousand rows of sixteen thousand grey pixels: 256 MB read whole, a gigabyte as RGB.
         Path f = file(dir, "large.png", TestImages.uniformGreyPng(16000, 16000));
         var result = new CloudImageCopy.Made[1];
-        long peak = heapPeak(() -> result[0] = CloudImageCopy.of(f, Duration.ofSeconds(25)));
+        long limit = 200L << 20;
+        long peak = heapPeak(() -> result[0] = CloudImageCopy.of(f, Duration.ofSeconds(25)), limit);
         var copy = result[0].copy();
         assertNotNull(copy, result[0].privateBecause());
         assertEquals(16000, copy.originalWidth());
         assertEquals(copy.width(), copy.height());
         assertTrue(copy.width() <= CloudImageCopy.MAX_EDGE, "within the tier: " + copy.width());
-        assertTrue(peak < 200L << 20, "read at a fraction of its pixels, not whole: " + (peak >> 20) + " MB of heap");
+        assertTrue(peak < limit, "read at a fraction of its pixels, not whole: " + (peak >> 20) + " MB of heap");
         // Mutation: read every pixel (no subsampling) -> over a gigabyte before the copy is begun.
     }
 

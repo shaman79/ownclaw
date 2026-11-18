@@ -985,8 +985,15 @@ class SkillSelfRepairTest {
     @DisplayName("R4-5: a Stop marks only a repair it covers -- compared in milliseconds, as the queue and the loop compare it")
     void anUnrelatedStopMarksNothing(@TempDir Path tmp) throws Exception {
         fix = new Fix(tmp);
-        long stopAt = System.currentTimeMillis();
         fix.rig.cancellation.requestAll("u1", "you pressed Stop");
+        // Read once the Stop is taken, so the Stop's own reading of the clock is no later than
+        // this one; and the run below starts in a later millisecond than both. A Stop covers
+        // what began in its own millisecond (TaskCancellationService#why): started there, the
+        // run ended stopped and left no repair to look at -- which is how this test failed in
+        // two full runs, where everything is warm and the two fell in one millisecond, and
+        // never in a run alone.
+        long stopAt = System.currentTimeMillis();
+        while (System.currentTimeMillis() <= stopAt) Thread.onSpinWait();
         fix.menuRun(true);
         // Queued a millisecond after that Stop, in the same second -- as a quick run gets it.
         fix.rig.jdbc.update("UPDATE skill_repairs SET queued_ms = ?, started_at = ? WHERE id = ?", stopAt + 1,
