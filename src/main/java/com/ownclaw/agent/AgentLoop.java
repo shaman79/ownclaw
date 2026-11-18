@@ -1261,7 +1261,7 @@ public class AgentLoop {
                 }
                 // An answer that owes something is kept, and the model asked for it in one more
                 // call, which ends the task (askedOnce): nothing of the loop's steps follows it.
-                if (owed != null) return askedOnce(context, answer, owed, step);
+                if (owed != null) return askedOnce(context, answer, owed, step, provider, local);
                 // What it says did not do its whole job, of the answer that is delivered: read when
                 // the task ends (SkillSelfRepair).
                 context.setReportedProblems(action.params().get(SkillSelfRepair.PROBLEMS));
@@ -1776,9 +1776,21 @@ public class AgentLoop {
      * <p>
      * A Stop is a Stop here too -- come by the time the task answered, heard by the call, or come
      * by the time the call returned, whatever it brought back: the task ends stopped
-     * ({@link #stoppedUnanswered}). One that came while it answered is asked nothing.
+     * ({@link #stoppedUnanswered}), and nothing the reply said is read -- a stopped run starts no
+     * repair. One that came while it answered is asked nothing.
+     * <p>
+     * Asked of the model that gave the answer, {@code provider}: chosen again here, a cloud that
+     * read as unavailable between the answer and the question handed the question to the local
+     * model, and its "check: passed" recorded a repair it had not made as fixed (the second
+     * review, 18 Nov 2026). And nothing around the call may cost the task its answer either: the
+     * reply is read before anything is counted or shown, and a count that cannot be written --
+     * the database busy -- is logged and no more.
+     *
+     * @param provider the model that gave the answer, which is asked
+     * @param local    whether that is the local model
      */
-    private AgentResult askedOnce(AgentContext context, Answer kept, SkillSelfRepair.Owed owed, int step) {
+    private AgentResult askedOnce(AgentContext context, Answer kept, SkillSelfRepair.Owed owed, int step,
+                                  LlmProvider provider, boolean local) {
         if (context.isCancelled()) return stoppedUnanswered(context);
         // The step as it stands from here: for the model its answer's place and the question, for
         // the task's record the note that it was asked.
@@ -1790,29 +1802,32 @@ public class AgentLoop {
                 context.taskId(), step + 1);
 
         context.setStep(step + 2);
-        LlmProvider provider = llmRouter.selectProvider(context);
-        boolean local = llmRouter.isLocal(provider);
         String providerLabel = local ? "local" : provider.name();
         statusEmitter.emitForTask(context.userId(), context.taskId(), StatusMessage.Type.STEP,
                 "Step " + (step + 2) + " · " + providerLabel, tokenData(context));
-        boolean heardStop = false;
+        // What the reply said of what was asked, from a respond alone: prose carries neither.
+        // Put on the task only once it is known not to be stopped.
+        Object problems = null, check = null;
         try {
             ThinkResult reply = local
                     ? lane.foreground(context, () -> thinkingEngine.decideNextActionFull(context, provider))
                     : thinkingEngine.decideNextActionFull(context, provider);
-            context.markProgress();
-            account(context, local, provider, reply.reply());
-            emitThinkDetail(context, reply, step + 2, providerLabel);
             AgentAction said = reply.action();
-            // Read from a respond alone, and nothing but these two: prose carries neither.
             if (said.isResponse()) {
-                context.setReportedProblems(said.params().get(SkillSelfRepair.PROBLEMS));
-                context.setReportedCheck(said.params().get(SkillSelfRepair.CHECK));
+                problems = said.params().get(SkillSelfRepair.PROBLEMS);
+                check = said.params().get(SkillSelfRepair.CHECK);
             }
+            context.markProgress();
+            counted(context, local, provider, reply.reply(), step + 2);
+            emitThinkDetail(context, reply, step + 2, providerLabel);
             log.info("Task {} step {}: asked once, the model replied with {}{}", context.taskId(), step + 2,
                     said.tool(), said.isResponse() ? "" : " -- not run, and nothing is read from it");
         } catch (TaskCancellationService.TaskCancelledException stop) {
-            heardStop = true; // on the call's progress hook
+            // A Stop, heard on the call's progress hook: the task's own flag says so, below. The
+            // local lane also throws this when OwnClaw itself is stopping and the wait for the
+            // model is interrupted -- no Stop of the owner's, and the answer stands.
+            log.info("Task {} step {}: the asking call was interrupted{}", context.taskId(), step + 2,
+                    context.isCancelled() ? " by a Stop" : "; the answer it gave is its ending");
         } catch (EgressRefused refused) {
             // The gateway found bytes of a PRIVATE artifact in the request, and nothing was sent:
             // the bug report it is in any step, under the same name in the log. The answer was
@@ -1821,16 +1836,31 @@ public class AgentLoop {
         } catch (LlmException noReply) {
             // Declined, cut off, or a provider that cannot be reached or refuses the request: a
             // reply that came was billed. Not asked again, and not asked of another model.
-            account(context, local, provider, noReply.reply());
+            counted(context, local, provider, noReply.reply(), step + 2);
             log.warn("Task {} step {}: asked once for what its answer owed, and no reply came ({}); the answer "
                     + "it gave is its ending", context.taskId(), step + 2, noReply.getMessage());
         } catch (RuntimeException e) {
             log.error("Task {} step {}: asking once for what its answer owed failed ({}); the answer it gave "
                     + "is its ending", context.taskId(), step + 2, e.getMessage(), e);
         }
-        if (heardStop || context.isCancelled()) return stoppedUnanswered(context);
+        if (context.isCancelled()) return stoppedUnanswered(context);
+        context.setReportedProblems(problems);
+        context.setReportedCheck(check);
         return AgentResult.completed(kept.response(), context.trajectory(), context.elapsedMs())
                 .withOwnerText(kept.ownerText());
+    }
+
+    /**
+     * {@link #account} of the asking call's reply ({@link #askedOnce}), where a failure to write the
+     * count is logged and goes no further: the answer the task gave is not lost to a busy database.
+     */
+    private void counted(AgentContext context, boolean local, LlmProvider provider, LlmResponse reply, int step) {
+        try {
+            account(context, local, provider, reply);
+        } catch (RuntimeException e) {
+            log.error("Task {} step {}: the asking call's tokens could not be counted ({}); the answer the task "
+                    + "gave is its ending all the same", context.taskId(), step, e.getMessage(), e);
+        }
     }
 
     /**
