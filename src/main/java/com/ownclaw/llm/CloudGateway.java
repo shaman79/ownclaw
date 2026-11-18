@@ -161,6 +161,9 @@ public final class CloudGateway implements LlmProvider {
         Map<String, String> vault = egress.secretValues();
         var tally = new Redactor.Tally();
         var filteredMessages = new ArrayList<LlmMessage>(messages.size());
+        // What each declared text became in the filtered messages, {declared, sent}: said to the
+        // context when the request goes out (EgressContext.SentAs), not before.
+        var wentOutAs = new ArrayList<String[]>();
         // Which messages are echoes: the model's own words coming back exactly as this gateway
         // handed them out (below).
         var echoes = new java.util.HashSet<Integer>();
@@ -203,8 +206,11 @@ public final class CloudGateway implements LlmProvider {
             // (EgressContext.SentAs): the caller that changes a skill's code by the lines the model
             // names must change the text the model read, and only this pass knows it -- the second
             // reading, which finds the beginning (lasting), sends nothing and says nothing there.
+            // Noted here and said only when the request is sent (below): one the vault check or
+            // the canary refuses has sent nothing.
             String content = m.authored() ? Redactor.filterAuthored(m.content(), vault, tally)
-                    : redactor.filter(user, m.content(), vault, tally, egress.skillCode(), egress.sentAs()::put);
+                    : redactor.filter(user, m.content(), vault, tally, egress.skillCode(),
+                            (declared, sent) -> wentOutAs.add(new String[] {declared, sent}));
             filteredMessages.add(new LlmMessage(m.role(), content, m.authored(), m.marked(), m.images(),
                     lasting(m, content, user, vault, egress)));
         }
@@ -354,6 +360,10 @@ public final class CloudGateway implements LlmProvider {
                     }
                 });
         LlmResponse response;
+        // It is being sent: what the declared texts went out as is said now. Said while the
+        // message was filtered, a request the vault check or the canary then refused -- which
+        // reached no provider -- was told to the caller as one the model had read.
+        for (String[] text : wentOutAs) egress.sentAs().put(text[0], text[1]);
         try {
             response = provider.chat(filteredMessages, outbound);
         } catch (RuntimeException e) {

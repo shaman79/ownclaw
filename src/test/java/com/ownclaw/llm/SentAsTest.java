@@ -180,11 +180,16 @@ class SentAsTest {
             var kind = Redactor.Declared.values()[random.nextInt(Redactor.Declared.values().length)];
             var heard = new ArrayList<String[]>();
 
-            String told = new Redactor(null).filter("u1", text, Map.of(), new Redactor.Tally(), Map.of(declared, kind),
+            var countedTold = new Redactor.Tally();
+            var countedUntold = new Redactor.Tally();
+            String told = new Redactor(null).filter("u1", text, Map.of(), countedTold, Map.of(declared, kind),
                     (was, sent) -> heard.add(new String[] {was, sent}));
-            String untold = new Redactor(null).filter("u1", text, Map.of(), new Redactor.Tally(), Map.of(declared, kind));
+            String untold = new Redactor(null).filter("u1", text, Map.of(), countedUntold, Map.of(declared, kind));
 
             assertEquals(untold, told, "telling changed what is sent: " + text);
+            assertEquals(countedUntold.identifiersReplaced() + " replaced, " + countedUntold.secretsRemoved() + " removed",
+                    countedTold.identifiersReplaced() + " replaced, " + countedTold.secretsRemoved() + " removed",
+                    "telling changed what is counted: " + text);
             String between = told.substring(told.indexOf('\u0001') + 1, told.indexOf('\u0002'));
             // Where it stood between the marks; a piece row that repeats may stand elsewhere too.
             assertTrue(heard.stream().anyMatch(h -> h[0].equals(declared) && between.equals(h[1])),
@@ -196,5 +201,189 @@ class SentAsTest {
         }
         assertTrue(said > 2_500 && changed > 1_500, said + " said, " + changed + " of them changed on the way out");
         // Mutation: note where a stretch begins after its first piece is written -> what is said lacks its beginning.
+    }
+
+    // ── what the review of the change asked for: the boundaries, the pairing, the memory ──
+
+    static final String CODE = "import json\nNET = 'ExampleHome5G'\n\ndef run(params):\n    return {'output': NET}";
+
+    @Test
+    @DisplayName("a request the gateway refuses has sent nothing, and says nothing: what the code would have gone out as is not known")
+    void aRefusedRequestSaysNothing() {
+        var p = new Script();
+        var gw = new CloudGateway(p, p, config(), x -> { }, null, new Redactor(null));
+        String privateResult = "the private result of a tool: quarterly numbers 1234 5678 91011 and names of people";
+        var index = new PrivateIndex();
+        index.addPrivate(3, privateResult);
+        var e = new EgressContext("u1", "t1", "codegen", index, Map.of(), null, null, null, Map.of(CODE, Redactor.Declared.CODE));
+        assertThrows(EgressRefused.class,
+                () -> gw.chat(List.of(LlmMessage.user("Fix:\n" + CODE + "\nresult:\n" + privateResult)), plain(e)));
+        assertTrue(p.calls.isEmpty(), "the premise: nothing reached the provider");
+        assertNull(e.sentAs().of(CODE), "said as sent, of a request that was refused");
+        // Mutation: say it while the message is filtered, as the first version did -> the filtered code, 78 characters.
+    }
+
+    @Test
+    @DisplayName("two declared texts in one part are each said as their own stretch -- the shorter that stands first too")
+    void twoDeclaredTextsEachItsOwn() {
+        var r = new Redactor(null);
+        r.filter("u1", "my network is ssid=\"ExampleHome5G\"", Map.of(), new Redactor.Tally());
+        String shorter = "GUEST = 'ExampleHome5G_guest'";
+        var heard = new ArrayList<String[]>();
+        String out = r.filter("u1", "A:\n" + shorter + "\nB:\n" + CODE + "\nend", Map.of(), new Redactor.Tally(),
+                Map.of(shorter, Redactor.Declared.CODE, CODE, Redactor.Declared.CODE),
+                (was, sent) -> heard.add(new String[] {was, sent}));
+        assertEquals(2, heard.size());
+        assertEquals(shorter, heard.get(0)[0]);
+        assertEquals("GUEST = '<ssid_1>_guest'", heard.get(0)[1]);
+        assertEquals(CODE, heard.get(1)[0]);
+        assertEquals(CODE.replace("ExampleHome5G", "<ssid_1>"), heard.get(1)[1]);
+        assertEquals("A:\n" + heard.get(0)[1] + "\nB:\n" + heard.get(1)[1] + "\nend", out);
+        // Mutation: name the texts in the order they were looked for, the longer first -> each is said as the other's text.
+    }
+
+    @Test
+    @DisplayName("a finding at the last character of a declared text, and one at its first, are part of what it is said as")
+    void aFindingAtTheFirstAndAtTheLastCharacter() {
+        var r = new Redactor(null);
+        String endsWithAddress = "import json\n# written by ops0@example.com";
+        String beginsWithAddress = "ops0@example.com wrote this code";
+        var heard = new ArrayList<String[]>();
+        String out = r.filter("u1", "```python\n" + endsWithAddress + "\n```\nand:" + beginsWithAddress + "\n", Map.of(),
+                new Redactor.Tally(),
+                Map.of(endsWithAddress, Redactor.Declared.CODE, beginsWithAddress, Redactor.Declared.OUTPUT),
+                (was, sent) -> heard.add(new String[] {was, sent}));
+        assertEquals("```python\nimport json\n# written by <email_1>\n```\nand:<email_1> wrote this code\n", out);
+        assertEquals("import json\n# written by <email_1>", heard.get(0)[1]);
+        assertEquals("<email_1> wrote this code", heard.get(1)[1]);
+        // Mutation: the end noted a character early -> "...<email_1"; the beginning a character late -> "email_1> wrote...".
+    }
+
+    @Test
+    @DisplayName("a finding that lies across the beginning of a declared text leaves it no beginning of its own: nothing is said")
+    void aFindingAcrossTheBeginning() {
+        var r = new Redactor(null);
+        String startsInsideTheAddress = "example.com and the rest of the declared text";
+        var heard = new ArrayList<String[]>();
+        String out = r.filter("u1", "mail ops0@" + startsInsideTheAddress + "\n", Map.of(), new Redactor.Tally(),
+                Map.of(startsInsideTheAddress, Redactor.Declared.OUTPUT), (was, sent) -> heard.add(new String[] {was, sent}));
+        assertEquals("mail <email_1> and the rest of the declared text\n", out);
+        assertEquals(1, heard.size());
+        assertEquals(startsInsideTheAddress, heard.get(0)[0]);
+        assertNull(heard.get(0)[1], "its beginning is inside the address's placeholder");
+        // Mutation: take a finding that begins before the text for its beginning -> "<email_1> and the rest..." is said.
+    }
+
+    @Test
+    @DisplayName("of two declared texts the vault scrub leaves the same, the one that sorts first is named -- as it was declared, not as the scrub left it")
+    void theTwinThatSortsFirstAsDeclared() {
+        var r = new Redactor(null);
+        String open = String.valueOf((char) 0xAB), close = String.valueOf((char) 0xBB);
+        Map<String, String> vault = Map.of("ROUTER_PIN", "Xk9#mP2vQ7");
+        String withValue = "PIN = 'Xk9#mP2vQ7' and more of the code";
+        String withMarker = "PIN = '" + open + "vault:ROUTER_PIN" + close + "' and more of the code";
+        assertTrue(withValue.compareTo(withMarker) < 0, "the premise: the one with the value sorts first");
+        var heard = new ArrayList<String[]>();
+        r.filter("u1", "code:\n" + withValue + "\nend", vault, new Redactor.Tally(),
+                Map.of(withValue, Redactor.Declared.CODE, withMarker, Redactor.Declared.CODE),
+                (was, sent) -> heard.add(new String[] {was, sent}));
+        assertEquals(1, heard.size());
+        assertEquals(withValue, heard.get(0)[0]);
+        assertEquals(withMarker, heard.get(0)[1]);
+        heard.clear();
+        r.filter("u1", "code:\n" + withValue + "\nend", vault, new Redactor.Tally(), Map.of(withValue, Redactor.Declared.CODE),
+                (was, sent) -> heard.add(new String[] {was, sent}));
+        assertEquals(withValue, heard.get(0)[0], "alone: named as declared, the value in it");
+        // Mutation: name the twin that sorts last -> the one with the marker; name it as the scrub left it -> the same.
+    }
+
+    @Test
+    @DisplayName("a text that went out once as it is and once across a finding, in one request, is not known")
+    void untellableOnceIsNotKnown() {
+        var p = new Script();
+        var gw = new CloudGateway(p, p, config(), x -> { }, null, new Redactor(null));
+        String cut = "import json\nCONTACT = 'ops0@example";
+        var e = declaring(Map.of(cut, Redactor.Declared.CODE));
+        p.next.add("ok");
+        gw.chat(List.of(LlmMessage.user(cut + " and\n" + cut + ".com'\n")), plain(e));
+        assertEquals(cut + " and\nimport json\nCONTACT = '<email_1>'\n", p.calls.getLast().getFirst().content(),
+                "the premise: as it is, then with an address across its end");
+        assertNull(e.sentAs().of(cut));
+        // Mutation: a text that could not be told is not remembered -> the clean one is said.
+    }
+
+    @Test
+    @DisplayName("telling counts what not telling counts")
+    void tellingCountsTheSame() {
+        var a = new Redactor(null);
+        var b = new Redactor(null);
+        for (var r : List.of(a, b)) r.filter("u1", "my network is ssid=\"ExampleHome5G\"", Map.of(), new Redactor.Tally());
+        String code = "import json\nNET = 'ExampleHome5G_x'\nARCHIVE = '/tmp/ExampleHome5G_backup.tar'";
+        var told = new Redactor.Tally();
+        var untold = new Redactor.Tally();
+        a.filter("u1", "```\n" + code + "\n```", Map.of(), told, Map.of(code, Redactor.Declared.CODE), (was, sent) -> { });
+        b.filter("u1", "```\n" + code + "\n```", Map.of(), untold, Map.of(code, Redactor.Declared.CODE));
+        assertEquals(2, untold.identifiersReplaced(), "the premise: two values inside longer words");
+        assertEquals(untold.identifiersReplaced(), told.identifiersReplaced());
+        assertEquals(untold.secretsRemoved(), told.secretsRemoved());
+        // Mutation: the known values replaced inside a stretch counted apart when telling -> 0 for 2.
+    }
+
+    @Test
+    @DisplayName("the memory: the same text again is that text, another or none is not known and stays so, forgetting empties it, and a context made of another's parts has its own")
+    void theMemory() {
+        var e = declaring(Map.of());
+        var s = e.sentAs();
+        s.put("a-text", "x");
+        s.put("a-text", "x");
+        assertEquals("x", s.of("a-text"));
+        s.put("a-text", null);
+        assertNull(s.of("a-text"));
+        s.put("a-text", "x");
+        assertNull(s.of("a-text"), "stays not known");
+        s.put("b-text", null);
+        s.put("b-text", "y");
+        assertNull(s.of("b-text"));
+        s.put(null, "z");
+        assertNull(s.of(null));
+        s.forget();
+        s.put("a-text", "z");
+        assertEquals("z", s.of("a-text"));
+        var copy = new EgressContext(e.userId(), e.taskId(), e.purpose(), e.index(), e.secretValues(), e.allowed(),
+                e.toolOf(), e.handedOut(), e.skillCode(), e.sentAs());
+        assertNotSame(e.sentAs(), copy.sentAs());
+        assertNull(copy.sentAs().of("a-text"));
+        assertFalse(e.toString().contains("z"), "what was sent is in no log of the context");
+        // Mutation: take the memory a caller passes -> the copy answers for the original's requests.
+    }
+
+    @Test
+    @DisplayName("what is said is of a text standing as a stretch of its own: inside a longer declared text, and in a part the caller authored, it is read by other rules and not heard")
+    void whereItIsNotHeard() {
+        var p = new Script();
+        var gw = new CloudGateway(p, p, config(), x -> { }, null, new Redactor(null));
+        p.next.add("ok");
+        gw.chat(List.of(LlmMessage.user("my network: ssid=\"ExampleHome5G\"")), plain(declaring(Map.of())));
+
+        // Inside a longer declared text: the fence's stretch is said, the other occurrence is the longer text's.
+        String written = "import json\nNET = '<ssid_1>'\n\ndef run(params):\n    return {'output': NET}";
+        String longer = "Traceback of the load:\n" + written + "\nSyntaxError: nothing";
+        var both = new java.util.LinkedHashMap<String, Redactor.Declared>();
+        both.put(written, Redactor.Declared.CODE_AS_WRITTEN);
+        both.put(longer, Redactor.Declared.OUTPUT);
+        var e = declaring(both);
+        p.next.add("ok");
+        gw.chat(List.of(LlmMessage.user("Broken code:\n```python\n" + written + "\n```\nError: " + longer + "\n")), plain(e));
+        String sent = p.calls.getLast().getFirst().content();
+        assertEquals(sent.substring(sent.indexOf("```python\n") + 10, sent.indexOf("\n```\n")), e.sentAs().of(written));
+
+        // In an authored part the code goes with the vault's values out and nothing else done to it.
+        var authored = declaring(Map.of(CODE, Redactor.Declared.CODE));
+        p.next.add("ok");
+        gw.chat(List.of(LlmMessage.authoredSystem("The code is:\n" + CODE), LlmMessage.user("Fix:\n" + CODE + "\nplease")),
+                plain(authored));
+        String system = p.calls.getLast().getFirst().content(), user = p.calls.getLast().getLast().content();
+        assertTrue(system.contains(CODE) && !user.contains(CODE), "the premise: two texts of the code in one request");
+        assertEquals(CODE.replace("ExampleHome5G", "<ssid_1>"), authored.sentAs().of(CODE), "the user part's");
     }
 }

@@ -160,8 +160,16 @@ public record EgressContext(String userId, String taskId, String purpose, Privat
      * One text for each declared text, or none: a text that went out as two different ones -- the
      * table learned a value between two calls, or it stands twice in a request and was filtered
      * differently -- or as one that could not be cut out of the part, is not known, and stays so
-     * until it is emptied. Only the gateway puts a text in; a caller reads, and empties it before
-     * the requests it asks about. Held by the context, it ends with it.
+     * until it is emptied. Only the gateway puts a text in, and only as a request goes to its
+     * provider: one it refused has sent nothing, and says nothing. A caller reads, and empties it
+     * before the requests it asks about. Held by the context, it ends with it.
+     * <p>
+     * Said of a declared text where it stands in a filtered part as a stretch of its own. Where it
+     * stands inside a longer declared text, in a part the caller authored, or in a model's turn
+     * echoed back as written, the filter reads it by other rules and nothing is said of it there:
+     * a request that holds it both ways shows the model two texts, and this knows the one. The
+     * request that asks for a skill's code holds its code once, in a user part, and no declared
+     * text that contains it.
      */
     public static final class SentAs {
         private final Map<String, java.util.Optional<String>> texts = new java.util.concurrent.ConcurrentHashMap<>();
