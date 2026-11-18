@@ -255,7 +255,11 @@ class SkillDeclarationTest {
         assertEquals(Map.of("type", "boolean", "required", true), read.byName().get("f"));
         assertEquals(Map.of("type", "string", "description", "[x, y]"), read.byName().get("g"));
         assertEquals(Map.of("type", "list"), read.byName().get("h"));
-        assertTrue(read.whole());
+        // Read, every one -- and with the list that stands where g's definition should, not known
+        // to be read: a list is no definition. Without it the declaration is a map of names.
+        assertFalse(read.whole());
+        assertTrue(read("{\"a\": \"string\", \"b\": \"INT\", \"c\": \"The page to fetch\", \"d\": null, \"e\": 5, "
+                + "\"f\": {\"type\": \"boolean\", \"required\": true}, \"h\": \" list \"}").whole());
         assertEquals(new DynamicSkillRegistry.Declaration(Map.of(), true), DynamicSkillRegistry.readParameters(null));
         assertEquals(new DynamicSkillRegistry.Declaration(Map.of(), true), read("{}"));
 
@@ -287,9 +291,6 @@ class SkillDeclarationTest {
                 "{\"type\": \"object\", " + properties + ", \"required\": [\"url\"]}",
                 "{\"type\": \"Object\", " + properties + ", \"required\": [\"url\"]}",
                 "{" + properties + ", \"required\": [\"url\"]}",
-                // What skill_create once made of a schema handed as an object.
-                "{\"type\": {\"type\": \"object\"}, " + properties + ", \"required\": {\"type\": \"string\", "
-                        + "\"description\": \"[url]\"}}",
                 // Words about the schema, and that it takes no other name: none of them a parameter.
                 "{\"$schema\": \"https://example.org/schema\", \"title\": \"Fetch\", \"description\": "
                         + "\"What page_fetch takes\", \"type\": \"object\", " + properties + ", \"required\": [\"url\"], "
@@ -311,9 +312,18 @@ class SkillDeclarationTest {
                 + "\"type\": {\"type\": \"string\", \"description\": \"The kind of thing\"}}");
         assertEquals(List.of("properties", "type"), List.copyOf(named.byName().keySet()));
         assertTrue(named.whole());
-        assertEquals(List.of("properties"), List.copyOf(read("{\"properties\": {}}").byName().keySet()));
+        // Properties with nothing in them and nothing beside them: a schema of no parameter, or
+        // a parameter called properties with nothing said of it. Read as the first, not for certain.
+        assertEquals(new DynamicSkillRegistry.Declaration(Map.of(), false), read("{\"properties\": {}}"));
 
-        // A skill already on disk, as skill_create wrote a schema handed as an object until now.
+        // What skill_create once made of a schema handed as an object -- {type: object} for the
+        // word, a definition whose description is the list for its required names -- is read as
+        // far as it goes and is not known to be read: taken for the word, {type: object} made a
+        // list of parameters called type and properties read back as nothing (the second review).
+        // No skill on disk has it.
+        var onceWritten = read("{\"type\": {\"type\": \"object\"}, " + properties + ", \"required\": {\"type\": \"string\", "
+                + "\"description\": \"[url]\"}}");
+        assertFalse(onceWritten.whole());
         DynamicSkill old = onDisk(tmp, "page_fetch",
                 "parameters:",
                 "  type:",
@@ -327,8 +337,8 @@ class SkillDeclarationTest {
                 "  required:",
                 "    type: \"string\"",
                 "    description: \"[url]\"");
-        assertEquals(URL_AND_DEPTH, ToolFinder.parameters(old));
-        assertTrue(old.declaredInFull());
+        assertEquals(ToolFinder.NOT_READ, ToolFinder.parameters(old));
+        assertFalse(old.declaredInFull());
         assertEquals(List.of(), LocalExecutor.misfit(old, Map.of("url", "https://example.org")));
         // Mutations: a schema needs its type -> the one without it is a map of names, its one
         // parameter "properties"; the type's word is read as it is written -> the schema typed
@@ -357,32 +367,38 @@ class SkillDeclarationTest {
         assertEquals(marked, byItsRequiredNames.byName());
         assertTrue(byItsRequiredNames.whole());
 
-        // Nothing shows it a schema's, and no definition is written in "url" and "depth": the
-        // parameter it stands under is read, and the declaration is not known to be read.
+        // Nothing shows it a schema's beyond doubt -- no type, no required name of its own, its
+        // properties in shorthand: every key of it is a schema's word, so it is read as one, and
+        // the declaration is not known to be read.
         var unclear = read("{" + properties + "}");
-        assertEquals(List.of("properties"), List.copyOf(unclear.byName().keySet()));
+        assertEquals(List.of("url", "depth"), List.copyOf(unclear.byName().keySet()));
         assertFalse(unclear.whole());
         var requiringAnother = read("{" + properties + ", \"required\": [\"token\"]}");
-        assertEquals(List.of("properties", "required"), List.copyOf(requiringAnother.byName().keySet()));
+        assertEquals(List.of("url", "depth", "token"), List.copyOf(requiringAnother.byName().keySet()));
         assertFalse(requiringAnother.whole());
         // A type that says "object" beside what reads as a definition, in whole or in part: a
         // schema whose parameters are called type and format, or the parameters type and
-        // properties. Neither is taken for certain.
+        // properties. Read as the schema, and neither is taken for certain.
+        assertEquals(List.of("type", "format"), List.copyOf(read("{\"type\": \"object\", \"properties\": {\"type\": "
+                + "\"string\", \"format\": \"string\"}}").byName().keySet()));
+        assertEquals(List.of("type", "name"), List.copyOf(read("{\"type\": \"object\", \"properties\": {\"type\": "
+                + "\"string\", \"name\": \"string\"}}").byName().keySet()));
         for (String either : List.of("{\"type\": \"object\", \"properties\": {\"type\": \"string\", \"format\": \"string\"}}",
                 "{\"type\": \"object\", \"properties\": {\"type\": \"string\", \"name\": \"string\"}}")) {
-            assertEquals(List.of("type", "properties"), List.copyOf(read(either).byName().keySet()), either);
             assertFalse(read(either).whole(), either);
         }
         // A list is no definition, and no map of properties.
         var aList = read("{\"properties\": [{\"name\": \"url\", \"type\": \"string\"}]}");
         assertEquals(List.of("properties"), List.copyOf(aList.byName().keySet()));
         assertFalse(aList.whole());
-        // A parameter that is called properties, in shorthand, is one like any other; so is one
-        // called type whose type is an object's, with no properties beside it.
+        // A parameter that is called properties, in shorthand, is read like any other, and so is
+        // one called type whose type is an object's -- and neither is taken for certain: a word
+        // of a schema's with no definition under it may be the schema's own. Defined, it is a
+        // parameter (aSchemaIsItsProperties).
         assertEquals(new DynamicSkillRegistry.Declaration(Map.of("properties", Map.of("type", "object"), "depth",
-                Map.of("type", "integer")), true), read("{\"properties\": \"object\", \"depth\": \"integer\"}"));
+                Map.of("type", "integer")), false), read("{\"properties\": \"object\", \"depth\": \"integer\"}"));
         assertEquals(new DynamicSkillRegistry.Declaration(Map.of("type", Map.of("type", "object"), "depth",
-                Map.of("type", "integer")), true), read("{\"type\": \"object\", \"depth\": \"integer\"}"));
+                Map.of("type", "integer")), false), read("{\"type\": \"object\", \"depth\": \"integer\"}"));
         // Mutations: a schema's properties must all be maps, whatever its type says -> the one
         // known by its type is the parameters type and properties; its required names show
         // nothing -> the one known by them is properties and required; a type that says object
@@ -539,15 +555,17 @@ class SkillDeclarationTest {
         assertFalse(warned.toString().contains("header_") || warned.toString().contains("then depth"),
                 "the name alone: " + warned);
 
-        assertEquals("  - url (string, required): The page to fetch\n"
-                + "  (it may take others: the declaration of its parameters could not be read in full)",
+        // Nothing that was read of a declaration in doubt is listed: it may have been read as
+        // something it is not, and names a skill does not have are the call the cloud then writes.
+        assertEquals("  (its parameters are not known: their declaration could not be read in full)",
                 ToolFinder.parameters(partly));
-        assertEquals("  (its parameters are not known: their declaration could not be read)", ToolFinder.parameters(notAtAll));
+        assertEquals(ToolFinder.NOT_READ, ToolFinder.parameters(notAtAll));
         assertEquals("  - url (string, optional)", ToolFinder.parameters(wholly));
 
-        // A name outside what was read is not known to be wrong. What was read still holds.
+        // A name outside what was read is not known to be wrong, and what was read is not known
+        // to be right: the call is held to neither rule.
         assertEquals(List.of(), LocalExecutor.misfit(partly, Map.of("url", "https://example.org", "header_accept", "text/html")));
-        assertEquals(List.of("'url' is required and was left out"), LocalExecutor.misfit(partly, Map.of("header_accept", "text/html")));
+        assertEquals(List.of(), LocalExecutor.misfit(partly, Map.of("header_accept", "text/html")));
         assertEquals(List.of("'_credentials' is not yours to pass: a name that begins with _ is the system's own"),
                 LocalExecutor.misfit(partly, Map.of("url", "https://example.org", "_credentials", Map.of())));
         assertEquals(List.of(), LocalExecutor.misfit(notAtAll, Map.of("url", "https://example.org", "depth", 2)));
@@ -583,9 +601,10 @@ class SkillDeclarationTest {
         }
         assertEquals(new DynamicSkillRegistry.Declaration(Map.of(), false), read("\"url, then depth\""));
         assertEquals(new DynamicSkillRegistry.Declaration(Map.of(), false), read("5"));
-        // A list of names alone is read: each a string.
+        // A list of names alone is read, each a string -- and is not known to be all: an item of
+        // a list that is one of the shapes nothing else is taken for says what it is.
         assertEquals(new DynamicSkillRegistry.Declaration(Map.of("url", Map.of("type", "string"), "depth",
-                Map.of("type", "string")), true), read("[\"url\", \"depth\"]"));
+                Map.of("type", "string")), false), read("[\"url\", \"depth\"]"));
         // Mutations: a keyword the reader does not know is passed over -> the schemas with
         // patternProperties and oneOf are read in full; additionalProperties is passed over
         // whatever it says -> so are the two that take other names; a required that is no list
@@ -607,14 +626,14 @@ class SkillDeclarationTest {
 
         assertEquals(JSON.readValue(schema, Object.class), written(skill));
         assertFalse(skill.declaredInFull());
-        assertEquals("  - url (string, required)\n" + ToolFinder.NOT_READ_IN_FULL, ToolFinder.parameters(skill));
+        assertEquals(ToolFinder.NOT_READ, ToolFinder.parameters(skill));
         assertEquals(List.of(), LocalExecutor.misfit(skill, Map.of("url", "https://example.org", "header_accept", "text/html")));
 
         String list = "[{\"name\": \"url\", \"type\": \"string\"}, {\"type\": \"integer\"}]";
         DynamicSkill fromAList = workshop.make("page_crawl", JSON.readValue(list, Object.class));
         assertEquals(JSON.readValue(list, Object.class), written(fromAList));
         assertFalse(fromAList.declaredInFull());
-        assertEquals("  - url (string, optional)\n" + ToolFinder.NOT_READ_IN_FULL, ToolFinder.parameters(fromAList));
+        assertEquals(ToolFinder.NOT_READ, ToolFinder.parameters(fromAList));
         // Mutation: skill_create writes what was read of it, whole or not -> SKILL.yaml holds url
         // alone, the registry reads that in full, and a call naming header_accept is refused.
     }

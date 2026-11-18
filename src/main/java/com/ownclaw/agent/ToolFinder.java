@@ -174,7 +174,8 @@ final class ToolFinder {
      */
     static String parameters(Tool tool) {
         Declared declared = declared(tool);
-        if (declared.byName().isEmpty()) return declared.whole() ? "  (no parameters)" : NOT_READ;
+        if (!declared.whole()) return NOT_READ;
+        if (declared.byName().isEmpty()) return "  (no parameters)";
         var sb = new StringBuilder();
         declared.byName().forEach((name, param) -> {
             if (sb.length() > 0) sb.append('\n');
@@ -184,7 +185,6 @@ final class ToolFinder {
             String what = oneLine(param.description());
             if (!what.isEmpty()) sb.append(": ").append(what);
         });
-        if (!declared.whole()) sb.append('\n').append(NOT_READ_IN_FULL);
         return sb.toString();
     }
 
@@ -199,14 +199,15 @@ final class ToolFinder {
 
     /**
      * What a model is told of a skill whose declaration of its parameters could not be read in
-     * full ({@code Tool#declaredInFull}): after the ones that were read, or in their place. Never
-     * "(no parameters)", and never the ones read as if they were all: told either, the cloud
-     * writes a call without what the skill needs, or drops a name the skill reads because the
-     * list does not show it.
+     * full ({@code Tool#declaredInFull}), in place of them. Never "(no parameters)", and never
+     * what was read of it, with or without a word that there may be more: a declaration in doubt
+     * may have been read as something it is not, and names it does not have, listed as its
+     * parameters, are the call the cloud then writes -- 'Name' and 'Status' for a skill that
+     * takes database_id and properties (the second review, 18 Nov 2026). Told this, the cloud is
+     * where it was before skills were listed with their parameters: it reads the skill
+     * (skill_manage), or leaves the call to the local model, which is given the skill's schema.
      */
-    static final String NOT_READ_IN_FULL =
-            "  (it may take others: the declaration of its parameters could not be read in full)";
-    static final String NOT_READ = "  (its parameters are not known: their declaration could not be read)";
+    static final String NOT_READ = "  (its parameters are not known: their declaration could not be read in full)";
 
     /**
      * What a tool declares of its parameters, for a model that writes a call of it.

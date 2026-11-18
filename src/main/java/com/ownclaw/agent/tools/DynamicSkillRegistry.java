@@ -539,6 +539,22 @@ public class DynamicSkillRegistry {
     }
 
     /**
+     * What a skill's SKILL.yaml holds under {@code parameters}, as it stands there -- read in full
+     * or not -- or null when it holds none or cannot be read: for a save that does not change
+     * them ({@code SkillController}).
+     */
+    public Object declaredAsWritten(DynamicSkill skill) {
+        try {
+            String text = SkillJail.readAuthored(skill.skillDir().resolve("SKILL.yaml"));
+            if (text == null) return null;
+            Map<String, Object> yaml = yamlMapper.readValue(text, new TypeReference<>() {});
+            return yaml == null ? null : yaml.get("parameters");
+        } catch (IOException | RuntimeException unreadable) {
+            return null;
+        }
+    }
+
+    /**
      * A skill's parameters as its declaration was read ({@link #readParameters}).
      *
      * @param byName each parameter's definition by its name, in the declaration's order: its
@@ -567,7 +583,7 @@ public class DynamicSkillRegistry {
      * shorthand throughout declared nothing, and the cloud was told "(no parameters)" (the review
      * of e16a1ff, 2026-11-18).
      * <p>
-     * The same written as a JSON Schema is read as its properties ({@link #schemaProperties}):
+     * The same written as a JSON Schema is read as its properties ({@link #schemaLike}):
      * read as a map of names, that was one parameter called "properties" and no other, which is
      * how imap_move_to_bin_by_sender_gmail was offered to the model, its own five nowhere. A list
      * of definitions that each give their name is read too.
@@ -579,32 +595,158 @@ public class DynamicSkillRegistry {
      * schema's nor reads as the definition of a parameter of that name. The rest is read, and the
      * declaration is said not to have been read in full ({@link Declaration#whole}).
      *
+     * <p>
+     * And what was read counts as all of the declaration only where the declaration is a shape
+     * nothing else can be taken for ({@link #unmistakable}), read as that shape. The reading above
+     * tells a schema from a map of names by what stands in it, and its second review (18 Nov
+     * 2026) found each such telling wrong for some declaration, in full: {"type": "object",
+     * "additionalProperties": true} read as the parameters type and additionalProperties, so a
+     * skill that takes any name was refused the names it was called with; a parameter called
+     * properties, whose definition held maps, read as a schema, and the parameters beside it were
+     * gone. A declaration in doubt costs one rule -- a call of the skill is held to no names, and
+     * a model is told its parameters are not known -- where a wrong reading passed off as whole
+     * refuses a call that was right, with a list the call cannot be corrected by.
+     *
      * @param declared what SKILL.yaml holds under {@code parameters}, or skill_create was handed
      */
     public static Declaration readParameters(Object declared) {
+        Declaration read = readAsItCan(declared);
+        return read.whole() && !unmistakable(declared, read.byName().keySet())
+                ? new Declaration(read.byName(), false) : read;
+    }
+
+    /** A schema's own words: at the top of a declaration, each is a parameter's name only beside a definition. */
+    private static final Set<String> SCHEMA_WORDS = Set.of("type", "properties", "required", "additionalProperties",
+            "patternProperties", "anyOf", "oneOf", "allOf", "not", "items", "title", "description", "definitions",
+            "enum", "default", "const", "format");
+
+    /**
+     * Whether a declaration is one of the shapes nothing else can be taken for, and {@code names}
+     * -- what the reading made of it -- are that shape's names, in its order:
+     * <ul>
+     *   <li>nothing at all: a skill that declares no parameters;</li>
+     *   <li>a map of names: every key a name ({@link #nameOf}) and every value that parameter's
+     *       definition -- a map, a scalar in shorthand, or nothing. A key that is a word of a
+     *       schema's ({@link #SCHEMA_WORDS}) is a parameter only when its definition is a map
+     *       that says a type or a description in plain words: {type: {type: string}} is a
+     *       parameter called type, and {type: object, ...} is no map of names. One key may be
+     *       {@code required} with the list of the map's own names that are: no parameter;</li>
+     *   <li>a JSON Schema: {@code properties}, such a map of names, and beside it nothing but
+     *       {@code type} -- the word object -- {@code required}, a list of names that are all
+     *       properties, {@code additionalProperties: false}, and words about the schema (a title,
+     *       a description, a {@code $schema}). Its type may be left out where something else
+     *       shows it a schema: its properties are all maps, or its required names are theirs;</li>
+     *   <li>a list whose every item is a map that gives its name and says a type or a
+     *       description.</li>
+     * </ul>
+     * Anything else may be what the reading took it for, or something else.
+     */
+    static boolean unmistakable(Object declared, Collection<String> names) {
+        if (declared == null) return names.isEmpty();
+        if (declared instanceof List<?> list) {
+            var listed = new ArrayList<String>();
+            for (Object item : list) {
+                if (!(item instanceof Map<?, ?> named) || nameOf(named.get("name")) == null || !saysWhatItIs(named)) return false;
+                listed.add(nameOf(named.get("name")));
+            }
+            return listed.equals(List.copyOf(names));
+        }
+        if (!(declared instanceof Map<?, ?> map)) return false;
+        // A map of names first, as the reading takes it first: parameters that are called
+        // properties and description, each defined, are no schema.
+        if (namesOf(map, true, null)) return namesOf(map, true, names);
+        Object type = map.get("type");
+        boolean object = type instanceof String word && word.strip().equalsIgnoreCase("object");
+        if (map.get("properties") instanceof Map<?, ?> properties && (object || !map.containsKey("type"))) {
+            List<?> required = map.get("required") instanceof List<?> listed ? listed : null;
+            boolean shown = object || !properties.isEmpty() && (properties.values().stream().allMatch(d -> d instanceof Map<?, ?>)
+                    || required != null && !required.isEmpty());
+            for (var e : map.entrySet()) {
+                String key = String.valueOf(e.getKey());
+                Object value = e.getValue();
+                boolean itsOwn = switch (key) {
+                    case "type", "properties" -> true;
+                    case "required" -> required != null
+                            && required.stream().allMatch(n -> n instanceof String name && properties.containsKey(name));
+                    case "additionalProperties" -> Boolean.FALSE.equals(value);
+                    case "title", "description" -> value instanceof String;
+                    default -> key.startsWith("$") && (value instanceof String || value instanceof Number || value instanceof Boolean);
+                };
+                if (!itsOwn) return false;
+            }
+            return shown && namesOf(properties, false, names);
+        }
+        return false;
+    }
+
+    /**
+     * Whether {@code byName} is a map of names ({@link #unmistakable}) whose names are {@code names}.
+     *
+     * @param mayListRequired whether a {@code required} key may be the list of its required names
+     */
+    private static boolean namesOf(Map<?, ?> byName, boolean mayListRequired, Collection<String> names) {
+        var keys = new ArrayList<String>();
+        for (var e : byName.entrySet()) {
+            if (!(e.getKey() instanceof String key) || !key.equals(nameOf(key))) return false;
+            Object def = e.getValue();
+            if (mayListRequired && key.equals("required") && def instanceof List<?> required
+                    && required.stream().allMatch(n -> n instanceof String name && !name.equals("required")
+                            && byName.containsKey(name))) {
+                continue;
+            }
+            boolean defined = def instanceof Map<?, ?> definition && (!SCHEMA_WORDS.contains(key) || saysWhatItIs(definition));
+            boolean shorthand = !SCHEMA_WORDS.contains(key)
+                    && (def == null || def instanceof String || def instanceof Number || def instanceof Boolean);
+            if (!defined && !shorthand) return false;
+            keys.add(key);
+        }
+        return names == null || keys.equals(List.copyOf(names));
+    }
+
+    /**
+     * The properties of a declaration that reads as a JSON Schema though it is none beyond doubt
+     * ({@link #unmistakable}), or null when it is read by its keys: every key of it is a word of
+     * a schema's, and it has a map of properties -- or none, and says its type is an object's,
+     * which is a schema of a skill that names no parameter. A key that is no word of a schema's
+     * is a parameter, and then so are the keys beside it: {database_id: ..., properties: {Name:
+     * ..., Status: ...}} is two parameters, the second defined by its fields -- read as a schema
+     * because every value under properties was a map, it lost database_id and was held to Name
+     * (the second review, 18 Nov 2026).
+     */
+    private static Map<?, ?> schemaLike(Map<?, ?> declared) {
+        boolean itsWords = declared.keySet().stream()
+                .allMatch(key -> key instanceof String word && (SCHEMA_WORDS.contains(word) || word.startsWith("$")));
+        if (!itsWords) return null;
+        if (declared.get("properties") instanceof Map<?, ?> properties) return properties;
+        return declared.get("type") instanceof String type && type.strip().equalsIgnoreCase("object") ? Map.of() : null;
+    }
+
+    /** Whether a map reads as one parameter's definition: it says a type or a description, in plain words. */
+    private static boolean saysWhatItIs(Map<?, ?> definition) {
+        return definition.get("type") instanceof String || definition.get("description") instanceof String;
+    }
+
+    /** The reading of a declaration, as far as it can be read: see {@link #readParameters}. */
+    private static Declaration readAsItCan(Object declared) {
         var byName = new LinkedHashMap<String, Map<String, Object>>();
         if (declared == null) return new Declaration(byName, true);
         if (declared instanceof Map<?, ?> map) {
-            Map<?, ?> properties = schemaProperties(map);
+            // A map of names where it is one beyond doubt (unmistakable); else a schema where it
+            // reads as one (schemaLike); else its keys, each read as a parameter.
+            Map<?, ?> properties = namesOf(map, true, null) ? null : schemaLike(map);
             if (properties == null) {
-                // A map of names that lists its required ones the schema's way: no parameter.
-                List<String> required = requiredNames(map.get("required"));
-                boolean ofItsNames = required != null && !required.isEmpty()
+                // A map of names that lists its required ones the schema's way -- none, when the
+                // list is empty: no parameter.
+                List<String> required = map.get("required") instanceof List<?> ? requiredNames(map.get("required")) : null;
+                boolean ofItsNames = required != null
                         && required.stream().allMatch(n -> !n.equals("required") && map.containsKey(n));
                 map.forEach((name, def) -> {
                     if (!ofItsNames || !"required".equals(name)) byName.put(String.valueOf(name), definition(def));
                 });
                 if (ofItsNames) required.forEach(n -> byName.get(n).put("required", true));
-                // What stands under "properties" and was shown to be no schema's is the definition
-                // of a parameter of that name. Where it does not read as one either -- a list, a
-                // map with a key no definition is written in, a type beside it that says "object"
-                // -- it is read as that parameter all the same, and the names read are not known
-                // to be the skill's.
-                Object under = map.get("properties");
-                boolean whole = !map.containsKey("properties") || !isObject(map.get("type"))
-                        && !(under instanceof Collection<?>)
-                        && (!(under instanceof Map<?, ?> defined) || definitionWords(defined) == defined.size());
-                return new Declaration(byName, whole);
+                // Read by its keys. Whether that is all of it is not said here: only a map of
+                // names beyond doubt counts as read in full (readParameters).
+                return new Declaration(byName, true);
             }
             boolean whole = true;
             properties.forEach((name, def) -> byName.put(String.valueOf(name), definition(def)));
@@ -678,45 +820,6 @@ public class DynamicSkillRegistry {
             }
         }
         return out;
-    }
-
-    /**
-     * The properties of a declaration written as a JSON Schema, or null when it is read as a map
-     * of names. A map under {@code properties} is a schema's where something shows it: every
-     * value in it is a map, which the definition of a parameter called "properties" is not --
-     * a definition's type and description are text; or the declaration's {@code required} names
-     * are names in it; or its {@code type} says "object" ({@link #isObject}) and no key in it is
-     * a word a definition is written in ({@link #definitionWords}). The type need not be there:
-     * models leave it out. A {@code properties} with nothing in it is a schema's only beside a
-     * type that says so -- alone, nothing tells it from a parameter of that name.
-     * <p>
-     * The properties may themselves be in shorthand, as a map of names may be: {"type": "object",
-     * "properties": {"url": "string"}}. Taken for a map of names because not every value is a
-     * map, that is a skill with the parameters type and properties, read in full, and a call
-     * naming url is refused -- the refusal this reading is there to end.
-     */
-    private static Map<?, ?> schemaProperties(Map<?, ?> declared) {
-        if (!(declared.get("properties") instanceof Map<?, ?> properties)) return null;
-        boolean object = isObject(declared.get("type"));
-        if (properties.isEmpty()) return object ? properties : null;
-        if (properties.values().stream().allMatch(def -> def instanceof Map<?, ?>)) return properties;
-        List<String> required = requiredNames(declared.get("required"));
-        if (required != null && !required.isEmpty() && required.stream().allMatch(properties::containsKey)) {
-            return properties;
-        }
-        return object && definitionWords(properties) == 0 ? properties : null;
-    }
-
-    /** What a parameter's definition says of it: the words it is written in. */
-    private static final Set<String> DEFINITION_WORDS = Set.of("type", "description", "required", "default",
-            "enum", "items", "properties", "example", "examples", "format", "nullable", "minimum", "maximum");
-
-    /**
-     * How many keys of a map are words a parameter's definition is written in. All of them: it
-     * reads as a definition. None: it is no definition, but names -- "url", "depth". Some: either.
-     */
-    private static long definitionWords(Map<?, ?> map) {
-        return map.keySet().stream().filter(key -> key instanceof String word && DEFINITION_WORDS.contains(word)).count();
     }
 
     /**

@@ -193,7 +193,13 @@ public class SkillController {
         params.put("name", name);
         params.put("description", body.getOrDefault("description", ""));
         params.put("code", body.getOrDefault("code", ""));
-        params.put("parameters", body.getOrDefault("parameters", Map.of()));
+        // The page cannot edit a skill's parameters, so a save keeps the file's own, as they stand
+        // there. Written back from what the page was shown -- the tool's schema -- a declaration
+        // the reader had in doubt came back as the names it happened to read, in a shape that
+        // reads in full: what it had not read was gone from the file, and a call was then held
+        // to the rest (the second review of the declaration's reader, 18 Nov 2026).
+        Object declared = dynamicSkillRegistry.getDynamic(name).map(dynamicSkillRegistry::declaredAsWritten).orElse(null);
+        params.put("parameters", declared != null ? declared : body.getOrDefault("parameters", Map.of()));
 
         if (body.containsKey("requirements")) {
             params.put("requirements", body.get("requirements"));

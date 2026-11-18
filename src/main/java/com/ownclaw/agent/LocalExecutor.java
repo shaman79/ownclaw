@@ -456,8 +456,10 @@ public class LocalExecutor {
      * ({@link ToolFinder.Declared#whole}): the names that were read are not known to be all it
      * takes. Held to a declaration read in part, a call that named the skill's own parameters was
      * refused as naming one it does not have, and the refusal listed the part -- the cloud had
-     * nothing to correct the call by (the review of e16a1ff, 2026-11-18). What was read still
-     * says what is required.
+     * nothing to correct the call by (the review of e16a1ff, 2026-11-18). Such a skill is held to
+     * neither rule: what was read of a declaration in doubt says no more reliably which names are
+     * required than which there are -- a parameter called properties, read as a schema, made
+     * 'Name' required of a skill that takes database_id and properties (the second review).
      */
     static List<String> misfit(Tool tool, Map<String, Object> params) {
         ToolFinder.Declared reading = ToolFinder.declared(tool);
@@ -473,7 +475,7 @@ public class LocalExecutor {
             }
         }
         declared.forEach((name, param) -> {
-            if (!param.required()) return;
+            if (!reading.whole() || !param.required()) return;
             if (!written.containsKey(name)) wrong.add("'" + name + "' is required and was left out");
             else if (written.get(name) == null) wrong.add("'" + name + "' is required and was given no value");
         });

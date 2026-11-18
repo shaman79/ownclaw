@@ -212,9 +212,10 @@ public class DynamicSkill implements Tool {
     }
 
     /**
-     * Whether a skill's source reads {@code name} from {@code params} by that name:
-     * {@code params.get('name'}, {@code params['name']}, {@code params.pop('name'},
-     * {@code params.setdefault('name'}, or {@code 'name' in params} -- in either quote.
+     * Whether a skill's source reads {@code name} from the parameters it is handed, by that name:
+     * {@code params.get('name'}, {@code params.pop('name'}, {@code params.setdefault('name'},
+     * {@code params['name']} where that is not what is assigned to, or {@code 'name' in params}
+     * -- in either quote, {@code params} being whatever {@code def run(...)} calls its argument.
      * <p>
      * A call the cloud wrote is refused for a name its skill does not declare, because a skill
      * ignores such a name without a word: a mail's text passed as 'body', which the mailer does
@@ -222,15 +223,22 @@ public class DynamicSkill implements Tool {
      * two that their skills read and do not declare, an alias and an optional timeout, and the
      * cloud had no way to pass either (the review of e16a1ff, 2026-11-18).
      * <p>
+     * A write is no read: a skill that builds a request's query and sets {@code params['limit']}
+     * itself ignores the 'limit' it is handed, and counted as reading it the call's own 'limit'
+     * was let through and lost (the second review).
+     * <p>
      * A plain pattern over the text, not a reading of the Python: it also finds the name in a
      * comment or a string, and misses one read through another variable. Either way the worst
      * is what held before the check -- a name let through that the skill ignores, or one refused
      * that it would have read.
      */
-    private static boolean readsParameter(String code, String name) {
+    static boolean readsParameter(String code, String name) {
+        var run = Pattern.compile("(?m)^def\\s+run\\s*\\(\\s*([A-Za-z_][A-Za-z0-9_]*)").matcher(code);
+        String handed = "\\b" + Pattern.quote(run.find() ? run.group(1) : "params");
         String quoted = "(?:'" + Pattern.quote(name) + "'|\"" + Pattern.quote(name) + "\")";
-        return Pattern.compile("\\bparams\\s*(?:\\.\\s*(?:get|pop|setdefault)\\s*\\(|\\[)\\s*" + quoted
-                + "|" + quoted + "\\s+(?:not\\s+)?in\\s+params\\b").matcher(code).find();
+        return Pattern.compile(handed + "\\s*\\.\\s*(?:get|pop|setdefault)\\s*\\(\\s*" + quoted
+                + "|" + handed + "\\s*\\[\\s*" + quoted + "\\s*\\](?!\\s*(?:\\*\\*|//|<<|>>|[-+*/%|&^@])?=(?!=))"
+                + "|" + quoted + "\\s+(?:not\\s+)?in\\s+" + handed + "\\b").matcher(code).find();
     }
 
     @Override
