@@ -522,7 +522,30 @@ public class AgentLoop {
                 cancellationService.forget(taskId);
             }
         }
-        return end(context, result, !context.episodeForgotten());
+        return end(context, orKeptAnswer(context, result), !context.episodeForgotten());
+    }
+
+    /**
+     * The ending of a task that had answered and was then asked, once, for what its answer owed
+     * ({@link #runLoop}): that answer, when nothing ran after it and the task ended with no other
+     * -- the reply to the question never came, was declined, could not be used, steps in a row,
+     * or was itself a question to a user who is not there. Before there was a question the task
+     * ended COMPLETED on that answer, and asking must never cost it: a repair that lost its report
+     * to a failed call would be told to the owner as one that did not finish. A Stop and the stall
+     * watchdog end it as they end any task.
+     */
+    private static AgentResult orKeptAnswer(AgentContext context, AgentResult result) {
+        if (!context.keptAnswerStands()) return result;
+        return switch (result.terminationReason()) {
+            case COMPLETED, CANCELLED, STALLED -> result;
+            default -> {
+                log.warn("Task {}: asked for what its answer owed, it ended {} instead of saying; the answer "
+                        + "it had given is its ending.", context.taskId(), result.terminationReason());
+                Answer kept = context.keptAnswer();
+                yield AgentResult.completed(kept.response(), context.trajectory(), context.elapsedMs())
+                        .withOwnerText(kept.ownerText());
+            }
+        };
     }
 
     /**
@@ -1246,10 +1269,36 @@ public class AgentLoop {
             // An answer or a question that is not delivered ran nothing either: the model is told
             // why, and asked again.
             if (action.isResponse()) {
-                Answer answer = answerFor(action.responseText(), context);
+                // What the answer owes whoever reads it by code when the task ends, and does not say:
+                // a repair how its check went, unattended work that answered in prose what did not do
+                // its whole job (SkillSelfRepair#owed). Null for every other answer, a chat's among them.
+                SkillSelfRepair repairs = selfRepair;
+                String owed = repairs == null ? null : repairs.owed(context, action, thinkResult.inProse());
+                // The answer kept when the task was asked for that, once, is its answer still -- whole,
+                // as it was given -- unless this reply writes another: with what was asked for, or
+                // after the task went back to work.
+                Answer kept = context.keptAnswer();
+                boolean another = !action.responseText().isBlank() && (owed == null || !context.keptAnswerStands());
+                Answer answer = kept != null && !another ? kept : answerFor(action.responseText(), context);
                 String refusal = answer.refusal() != null ? answer.refusal() : alongsideOtherCalls(context);
                 if (refusal != null) {
                     AgentResult end = stepRanNothing(context, action, "Not delivered: " + refusal, null, step, nothing);
+                    if (end != null) return end;
+                    continue;
+                }
+                // === NOT THE ENDING YET ===
+                // An answer that owes something is kept, and the model asked for it: a step that ran
+                // nothing. Three of four self-repairs from 14 to 18 Nov 2026 ended in prose, which
+                // carries no 'check'; one had fixed its skill and said so, the owner read "Changed,
+                // but not checked", and the skill's next two problems were left to him. Asked once:
+                // the reply ends the task whatever it says, with this answer when it writes no other.
+                // Not when one more step that ran nothing would end the task: the answer is its
+                // ending then, as it was before there was a question.
+                if (owed != null && kept == null && nothing.steps < NOTHING_TO_RUN_IN_A_ROW - 1) {
+                    log.info("Task {} step {}: the answer is kept, and the model asked once for what it owes",
+                            context.taskId(), step + 1);
+                    context.keepAnswer(answer);
+                    AgentResult end = stepRanNothing(context, action, "Not delivered yet: " + owed, null, step, nothing);
                     if (end != null) return end;
                     continue;
                 }
@@ -1286,6 +1335,8 @@ public class AgentLoop {
                                     + "task genuinely cannot proceed without this answer, ask "
                                     + "again and it will stop and report the question.", 0);
                     recordAndEmitObservation(context, action, noOne, step + 1);
+                    // Nothing ran: an answer the task is keeping is its last word still.
+                    context.ranNothing();
                     context.markProgress();
                     continue;
                 }
@@ -1801,6 +1852,8 @@ public class AgentLoop {
         // ends the task too -- under their own name.
         recordAndEmitObservation(context, action, AgentObservation.failure(action.tool(), told, structured, 0),
                 step + 1);
+        // An answer the task is keeping is still its last word: nothing ran (AgentContext#keptAnswerStands).
+        context.ranNothing();
         // failureLimit, not completed: an abort. Recording it as COMPLETED marked the event log
         // "info" and stored the episode with a [SUCCESS] prefix, so the memory layer later
         // recalled a failed task as a worked example.
@@ -3894,7 +3947,7 @@ public class AgentLoop {
      * cannot drive ends like any other.
      */
     private boolean goesOnLocallyAfterRefusal(AgentContext context, LlmProvider cloud, ProviderRefused declined) {
-        if (!llmRouter.canGoLocal()) return false;
+        if (!canGoLocal(context)) return false;
         account(context, false, cloud, declined.reply());
         String category = declined.category();
         String because = "it declined this request"
@@ -3906,6 +3959,17 @@ public class AgentLoop {
         return true;
     }
 
+    /**
+     * Whether the rest of a task may run on the local model once its cloud model cannot be used:
+     * when the local model is there -- and not while the task is only being asked for what its
+     * answer owed ({@link AgentContext#keptAnswerStands}). That answer is the cloud's and stands
+     * ({@link #orKeptAnswer}); the local model, which did none of the work, is not handed the
+     * question about it, and the ending does not say it wrote the answer.
+     */
+    private boolean canGoLocal(AgentContext context) {
+        return !context.keptAnswerStands() && llmRouter.canGoLocal();
+    }
+
     private boolean goesOnWithoutTheCloud(AgentContext context, LlmProvider cloud, LlmException why) {
         if (why.connectionFailed() && context.countCloudConnectionFailure() == 1) {
             account(context, false, cloud, why.reply());
@@ -3913,7 +3977,7 @@ public class AgentLoop {
                     context.taskId(), why.getMessage());
             return true;
         }
-        if (!llmRouter.canGoLocal()) return false;
+        if (!canGoLocal(context)) return false;
         account(context, false, cloud, why.reply());
         String because = TaskEnding.cloudUnreachable(why);
         log.warn("Task {}: the cloud model cannot be reached ({}: {}); the rest of the task runs on "

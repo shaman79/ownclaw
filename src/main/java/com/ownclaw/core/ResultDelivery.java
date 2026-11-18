@@ -36,8 +36,10 @@ import java.util.function.Supplier;
  * with the message and sent with it, for the page's buttons and Telegram's keys. Delivered
  * without them, the command a task's ending offers for a skill that waits for a grant --
  * {@code /grant <skill> <KEYS>}, written by code -- reached the owner of a scheduled run or
- * {@code /bg} as text to type. Commands alone: see {@link #deliver(String, Supplier, String,
- * String, String, String, List)}.
+ * {@code /bg} as text to type. So does the command for a skill self-repair leaves to the owner,
+ * {@code /repair <skill>}: under the run that showed the problem, and under self-repair's own
+ * reports, which are text of its own and name the command themselves. Commands alone: see
+ * {@link #deliver(String, Supplier, String, String, String, String, List)}.
  */
 @Service
 public class ResultDelivery {
@@ -125,7 +127,8 @@ public class ResultDelivery {
 
     /**
      * {@link #deliver(String, Supplier, String, String, String, String, List)}, offering nothing
-     * to click: for a caller that has no task's result to deliver, only text of its own.
+     * to click: for a caller that has no task's result to deliver, only text of its own that
+     * names no command.
      */
     public void deliver(String userId, Supplier<String> chat, String header, String text, String taskId,
                         String ownerText) {
@@ -147,9 +150,10 @@ public class ResultDelivery {
      *                  Telegram -- or null. Saved as the row's private text and sent only in the
      *                  message's data; the message's text stays the safe one, and that is what
      *                  history, search and later prompts read.
-     * @param choices   what the task's result offers to click ({@link AgentResult#choices}), never
-     *                  made here. Its commands are offered -- what code wrote for this account to
-     *                  send, a {@code /grant}: saved with the message, as an attended answer's
+     * @param choices   what the task's result offers to click ({@link AgentResult#choices}), or
+     *                  the command a text of the caller's own names, never made here. Its commands
+     *                  are offered -- what code wrote for this account to send, a {@code /grant} or
+     *                  a {@code /repair}: saved with the message, as an attended answer's
      *                  choices are, and sent in its data ({@link #choicesOf}), so the page draws
      *                  them under it, now and after a reload, and Telegram as keys. A command is
      *                  read the same in whatever chat it is sent. Its answers to a question the

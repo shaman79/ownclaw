@@ -247,13 +247,15 @@ public final class SpecialActionSchemas {
      * respond as a self-repair is offered it: with {@code check}, how the check of its change went
      * -- the repair's own judgement, which code weighs with whether it ran the skill after its last
      * change and that run worked ({@link SkillSelfRepair}). Not {@code problems}: nothing a repair
-     * says starts another repair.
+     * says starts another repair. Required: left optional, it was left out, and a repair that had
+     * checked its fix was told to the owner as one that had not. A schema binds a call, not a model
+     * that answers without one, so the loop asks too ({@link SkillSelfRepair#owed}).
      */
     static final ToolSpec RESPOND_REPAIR = withCheckValues(spec(AgentAction.RESPOND,
             "Deliver the final answer to the user and end the task. Put the whole answer "
                     + "in 'message' — it is what the user reads.",
             params("message", ToolParam.required("string", "The complete answer."),
-                    SkillSelfRepair.CHECK, ToolParam.optional("string", "How the check of your change "
+                    SkillSelfRepair.CHECK, ToolParam.required("string", "How the check of your change "
                             + "went: 'passed' -- you ran the skill after your last change and it did its "
                             + "whole job; 'failed' -- run after your change, it still did not; 'not_run' -- "
                             + "you did not run it after your change."))));

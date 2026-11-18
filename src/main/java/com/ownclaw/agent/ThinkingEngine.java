@@ -151,10 +151,12 @@ public class ThinkingEngine {
                     log.info("protocol=native — answered directly with no tool call, provider={}",
                             provider.name());
                 }
-                return new ThinkResult(unlessAnsweredBeforeWork(parsed != null ? parsed
+                AgentAction answered = unlessAnsweredBeforeWork(parsed != null ? parsed
                                 : new AgentAction(AgentAction.RESPOND, Map.of("message", text),
-                                        "Answered directly without calling a tool"), context, mode),
-                        messages, text, response);
+                                        "Answered directly without calling a tool"), context, mode);
+                // Said to the loop: an answer in prose carries none of respond's other parameters.
+                return new ThinkResult(answered, messages, text, response, null,
+                        parsed == null && answered.isResponse());
             }
 
             // A native tool call is unambiguous: no parsing, so no parse failure. A step runs the
@@ -181,8 +183,8 @@ public class ThinkingEngine {
                         messages, text, response);
             }
 
-            return new ThinkResult(unlessAnsweredBeforeWork(parseAction(text), context, mode), messages, text,
-                    response);
+            AgentAction read = unlessAnsweredBeforeWork(parseAction(text), context, mode);
+            return new ThinkResult(read, messages, text, response, null, read.isResponse() && namesNoTool(text));
         } catch (EgressRefused | ProviderRefused | OutputTruncated notToAskAgain) {
             // Not a step to ask again. The gateway refuses the same prompt again; the provider
             // declined to answer it; the reply or the conversation reached a limit of the model.
@@ -1329,6 +1331,17 @@ public class ThinkingEngine {
         } catch (Exception notOneObject) {
             return null;
         }
+    }
+
+    /**
+     * Whether a text-protocol reply names no tool, read as {@link #parseAction} reads it: when
+     * such a reply is an answer all the same -- a JSON object with a message and no tool -- it is
+     * one given without calling respond, as prose is on the native protocol ({@link ThinkResult#inProse}).
+     */
+    private static boolean namesNoTool(String raw) {
+        Map<String, Object> parsed = TextCalls.firstObject(LlmOutputUtils.stripCodeFences(raw.strip()));
+        String tool = parsed == null ? null : TextCalls.tool(parsed);
+        return tool == null || tool.isBlank();
     }
 
     /**

@@ -68,6 +68,7 @@ class UsageRepliesTest {
         for (String command : List.of("/user", "/user add bob", "/user add bob pw", "/user disable", "/user telegram bob",
                 "/switch next", "/cred x", "/cred list", "/cred delete", "/cred set KEY", "/grant tool",
                 "/grant", "/grant mailer", "/grant mailer IMAP_PASS", "/revoke", "/revoke mailer", "/grants",
+                "/repair", "/repair mailer", "/repair mailer now", "/repair tool",
                 "/bg", "/schedule help", "/schedule in 45 check the oven", "/schedule cancel x", "/help")) {
             String reply = reply(command);
             String outsideCode = reply.replaceAll("`[^`]*`", "");
@@ -88,5 +89,9 @@ class UsageRepliesTest {
         assertTrue(help.contains("`/grant <skill> [KEY ...]`") && help.contains("`/revoke <skill> [KEY ...]`")
                 && help.contains("`/grants`"), help);
         assertEquals("Skill not found: tool", reply("/grant tool"), "a name no skill has is answered with no usage");
+        // /repair's usage names its placeholder the same way, and so does its line in the help.
+        assertTrue(reply("/repair").contains("`/repair <skill>`"), reply("/repair"));
+        assertTrue(help.contains("`/repair <skill>`"), help);
+        // Mutation: the /repair usage without its backticks -> "<skill>" outside code, which the page drops.
     }
 }
