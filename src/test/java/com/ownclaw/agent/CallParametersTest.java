@@ -260,7 +260,7 @@ class CallParametersTest {
     }
 
     @Test
-    @DisplayName("find_tools lists each match with its parameters under it, and says so of a skill with none; its first line and its paging are as they were")
+    @DisplayName("find_tools lists each match with its parameters under it for the reader that writes exact calls and is shown no schema -- the cloud on local-first work -- and says so of a skill with none; a model that calls skills itself, and is sent their schemas on its next step, is listed the name and first sentence it always was")
     void whatFindToolsLists(@TempDir Path tmp) throws Exception {
         var tools = new java.util.ArrayList<Tool>(List.of(smtp(),
                 ToolFinderTest.skill("imap_list_mailboxes", "List the mailboxes of the IMAP account.", Map.of())));
@@ -268,15 +268,19 @@ class CallParametersTest {
             tools.add(ToolFinderTest.skill("unit_" + i, "Converts unit " + i + " into kelvins.",
                     declared("value", ToolParam.required("number", "The value to convert"))));
         }
-        rig = new LoopRig(tmp, tools);
+        // A chat on Cheaper with a local tier that can take the work: the cloud orchestrates.
+        rig = SkillCreateGateTest.localFirst(tmp.resolve("orchestrating"), tools);
         rig.cloud.think.add(call(AgentAction.FIND_TOOLS, Map.of("query", "smtp imap")));
         rig.cloud.think.add(call(AgentAction.FIND_TOOLS, Map.of("query", "kelvins")));
         rig.cloud.think.add(respond("done"));
 
         AgentResult r = rig.turn(rig.chat.createSession("u1", "Mail"), "which skills send mail?");
 
+        List<ToolSpec> offered = ToolSpec.offered(rig.cloud.calls("think").get(0).config().tools(),
+                rig.cloud.calls("think").get(0).messages());
+        assertTrue(offered.stream().noneMatch(t -> "smtp_send_email".equals(t.name())), "the premise: " + offered);
         assertEquals(String.join("\n",
-                "2 skills match \"smtp imap\". You can call them from your next step:",
+                "2 skills match \"smtp imap\". They are for delegate's 'tools': you do not call them yourself:",
                 "- imap_list_mailboxes: List the mailboxes of the IMAP account.",
                 "  (no parameters)",
                 "- smtp_send_email: Send an email via SMTP using stored credentials (Gmail and generic SMTP).",
@@ -284,13 +288,30 @@ class CallParametersTest {
         assertTrue(TaskEndToEndTest.sentTo(rig, 1).contains("  - body_text (string, required): Plain text email body (UTF-8)"),
                 "the cloud reads it: " + TaskEndToEndTest.sentTo(rig, 1));
         String paged = r.trajectory().turns().get(1).observation().output();
-        assertTrue(paged.startsWith("9 skills match \"kelvins\"; these are 1 to 8, best first. You can call them from "
-                + "your next step:\n- unit_0: Converts unit 0 into kelvins.\n  - value (number, required): The value "
-                + "to convert\n- unit_1: "), paged);
+        assertTrue(paged.startsWith("9 skills match \"kelvins\"; these are 1 to 8, best first. They are for delegate's "
+                + "'tools': you do not call them yourself:\n- unit_0: Converts unit 0 into kelvins.\n  - value (number, "
+                + "required): The value to convert\n- unit_1: "), paged);
         assertTrue(paged.endsWith("  - value (number, required): The value to convert\n"
                 + "More: find_tools with the same query and page 2 (of 2)."), paged);
-        // Mutation: list a match by its name and first sentence alone, as before -> no parameter
-        // line in either answer.
+
+        // A model that calls the skills itself: the matches are its tools from the next step, schemas and all.
+        var calling = new LoopRig(tmp.resolve("calling"), tools);
+        try {
+            calling.cloud.think.add(call(AgentAction.FIND_TOOLS, Map.of("query", "smtp imap")));
+            calling.cloud.think.add(respond("done"));
+            AgentResult own = calling.turn(calling.chat.createSession("u1", "Mail"), "which skills send mail?");
+            assertEquals(String.join("\n",
+                    "2 skills match \"smtp imap\". You can call them from your next step:",
+                    "- imap_list_mailboxes: List the mailboxes of the IMAP account.",
+                    "- smtp_send_email: Send an email via SMTP using stored credentials (Gmail and generic SMTP)."),
+                    own.trajectory().turns().get(0).observation().output());
+        } finally {
+            calling.queue.stop();
+        }
+        // Mutations: list a match by its name and first sentence alone for every reader, as it
+        // was at first -> no parameter line in the orchestrating cloud's answers; list the
+        // parameters for every reader, as e16a1ff did -> the calling model's answer has them,
+        // and its next step sends it the same again as schemas.
     }
 
     // ───────────────────────── delegate's description ─────────────────────────
@@ -406,14 +427,94 @@ class CallParametersTest {
         assertEquals(List.of(), outcome.produced(), "a refused call left a result");
         assertEquals(List.of(), ctx.artifacts());
         assertEquals(List.of(), usage.failedErrors, "a refusal is no failure of the skill");
-        assertEquals("Not run: one of the 2 calls does not fit the parameters its skill declares, so none of them was "
-                + "run -- every call is checked before the first one runs:\n"
+        assertEquals("Not run: one of the 2 calls cannot run as written, so none of them was run -- every call is "
+                + "checked before the first one runs:\n"
                 + "- call 2 (smtp_send_email): 'body' is not one of its parameters; 'body_text' is required and "
                 + "was left out.\n"
                 + "Parameters of smtp_send_email:\n" + SMTP_PARAMETERS + "\n"
-                + "Send the calls again with these names -- all of them: nothing has run.\n\n"
+                + "Send the calls again, corrected -- all of them: nothing has run.\n\n"
                 + "[No tool was executed during this delegation.]", outcome.text());
         // Mutation: runCalls without its check -> the digest runs, then the mailer fails by itself.
+    }
+
+    @Test
+    @DisplayName("a call of a tool that does not exist refuses the whole delegation before the first call runs, in the words such a call is refused with at its turn -- the mail before it is not sent -- and beside a call that does not fit, the two are one refusal")
+    void aToolThatDoesNotExistRefusesThemAll() {
+        var digest = digest();
+        var smtp = smtp();
+        var usage = new DelegationBehaviourTest.Usage();
+        var ctx = task();
+        var mail = new LinkedHashMap<String, Object>(Map.of("to", "owner@example.org", "subject", "News"));
+        mail.put("body_text", "The digest follows.");
+
+        var outcome = executor(new DelegationBehaviourTest.Scripted(), usage, digest, smtp).execute(
+                calls("", c("smtp_send_email", mail), c("daily_news_digets", Map.of())), ctx, UNCOUNTED);
+
+        assertEquals(List.of(), smtp.calls, "the mail went out, though the call after it could never run");
+        assertFalse(outcome.ok());
+        assertTrue(outcome.byCode());
+        assertEquals(0, outcome.stepCount());
+        assertEquals(List.of(), outcome.produced());
+        assertEquals(List.of(), ctx.artifacts());
+        assertEquals(List.of(), usage.failedErrors);
+        assertEquals("Not run: one of the 2 calls cannot run as written, so none of them was run -- every call is "
+                + "checked before the first one runs:\n"
+                + "- call 2 (daily_news_digets): there is no tool named 'daily_news_digets'. Use the exact name, as "
+                + "find_tools lists it.\n"
+                + "Send the calls again, corrected -- all of them: nothing has run.\n\n"
+                + "[No tool was executed during this delegation.]", outcome.text());
+
+        // A tool that does not exist, a call that does not fit and one a delegation never makes: said at once.
+        var mixed = executor(new DelegationBehaviourTest.Scripted(), usage, digest, smtp).execute(
+                calls("", c("daily_news_digest", Map.of("day", "today")), c("smtp_send_mail", mail),
+                        c("skill_create", Map.of("name", "mailer"))), task(), UNCOUNTED);
+        assertEquals("Not run: 3 of the 3 calls cannot run as written, so none of them was run -- every call is "
+                + "checked before the first one runs:\n"
+                + "- call 1 (daily_news_digest): 'day' is not one of its parameters.\n"
+                + "- call 2 (smtp_send_mail): there is no tool named 'smtp_send_mail'. Use the exact name, as "
+                + "find_tools lists it.\n"
+                + "- call 3 (skill_create): skill_create is not available during delegation. Only existing tools "
+                + "can be used. Pick a different tool from the plan.\n"
+                + "Parameters of daily_news_digest:\n  - date (string, optional): Target date YYYY-MM-DD, defaults to "
+                + "today UTC\n"
+                + "Send the calls again, corrected -- all of them: nothing has run.\n\n"
+                + "[No tool was executed during this delegation.]", mixed.text());
+        assertEquals(List.of(), digest.calls);
+
+        // The local model's own call of such a name is refused where it makes it, as it was.
+        var local = new DelegationBehaviourTest.Scripted(DelegationBehaviourTest.call("smtp_send_mail", mail),
+                DelegationBehaviourTest.done("no such tool"));
+        executor(local, usage, digest, smtp).execute(new DelegationPlan("Mail the owner the digest.", List.of(), List.of(),
+                List.of("smtp_send_email")), task(), UNCOUNTED);
+        assertTrue(local.allSeen().contains("Not run: there is no tool named 'smtp_send_mail'. Call one of the tools "
+                + "you were given, by its exact name."), local.allSeen());
+        assertEquals(List.of(), smtp.calls);
+        // Mutations: the check passes over a call whose tool does not exist, as it did -> the
+        // mail goes out, and the delegation stops at call 2; it passes over skill_create ->
+        // calls 1 and 2 alone are said; either reader told in the other's words -> the cloud is
+        // sent to "the tools you were given", or the local model to find_tools.
+    }
+
+    @Test
+    @DisplayName("the example a model is shown when its 'calls' are no list is a delegation that would run: its calls name their skills' own parameters, every required one among them")
+    void theExampleWouldRun() throws Exception {
+        var refused = assertThrows(IllegalArgumentException.class, () -> LocalExecutor.calls("the digest, then the mail"));
+        assertEquals("'calls' must be a list of calls, as in " + LocalExecutor.CALLS_EXAMPLE + ".", refused.getMessage());
+
+        // The example, sent back as it is shown.
+        List<DelegationPlan.Call> example = LocalExecutor.calls(
+                JSON.readValue("{" + LocalExecutor.CALLS_EXAMPLE + "}", Map.class).get("calls"));
+        var digest = digest();
+        var smtp = smtp();
+        assertEquals(List.of("daily_news_digest", "smtp_send_email"), example.stream().map(DelegationPlan.Call::tool).toList());
+        assertEquals(List.of(), LocalExecutor.misfit(digest, example.get(0).params()));
+        assertEquals(List.of(), LocalExecutor.misfit(smtp, example.get(1).params()));
+        var outcome = executor(new DelegationBehaviourTest.Scripted(), new DelegationBehaviourTest.Usage(), digest, smtp)
+                .execute(calls("", example.toArray(DelegationPlan.Call[]::new)), task(), UNCOUNTED);
+        assertTrue(outcome.ok(), outcome.text());
+        assertEquals("Monday's headlines: the bridge reopens.", smtp.calls.get(0).get("body_text"));
+        // Mutation: the mailer's call in the example with its text alone, as it was -> 'to' and
+        // 'subject' are required and were left out: the example is a call the check refuses.
     }
 
     @Test
@@ -440,8 +541,8 @@ class CallParametersTest {
                 .execute(calls("Then tell the owner it went out.", c("daily_news_digest", Map.of("day", "today")),
                         c("smtp_send_email", bodyAsBody()), c("smtp_send_email", Map.of("to", "owner@example.org"))),
                         task(), UNCOUNTED);
-        assertEquals("Not run: 3 of the 3 calls do not fit the parameters their skills declare, so none of them was "
-                + "run -- every call is checked before the first one runs:\n"
+        assertEquals("Not run: 3 of the 3 calls cannot run as written, so none of them was run -- every call is "
+                + "checked before the first one runs:\n"
                 + "- call 1 (daily_news_digest): 'day' is not one of its parameters.\n"
                 + "- call 2 (smtp_send_email): 'body' is not one of its parameters; 'body_text' is required and "
                 + "was left out.\n"
@@ -450,7 +551,7 @@ class CallParametersTest {
                 + "Parameters of daily_news_digest:\n  - date (string, optional): Target date YYYY-MM-DD, defaults to "
                 + "today UTC\n"
                 + "Parameters of smtp_send_email:\n" + SMTP_PARAMETERS + "\n"
-                + "Send the calls again with these names -- all of them: nothing has run. The local model was not "
+                + "Send the calls again, corrected -- all of them: nothing has run. The local model was not "
                 + "given the goal.\n\n[No tool was executed during this delegation.]", outcome.text());
         assertEquals(List.of(), digest.calls);
         // Mutations: read a value's keys as names too -> the nested call is refused; count a null as
@@ -471,10 +572,10 @@ class CallParametersTest {
         // A system name is still not the cloud's to write, whatever the skill declares.
         var system = executor(new DelegationBehaviourTest.Scripted(), new DelegationBehaviourTest.Usage(), undeclared)
                 .execute(calls("", c("legacy_report", Map.of("_credentials", Map.of("SMTP_PASS", "x")))), task(), UNCOUNTED);
-        assertEquals("Not run: the call does not fit the parameters its skill declares, so it was not run:\n"
+        assertEquals("Not run: the call cannot run as written, so it was not run:\n"
                 + "- call 1 (legacy_report): '_credentials' is not yours to pass: a name that begins with _ is the "
                 + "system's own.\nParameters of legacy_report:\n  (no parameters)\n"
-                + "Send the call again with these names.\n\n[No tool was executed during this delegation.]", system.text());
+                + "Send the call again, corrected.\n\n[No tool was executed during this delegation.]", system.text());
         assertEquals(1, undeclared.calls.size(), "the call ran with the system's name in it");
 
         // The cloud names the tools and gives a goal: the calls are the local model's, made with the
@@ -527,8 +628,8 @@ class CallParametersTest {
         assertTrue(step.path("notStarted").asBoolean(), "the page says nobody carried it out: " + step);
         assertFalse(step.has("artifacts") || step.has("artifact"), step.toString());
         assertFalse(step.path("success").asBoolean(), step.toString());
-        assertTrue(step.path("reason").asText().startsWith("Not run: one of the 2 calls does not fit the parameters "
-                + "its skill declares, so none of them was run"), step.toString());
+        assertTrue(step.path("reason").asText().startsWith("Not run: one of the 2 calls cannot run as written, so "
+                + "none of them was run"), step.toString());
         // Mutation: runCalls without its check -> the digest runs, the mailer fails by itself, its
         // failed result is the last of its calls, and found() names smtp_send_email for a repair.
     }

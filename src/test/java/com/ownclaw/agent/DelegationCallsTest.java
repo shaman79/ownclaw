@@ -156,22 +156,26 @@ class DelegationCallsTest {
     }
 
     @Test
-    @DisplayName("a refused call stops them too, and what already succeeded comes first")
+    @DisplayName("a call refused at its turn stops them too, and what already succeeded comes first")
     void aRefusedCallStopsThem() {
         var smtp = new FakeTool("smtp_send_email", true, List.of(), p -> ToolResult.success("Sent"));
         var fetch = new FakeTool("daily_menu_fetcher", false, List.of(), p -> ToolResult.success(MENU));
 
+        // Refused for what only its turn knows: the same change, a second time. A call that is
+        // known not to run before any has -- a tool that does not exist, parameters that do not
+        // fit -- refuses them all, and none runs (CallParametersTest).
         var outcome = executor(new Scripted(), new Usage(), smtp, fetch).execute(calls("",
-                c("smtp_send_email", Map.of("to", "petr@example.com", "body", "Menu follows")),
-                c("menu_fetcher", Map.of()),
+                c("smtp_send_email", Map.of("to", "owner@example.org", "body", "Menu follows")),
+                c("smtp_send_email", Map.of("to", "owner@example.org", "body", "Menu follows")),
                 c("daily_menu_fetcher", Map.of())), task(), UNCOUNTED);
 
         assertFalse(outcome.ok());
+        assertEquals(1, smtp.calls.size());
         assertTrue(fetch.calls.isEmpty());
         String text = outcome.text();
         assertTrue(text.startsWith("ALREADY DONE — these succeeded and must NOT be repeated: smtp_send_email"), text);
-        assertTrue(text.contains("call 2 (menu_fetcher) was not run. Not run: there is no tool named 'menu_fetcher'. "
-                + "Use the exact name, as find_tools lists it."), text);
+        assertTrue(text.contains("call 2 (smtp_send_email) was not run. Not run: you already made exactly this "
+                + "smtp_send_email call in this delegation, and it succeeded."), text);
         assertTrue(text.contains("The call after it did not run."), text);
     }
 
