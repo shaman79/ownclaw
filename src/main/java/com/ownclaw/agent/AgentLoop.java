@@ -2094,8 +2094,10 @@ public class AgentLoop {
 
     /**
      * find_tools: one page of the skills that match the query, best first, each with the first
-     * sentence of its description; the matches join the task's tools ({@link AgentContext#addTaskTools}),
-     * so from the next step the model has their whole descriptions and parameters.
+     * sentence of its description and its parameters ({@link ToolFinder#listed}); the matches join
+     * the task's tools ({@link AgentContext#addTaskTools}), so from the next step a model that
+     * calls skills has their whole descriptions and schemas. The cloud orchestrating only never
+     * has: what this lists is all it is shown of a skill it writes exact calls for.
      */
     private String findTools(Map<String, Object> params, AgentContext context) {
         Object query = params.get("query");
@@ -2137,9 +2139,7 @@ public class AgentLoop {
         sb.append(context.offeredTools() != null
                 ? ". They are for delegate's 'tools': you do not call them yourself:\n"
                 : ". You can call them from your next step:\n");
-        for (var tool : found.tools()) {
-            sb.append("- ").append(tool.name()).append(": ").append(ToolFinder.gist(tool.description())).append('\n');
-        }
+        for (var tool : found.tools()) sb.append(ToolFinder.listed(tool)).append('\n');
         if (found.page() < found.pages()) {
             sb.append("More: find_tools with the same query and page ").append(found.page() + 1)
               .append(" (of ").append(found.pages()).append(").");

@@ -306,6 +306,9 @@ public class LocalExecutor {
      * They stop at the first that fails or is refused: a later call can need its result, and what
      * the cloud planned on no longer holds. The cloud is told what ran, what stopped them, and
      * that the rest did not run; the local model is not given the goal.
+     * <p>
+     * None of them runs when one does not fit the parameters its skill declares: that is asked of
+     * all of them first ({@link #callsThatDoNotFit}).
      *
      * @param mine the delegation's results, which the calls' join
      * @return how the delegation ends: with the calls when they are all of it, or when one of them
@@ -315,6 +318,9 @@ public class LocalExecutor {
                              List<Artifact> mine) {
         List<DelegationPlan.Call> calls = plan.calls();
         if (calls.isEmpty()) return null;
+        // Every call against its skill's parameters, before the first of them runs.
+        Outcome unfit = callsThatDoNotFit(plan);
+        if (unfit != null) return unfit;
         for (int i = 0; i < calls.size(); i++) {
             if (parentContext.isCancelled()) return byCode(partial("Task cancelled during delegation.", mine));
             DelegationPlan.Call call = calls.get(i);
@@ -342,6 +348,93 @@ public class LocalExecutor {
         if (!plan.goal().isBlank()) return null;
         log.info("Delegation completed: {} call(s) run by code, no goal for the local model.", calls.size());
         return byCode(completed("", callsRun(calls.size()), List.of(), mine, null));
+    }
+
+    /**
+     * The delegation refused because a call the cloud wrote does not fit the parameters its skill
+     * declares ({@link #misfit}), or null when every call fits. Asked of every call before the
+     * first of them runs, and one that does not fit refuses them all: nothing has run, so there
+     * is nothing to keep from running twice, and the cloud sends the calls again, corrected.
+     * <p>
+     * The cloud writes these calls for skills whose schema it is never shown, and a wrong name was
+     * found out only where the call ran -- by the skill, as its own failure, after the calls
+     * before it had run: the news run's first delegation, every morning, sent smtp_send_email its
+     * text as 'body', which is body_text. Each call that does not fit is said, and every parameter
+     * its skill takes ({@link ToolFinder#parameters}, the lines find_tools lists), so the next
+     * attempt is written from the names and not from another guess.
+     * <p>
+     * It leaves no result, as a call refused for a grant leaves none ({@link #act}): no skill ran,
+     * so there is no failure of one for self-repair to take up, and the step is one that ran
+     * nothing ({@code AgentLoop#stepRanNothing}). A name no tool has is left to its own refusal,
+     * where its call would run.
+     */
+    private Outcome callsThatDoNotFit(DelegationPlan plan) {
+        List<DelegationPlan.Call> calls = plan.calls();
+        var unfit = new ArrayList<String>();
+        var skills = new LinkedHashMap<String, Tool>();
+        for (int i = 0; i < calls.size(); i++) {
+            Tool tool = toolRegistry.find(calls.get(i).tool()).orElse(null);
+            if (tool == null) continue;
+            List<String> wrong = misfit(tool, calls.get(i).params());
+            if (wrong.isEmpty()) continue;
+            unfit.add("- call " + (i + 1) + " (" + tool.name() + "): " + String.join("; ", wrong) + ".");
+            skills.putIfAbsent(tool.name(), tool);
+        }
+        if (unfit.isEmpty()) return null;
+        boolean one = calls.size() == 1;
+        var sb = new StringBuilder("Not run: ");
+        if (one) {
+            sb.append("the call does not fit the parameters its skill declares, so it was not run:\n");
+        } else {
+            sb.append(unfit.size() == 1
+                            ? "one of the " + calls.size() + " calls does not fit the parameters its skill declares"
+                            : unfit.size() + " of the " + calls.size() + " calls do not fit the parameters their "
+                                    + "skills declare")
+              .append(", so none of them was run -- every call is checked before the first one runs:\n");
+        }
+        sb.append(String.join("\n", unfit));
+        skills.forEach((name, tool) -> sb.append("\nParameters of ").append(name).append(":\n")
+                .append(ToolFinder.parameters(tool)));
+        sb.append(one ? "\nSend the call again with these names."
+                : "\nSend the calls again with these names -- all of them: nothing has run.");
+        if (!plan.goal().isBlank()) sb.append(" The local model was not given the goal.");
+        String text = sb + ledger(List.of());
+        // The skills' names only: what the call wrote is the task's to show, not the log's.
+        log.warn("Delegation not started: {} of its {} call(s) do not fit the parameters of {}.", unfit.size(),
+                calls.size(), skills.keySet());
+        return new Outcome(text, List.of(), 0, false, List.of(), true, text);
+    }
+
+    /**
+     * What of a call the cloud wrote does not fit the parameters its skill declares
+     * ({@link ToolFinder#declared}), a clause each; none when it fits. Two rules: a parameter the
+     * skill requires is there -- left out, or written as null, it is not -- and every name the
+     * call writes is one the skill declares. Only the names of the call's own arguments are read:
+     * a value is a value whatever it holds, so the body_text in "{{call1.body_text}}" is a field
+     * of a result, not a parameter. A name that begins with an underscore is the system's own,
+     * and never the cloud's to write ({@link ToolFinder#systemName}).
+     * <p>
+     * A tool that declares no parameters at all is not held to the second rule: there is nothing
+     * to check a name against, and a skill whose declaration was lost -- written in a shape the
+     * registry does not read -- still takes the arguments its code reads.
+     */
+    static List<String> misfit(Tool tool, Map<String, Object> params) {
+        Map<String, ToolParam> declared = ToolFinder.declared(tool);
+        Map<String, Object> written = params == null ? Map.of() : params;
+        var wrong = new ArrayList<String>();
+        for (String name : written.keySet()) {
+            if (ToolFinder.systemName(name)) {
+                wrong.add("'" + name + "' is not yours to pass: a name that begins with _ is the system's own");
+            } else if (!declared.isEmpty() && !declared.containsKey(name)) {
+                wrong.add("'" + name + "' is not one of its parameters");
+            }
+        }
+        declared.forEach((name, param) -> {
+            if (!param.required()) return;
+            if (!written.containsKey(name)) wrong.add("'" + name + "' is required and was left out");
+            else if (written.get(name) == null) wrong.add("'" + name + "' is required and was given no value");
+        });
+        return wrong;
     }
 
     /**
@@ -1423,9 +1516,11 @@ public class LocalExecutor {
             }
         }
         if (!(list instanceof List<?> items)) {
+            // The example's names are the skills' own, and its reference the one a call's result has:
+            // it used to send smtp_send_email a 'body', which the skill does not take.
             throw new IllegalArgumentException("'calls' must be a list of calls, as in \"calls\": "
                     + "[{\"tool\": \"daily_news_digest\", \"params\": {}}, {\"tool\": \"smtp_send_email\", "
-                    + "\"params\": {\"body\": \"{{1.body_text}}\"}}].");
+                    + "\"params\": {\"body_text\": \"{{call1.body_text}}\"}}].");
         }
         var calls = new ArrayList<DelegationPlan.Call>();
         for (int i = 0; i < items.size(); i++) {

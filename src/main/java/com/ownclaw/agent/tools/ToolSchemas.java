@@ -95,9 +95,10 @@ public final class ToolSchemas {
      * {@code params} as written -- or, built by Map.of, Map.ofEntries or Map.copyOf with more than
      * one key, sorted by name: those iterate in an order seeded anew in every JVM, and the tools'
      * JSON is the front of every cached prompt, so in another order after a restart every chat's
-     * cache would be missed.
+     * cache would be missed. The order a tool's parameters are listed in words too
+     * ({@code ToolFinder#declared}): delegate's description holds such a list, in that same front.
      */
-    static Map<String, ToolParam> inAStableOrder(Map<String, ToolParam> params) {
+    public static Map<String, ToolParam> inAStableOrder(Map<String, ToolParam> params) {
         return params.size() > 1 && params.getClass().getName().startsWith("java.util.ImmutableCollections")
                 ? new java.util.TreeMap<>(params) : params;
     }

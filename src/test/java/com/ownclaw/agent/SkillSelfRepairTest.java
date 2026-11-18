@@ -53,7 +53,10 @@ class SkillSelfRepairTest {
             public String name() { return name; }
             public String description() { return "test skill " + name; }
             public Map<String, ToolParam> inputSchema() {
-                return debug ? Map.of("debug", ToolParam.optional("boolean", "say what it does")) : Map.of();
+                // 'pages' too: a delegated exact call is checked against the parameters its skill
+                // declares before it runs (LocalExecutor#misfit), and one of these tests hands it them.
+                return debug ? Map.of("debug", ToolParam.optional("boolean", "say what it does"),
+                        "pages", ToolParam.optional("array", "the pages to read instead of fetching them")) : Map.of();
             }
             public List<String> requiredCredentials() { return credentials; }
             public boolean hasSideEffects() { return Boolean.TRUE.equals(sideEffects); }
