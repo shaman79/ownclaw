@@ -100,6 +100,27 @@ class RepairCommandTest {
         return fix.ended(fix.lastId());
     }
 
+    /** What a repair that changed the skill said it did. */
+    static final String CHANGED = "Changed the request headers to a browser's.";
+
+    /** A scheduled run that shows the problem, and a repair of it that changes the skill and never says how its check went. */
+    private Map<String, Object> aRepairThatChangesAndDoesNotCheck() throws InterruptedException {
+        fix.scriptMenu(true);
+        scriptFixAndCheck(fix.rig, Map.of("debug", true), respond(CHANGED));
+        fix.rig.cloud.think.add(respond("It runs."));                   // asked once, and again no check
+        fix.unattended(TASK);
+        return fix.ended(fix.lastId());
+    }
+
+    /** The problem once more, and the repair it starts, which reads the skill and changes nothing. */
+    private Map<String, Object> theNextRepair() throws InterruptedException {
+        fix.scriptMenu(true);
+        fix.rig.cloud.think.add(call(AgentAction.SKILL_MANAGE, Map.of("action", "read", "name", MENU)));
+        fix.rig.cloud.think.add(respond("Nothing more to change."));
+        fix.unattended(TASK);
+        return fix.ended(fix.lastId());
+    }
+
     private List<Object> clearedAt() {
         return fix.rig.jdbc.queryForList("SELECT cleared_at FROM skill_repairs ORDER BY id").stream()
                 .map(r -> r.get("cleared_at")).toList();
@@ -319,6 +340,80 @@ class RepairCommandTest {
         assertTrue(clearedAt().stream().noneMatch(java.util.Objects::isNull), clearedAt().toString());
         // Mutation: self-repair's lines added to a run's ending with the choices it had -> the
         // delivered result offers nothing, and the command is text to type.
+    }
+
+    @Test
+    @DisplayName("the repair /repair lets start is handed the report of the last repair that changed the skill, whether the command is sent straight after that repair or once the skill was left to the owner -- and a report written in a local-only repair stays on this machine on that way too")
+    void theRepairAfterTheCommandKnowsWhatWasTried(@TempDir Path tmp) throws Exception {
+        // Sent straight after the repair that changed the skill and did not check it.
+        fix = new Fix(tmp.resolve("straight"));
+        fix.fixedOutput = DEGRADED;
+        fix.rig.queue.start();
+        var first = aRepairThatChangesAndDoesNotCheck();
+        assertEquals("unverified", first.get("outcome"));
+        assertEquals(CLEARED, commands().handle("u1", COMMAND).orElseThrow());
+        var next = theNextRepair();
+        assertEquals(((Number) first.get("id")).longValue(), ((Number) next.get("previous_id")).longValue(),
+                "the premise: sent straight after, the next repair is handed the report");
+        fix.rig.queue.stop();
+
+        // The problem shows once more first: left to the owner, on a record of its own. Then the command.
+        fix = new Fix(tmp.resolve("left"));
+        fix.fixedOutput = DEGRADED;
+        fix.rig.queue.start();
+        first = aRepairThatChangesAndDoesNotCheck();
+        AgentResult left = fix.menuRun(true);
+        assertTrue(left.response().contains("Self-repair is not tried again for " + MENU), left.response());
+        assertEquals("gave_up", fix.repairRow(1).get("outcome"), "the premise: the last record is the one that leaves it to him");
+        assertEquals(CLEARED, commands().handle("u1", COMMAND).orElseThrow());
+        next = theNextRepair();
+        assertNotNull(next.get("repair_task_id"), "a repair did start");
+        assertEquals(((Number) first.get("id")).longValue(), next.get("previous_id") == null ? -1
+                : ((Number) next.get("previous_id")).longValue(), "the repair is not told what the last one changed");
+        assertTrue(String.valueOf(next.get("goal")).contains("the report of the previous self-repair of this skill "
+                + "(task " + first.get("repair_task_id") + "), which changed its code; the problem came back."),
+                String.valueOf(next.get("goal")));
+        assertTrue(String.valueOf(next.get("evidence")).contains(CHANGED), String.valueOf(next.get("evidence")));
+        fix.rig.queue.stop();
+
+        // The same, where the repair that changed the skill ran on the local model only: said, and not handed over.
+        fix = new Fix(tmp.resolve("local-only"));
+        fix.fixedOutput = DEGRADED;
+        fix.rig.queue.start();
+        first = aRepairThatChangesAndDoesNotCheck();
+        fix.rig.jdbc.update("UPDATE skill_repairs SET local_only = 1 WHERE id = ?", first.get("id"));
+        fix.menuRun(true);
+        assertEquals(CLEARED, commands().handle("u1", COMMAND).orElseThrow());
+        next = theNextRepair();
+        assertTrue(String.valueOf(next.get("goal")).contains("The previous self-repair of this skill (task "
+                + first.get("repair_task_id") + ") changed its code, and the problem came back. It ran on the local "
+                + "model only, so its report stays on this machine."), String.valueOf(next.get("goal")));
+        assertFalse(String.valueOf(next.get("evidence")).contains(CHANGED), String.valueOf(next.get("evidence")));
+        // Mutations: the report taken from the last record alone, as it was (take() without its step
+        // through previous_id) -> from the "left to you" state the next repair has no previous_id,
+        // and its goal names no earlier repair; the handover without its test of a repair that ran
+        // on the local model only -> that repair's report is in the evidence the cloud is sent.
+    }
+
+    @Test
+    @DisplayName("/repair for a tool self-repair repairs for nobody, or not for the sender, says that: not that self-repair takes it up as usual")
+    void aToolSelfRepairDoesNotRepairIsSaidToBe(@TempDir Path tmp) throws Exception {
+        fix = new Fix(tmp);
+        // A generated skill is its author's to change, or the owner's: the menu skill is u1's, and
+        // the mail tool is nobody's generated skill.
+        fix.rig.skills.changeable = (name, user) -> MENU.equals(name) && "u1".equals(user);
+        var commands = commands();
+
+        assertEquals("Self-repair does not repair " + MENU + " for you: it repairs a generated skill that a task of "
+                + "yours may change -- one you wrote, or any when you are the owner -- and this is not one. Nothing "
+                + "of it is left to you, and nothing was changed.", commands.handle("u2", COMMAND).orElseThrow());
+        assertEquals("Self-repair does not repair smtp_send_email for you: it repairs a generated skill that a task "
+                + "of yours may change -- one you wrote, or any when you are the owner -- and this is not one. "
+                + "Nothing of it is left to you, and nothing was changed.",
+                commands.handle("u1", "/repair smtp_send_email").orElseThrow());
+        assertEquals(NOTHING_LEFT, commands.handle("u1", COMMAND).orElseThrow(), "its author's own, as before");
+        // Mutation: tryAgain without its test of whose skill it is -> both are told "the next time
+        // unattended work shows a problem with it, self-repair takes it up as usual".
     }
 
     @Test

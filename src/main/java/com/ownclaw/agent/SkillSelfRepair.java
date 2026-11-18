@@ -409,22 +409,32 @@ public class SkillSelfRepair {
     // ───────────────────────── what an answer owes ─────────────────────────
 
     /**
-     * What an answer of this task owes before it ends the task, as the model is told it, or null
-     * when it owes nothing. What ends a task is read by code -- {@link #found} reads
-     * {@code problems}, {@link #checked} reads {@code check} -- and both are parameters of respond,
-     * which a model offered tools natively need not call: it may end its turn in prose, read as
-     * an answer with a message and nothing else. From 14 to 18 Nov 2026 three of four repairs that
-     * completed ended so and were recorded unverified. One had fixed its skill and said "the check
-     * run confirmed it": the owner was told "Changed, but not checked", and the skill's next two
-     * problems, other ones, were left to him. Another had said its check failed, and was no
-     * {@code not_fixed}. So an answer that does not say what code is about to read is not the
-     * ending yet: the loop keeps it and asks, once ({@code AgentLoop}).
+     * What an answer owes ({@link #owed}), in two texts: {@code asked}, what the model is told --
+     * the question, whole; and {@code noted}, the line the task's record keeps of the step. Two,
+     * because the record travels: a later task of the chat reads it on every turn, and the owner
+     * reads it under "What it did". Stored as the step's reason, as it first was, the question
+     * itself went to the cloud again with every later message in the chat of scheduled results.
+     */
+    public record Owed(String asked, String noted) {}
+
+    /**
+     * What an answer of this task owes before it ends the task, or null when it owes nothing.
+     * What ends a task is read by code -- {@link #found} reads {@code problems}, {@link #checked}
+     * reads {@code check} -- and both are parameters of respond, which a model offered tools
+     * natively need not call: it may end its turn in prose, read as an answer with a message and
+     * nothing else. From 14 to 18 Nov 2026 three of four repairs that completed ended so and were
+     * recorded unverified. One had fixed its skill and said "the check run confirmed it": the
+     * owner was told "Changed, but not checked", and the skill's next two problems, other ones,
+     * were left to him. Another had said its check failed, and was no {@code not_fixed}. So an
+     * answer that does not say what code is about to read is kept, and the model asked for it, in
+     * one more call whose reply ends the task whatever it is ({@code AgentLoop#askedOnce}).
      * <ul>
      *   <li>A repair, however it answered -- in prose or by a respond with no usable
-     *       {@code check}: where its check is read at all ({@link #awaitsCheck}). Where code
-     *       decides alone -- it changed nothing, never ran the skill after its change, or that run
-     *       failed -- nothing is asked: the answer could change no outcome, and the question would
-     *       be a billed call for nothing.</li>
+     *       {@code check}: where its check is read at all ({@link #awaitsCheck}), and its change
+     *       left the skill's files other than they were ({@link #changed}). Where code decides
+     *       alone -- it changed nothing, never ran the skill after its change, or that run failed
+     *       -- nothing is asked: the answer could change no outcome, and the question would be a
+     *       billed call for nothing.</li>
      *   <li>Unattended work whose problems are read ({@link #readsProblems}), when it answered in
      *       prose and a skill of the account's own ran in the task -- a problem can be named of
      *       nothing else ({@link #found}). A respond call that lists no problems says there are
@@ -432,10 +442,17 @@ public class SkillSelfRepair {
      * </ul>
      * Never a chat, whose owner reads the answer himself. Nothing here may break a task's ending
      * either: what fails is logged, and the answer ends the task as it is.
+     * <p>
+     * The question says what is true of its reply: the answer already given is the one delivered,
+     * whatever the reply holds; one thing is read from the reply; nothing it calls is run. It used
+     * to say "leave 'message' empty to keep the answer you gave", against a schema that calls
+     * message "the complete answer" and requires it: its review (18 Nov 2026) showed a reply of
+     * "No tool had a problem." beside an empty list delivered as a scheduled run's whole result,
+     * in place of its digest.
      *
      * @param prose the answer came without a respond call ({@link ThinkResult#inProse})
      */
-    public String owed(AgentContext ctx, AgentAction answer, boolean prose) {
+    public Owed owed(AgentContext ctx, AgentAction answer, boolean prose) {
         try {
             return owes(ctx, answer, prose);
         } catch (RuntimeException e) {
@@ -445,30 +462,53 @@ public class SkillSelfRepair {
         }
     }
 
-    private String owes(AgentContext ctx, AgentAction answer, boolean prose) {
+    private Owed owes(AgentContext ctx, AgentAction answer, boolean prose) {
         Job job = ctx.repair();
         if (job != null) {
             if (usableCheck(answer.params().get(CHECK)) != null
-                    || !awaitsCheck(ctx, tools.find(job.skill()).orElse(null))) {
+                    || !awaitsCheck(ctx, tools.find(job.skill()).orElse(null))
+                    || !changedTheCode(job)) {
                 return null;
             }
-            return "this answer does not say how the check of your change went, and code cannot tell: '"
+            return new Owed(KEPT + "It did not say how the check of your change went, and code cannot tell: '"
                     + job.skill() + "' ran after your last change and reported success, which a run that leaves "
-                    + "part of its job undone does too. Call respond with 'check' set to 'passed' -- run after "
-                    + "your last change, it did its whole job -- 'failed' -- it still did not -- or 'not_run'. " + KEPT;
+                    + "part of its job undone does too. Call respond once more, with 'check' set to 'passed' -- run "
+                    + "after your last change, it did its whole job -- 'failed' -- it still did not -- or 'not_run' "
+                    + "-- you cannot tell from the runs you made. " + onlyRead(CHECK),
+                    "The answer was kept as it was given, and the model asked once how the check of its "
+                            + "change went.");
         }
         if (!prose || !readsProblems(ctx) || !ranOwnSkill(ctx)) return null;
-        return "you answered in text, without calling respond, so the answer could not say which tools did not "
-                + "do their whole job. Call respond with '" + PROBLEMS + "': an entry -- 'tool' its exact name, "
-                + "'what' one sentence -- for every tool that ran in this task but did not do its whole job (a part "
-                + "missing, a fallback taken, a warning or an error in its output, data stale or wrong, even when it "
-                + "reported success), or an empty list when every tool did. Each skill listed is repaired after "
-                + "this task. " + KEPT;
+        return new Owed(KEPT + "It came as text, without a call of respond, so it could not say which tools did "
+                + "not do their whole job. Call respond once more, with '" + PROBLEMS + "': an entry -- 'tool' its "
+                + "exact name, 'what' one sentence -- for every tool that ran in this task but did not do its whole "
+                + "job (a part missing, a fallback taken, a warning or an error in its output, data stale or wrong, "
+                + "even when it reported success), or an empty list when every tool did. Each skill listed is "
+                + "repaired after this task. " + onlyRead(PROBLEMS),
+                "The answer was kept as it was given, and the model asked once which tools did not do their "
+                        + "whole job.");
     }
 
-    /** What the question says of the answer already given: it need not be written again. */
-    private static final String KEPT = "Leave 'message' empty to keep the answer you gave: it is then delivered "
-            + "whole, as you wrote it. A message you give replaces it.";
+    /** How the question begins: the answer already given is the task's answer, and is not shown again. */
+    private static final String KEPT = "Your answer is kept as you wrote it, and it is what is delivered, whole, "
+            + "whatever you reply to this. ";
+
+    /** How the question ends: what its reply is read for, and that it is read for nothing else. */
+    private static String onlyRead(String parameter) {
+        return "Your reply to this ends the task, and only '" + parameter + "' is read from it: 'message' may be "
+                + "left empty, since whatever is put in it is not delivered, and a call of any other tool is not run.";
+    }
+
+    /**
+     * Whether the repair's change left the skill's authored files other than they were as it began:
+     * what {@link #finish} calls changed, read from the same record. A skill_create that wrote the
+     * files back byte for byte is "unchanged" whatever its check says, and its run is no run "after
+     * your last change" to ask about.
+     */
+    private boolean changedTheCode(Job job) {
+        Map<String, Object> row = row("WHERE id = ?", job.id());
+        return row != null && changed(row);
+    }
 
     /** {@code check} as a repair's answer wrote it, when it is one of {@link #CHECKS}; else null. */
     static String usableCheck(Object written) {
@@ -666,8 +706,9 @@ public class SkillSelfRepair {
      * fixed it stayed left to the owner through two more problems, with no way to say "try again"
      * but to wait for a run that went well. Only where the skill is left to him
      * ({@link #leftAfter}): anywhere else nothing is changed, and the answer says why nothing needs
-     * to be. It starts no repair itself -- a repair needs a problem and its evidence, which only a
-     * run of the skill shows.
+     * to be -- or, of a tool self-repair repairs for nobody or not for him, that it does not. It
+     * starts no repair itself -- a repair needs a problem and its evidence, which only a run of the
+     * skill shows.
      *
      * @return what he is answered
      */
@@ -675,6 +716,12 @@ public class SkillSelfRepair {
         if (!enabled()) {
             return "Self-repair is switched off (ownclaw.self-repair.enabled), so no repair starts by itself. "
                     + "Nothing was changed.";
+        }
+        // Not "self-repair takes it up as usual": for such a tool it takes nothing up (found).
+        if (!isOwnSkill(skill, userId)) {
+            return "Self-repair does not repair " + skill + " for you: it repairs a generated skill that a task "
+                    + "of yours may change -- one you wrote, or any when you are the owner -- and this is not "
+                    + "one. Nothing of it is left to you, and nothing was changed.";
         }
         synchronized (lock) {
             Map<String, Object> last = lastJudged(skill, userId);
@@ -769,9 +816,16 @@ public class SkillSelfRepair {
                         + last.get("repair_task_id") + ") " + did + ". You were told; it is left to you. "
                         + "To have it tried again the next time it shows a problem, send:_ `" + repairCommand(skill) + "`";
             } else {
-                Map<String, Object> previous = last != null && changed(last)
-                        && List.of(FIXED, UNVERIFIED, NOT_FIXED).contains(String.valueOf(last.get("outcome")))
-                        ? last : null;
+                // The repair whose report the next one is handed. Where the last record says the skill
+                // was left to the owner, that is the repair the record is about (previous_id): sent
+                // from the "left to you" state, /repair let a repair start that was told nothing of
+                // what the last one had changed -- sent straight after that repair, it was told.
+                Map<String, Object> judged = last != null && GAVE_UP.equals(last.get("outcome"))
+                        && last.get("previous_id") != null
+                        ? row("WHERE id = ? AND user_id = ?", last.get("previous_id"), ctx.userId()) : last;
+                Map<String, Object> previous = judged != null && changed(judged)
+                        && List.of(FIXED, UNVERIFIED, NOT_FIXED).contains(String.valueOf(judged.get("outcome")))
+                        ? judged : null;
                 line = start(ctx, f, problem, code, previous);
             }
         }

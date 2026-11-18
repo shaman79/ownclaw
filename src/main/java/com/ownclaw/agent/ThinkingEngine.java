@@ -197,16 +197,19 @@ public class ThinkingEngine {
             // The reply came, whole, and was billed; a tool call in it cannot be run: its arguments
             // are not a JSON object, or -- the local model writing its calls as text -- the call
             // cannot be read. Not an ending, and not a reply that "never came": nothing ran, the
-            // model is shown what it wrote, the call as it wrote it included, and why, and it is
-            // asked again -- until steps in a row that produce nothing end the task
-            // (AgentLoop.NOTHING_TO_RUN_IN_A_ROW). The ask names no format: each model is told its
-            // own by its tools.
+            // model is shown the call as it wrote it, and why, and it is asked again -- until steps
+            // in a row that produce nothing end the task (AgentLoop.NOTHING_TO_RUN_IN_A_ROW). The
+            // ask names no format: each model is told its own by its tools.
+            // The call alone, not the words it wrote beside it: quoted back, those were sent to the
+            // cloud again with every later step of the task, which no step's own words are
+            // (AgentTrajectory.Turn#actionText). They are kept with the step, as any step's are.
             LlmResponse reply = malformed.reply();
             String text = reply.content() == null ? "" : reply.content();
-            String wrote = (text.isBlank() ? "" : text + "\n\n") + reply.invalidToolCall();
+            String call = reply.invalidToolCall();
+            String wrote = (text.isBlank() ? "" : text + "\n\n") + call;
             log.info("Task {}: the reply held a tool call that cannot be run ({} chars); asking again",
                     context.taskId(), wrote.length());
-            return new ThinkResult(unusable(wrote, "Your previous reply held a tool call that cannot "
+            return new ThinkResult(unusable(wrote, call, "Your previous reply held a tool call that cannot "
                             + "be run, so nothing was run.",
                     "Make the call again, whole, in the form your tools are called in."), messages, wrote, reply);
         } catch (LlmException e) {
@@ -250,9 +253,22 @@ public class ThinkingEngine {
      * what happened, that reply quoted whole, and what to do now.
      */
     private static AgentAction unusable(String wrote, String what, String next) {
+        return unusable(wrote, wrote, what, next);
+    }
+
+    /**
+     * {@link #unusable(String, String, String)}, quoting to the model {@code quoted} alone of what
+     * it wrote: the call that could not be run, without the words beside it. What a step is told
+     * stays in every later request of its task, so the words would be replayed there, which a
+     * step's own never are. The other replies quoted are quoted whole, being all the model has
+     * to go on: an answer given before any work ran, and on the text protocol a reply that is no
+     * action.
+     */
+    private static AgentAction unusable(String wrote, String quoted, String what, String next) {
         boolean said = wrote != null && !wrote.isBlank();
+        boolean quotes = quoted != null && !quoted.isBlank();
         return new AgentAction(THINKING, said ? Map.of("message", wrote) : Map.of(),
-                what + (said ? " It was:\n\n" + wrote + "\n\n" : "\n\n") + next);
+                what + (quotes ? " It was:\n\n" + quoted + "\n\n" : "\n\n") + next);
     }
 
     /**

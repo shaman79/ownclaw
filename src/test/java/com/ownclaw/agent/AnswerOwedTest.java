@@ -2,17 +2,33 @@ package com.ownclaw.agent;
 
 import com.ownclaw.agent.SkillSelfRepairTest.Fix;
 import com.ownclaw.core.ResultDelivery;
+import com.ownclaw.core.ScheduledTaskService;
+import com.ownclaw.llm.EgressRefused;
+import com.ownclaw.llm.LlmException;
+import com.ownclaw.llm.LlmMessage;
+import com.ownclaw.llm.LlmResponse;
 import com.ownclaw.llm.Replies;
+import com.ownclaw.observability.ChatStatusEmitter.StatusMessage;
+import com.ownclaw.observability.TaskTraceService;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 
 import java.nio.file.Path;
+import java.time.Instant;
 import java.time.ZoneId;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.Stream;
 
+import static com.ownclaw.agent.AssistantPartsTest.tool;
 import static com.ownclaw.agent.LoopRig.call;
 import static com.ownclaw.agent.LoopRig.respond;
 import static com.ownclaw.agent.SkillSelfRepairTest.DEGRADED;
@@ -31,7 +47,15 @@ import static org.junit.jupiter.api.Assertions.*;
  * prose, which carries neither. From 14 to 18 Nov 2026 three of four repairs that completed
  * ended so and were recorded unverified -- one had fixed its skill and said "the check run
  * confirmed it", the owner read "Changed, but not checked", and the skill's next two problems
- * were left to him. Such an answer is kept, the model is asked once, and the reply ends the task.
+ * were left to him. Such an answer is kept, the model is asked once, and the reply ends the task
+ * whatever it is.
+ * <p>
+ * "Whatever it is" is the half the first version did not keep. It went back into the loop's
+ * steps with the answer "kept while nothing ran", and a reply that was no usable respond left
+ * the task running: from there, its review (18 Nov 2026) showed, a line of the reply took the
+ * answer's place, the answer was lost to a decline, or the task was handed to the local model,
+ * whose sentence became a scheduled run's digest. The reviewer's probes are the tests here that
+ * script a reply to the question which does not say what was asked.
  */
 class AnswerOwedTest {
 
@@ -40,21 +64,32 @@ class AnswerOwedTest {
             + "logo and read nothing from it.\n\nIt now asks as a browser. Run again with debug on, both menus are "
             + "read: the check run confirmed it.";
 
-    /** What a repair that owes its verdict is told, after "Not delivered yet: ". */
-    static final String VERDICT_OWED = "Not delivered yet: this answer does not say how the check of your change went, "
-            + "and code cannot tell: '" + MENU + "' ran after your last change and reported success, which a run that "
-            + "leaves part of its job undone does too. Call respond with 'check' set to 'passed' -- run after your last "
-            + "change, it did its whole job -- 'failed' -- it still did not -- or 'not_run'. Leave 'message' empty to "
-            + "keep the answer you gave: it is then delivered whole, as you wrote it. A message you give replaces it.";
+    /** How the question begins, for a repair and for a run. */
+    static final String KEPT = "Your answer is kept as you wrote it, and it is what is delivered, whole, whatever you "
+            + "reply to this. ";
 
-    /** What unattended work that answered in prose is told. */
-    static final String PROBLEMS_OWED = "Not delivered yet: you answered in text, without calling respond, so the "
-            + "answer could not say which tools did not do their whole job. Call respond with 'problems': an entry -- "
-            + "'tool' its exact name, 'what' one sentence -- for every tool that ran in this task but did not do its "
-            + "whole job (a part missing, a fallback taken, a warning or an error in its output, data stale or wrong, "
-            + "even when it reported success), or an empty list when every tool did. Each skill listed is repaired "
-            + "after this task. Leave 'message' empty to keep the answer you gave: it is then delivered whole, as you "
-            + "wrote it. A message you give replaces it.";
+    /** What a repair that owes its verdict is asked. */
+    static final String VERDICT_OWED = KEPT + "It did not say how the check of your change went, and code cannot "
+            + "tell: '" + MENU + "' ran after your last change and reported success, which a run that leaves part of "
+            + "its job undone does too. Call respond once more, with 'check' set to 'passed' -- run after your last "
+            + "change, it did its whole job -- 'failed' -- it still did not -- or 'not_run' -- you cannot tell from "
+            + "the runs you made. Your reply to this ends the task, and only 'check' is read from it: 'message' may be "
+            + "left empty, since whatever is put in it is not delivered, and a call of any other tool is not run.";
+
+    /** What unattended work that answered in prose is asked. */
+    static final String PROBLEMS_OWED = KEPT + "It came as text, without a call of respond, so it could not say which "
+            + "tools did not do their whole job. Call respond once more, with 'problems': an entry -- 'tool' its exact "
+            + "name, 'what' one sentence -- for every tool that ran in this task but did not do its whole job (a part "
+            + "missing, a fallback taken, a warning or an error in its output, data stale or wrong, even when it "
+            + "reported success), or an empty list when every tool did. Each skill listed is repaired after this "
+            + "task. Your reply to this ends the task, and only 'problems' is read from it: 'message' may be left "
+            + "empty, since whatever is put in it is not delivered, and a call of any other tool is not run.";
+
+    /** What the task's step log keeps of each question: a line of code's, and not the question. */
+    static final String VERDICT_NOTED = "The answer was kept as it was given, and the model asked once how the check "
+            + "of its change went.";
+    static final String PROBLEMS_NOTED = "The answer was kept as it was given, and the model asked once which tools "
+            + "did not do their whole job.";
 
     /** The model ends its turn with text and no tool call. */
     static LoopRig.Reply prose(String text) {
@@ -64,6 +99,54 @@ class AnswerOwedTest {
     /** The model's reply holds nothing: no text and no tool call. */
     static LoopRig.Reply empty() {
         return c -> Replies.of("", 1_000, 0, 0, 0, "end_turn");
+    }
+
+    /** A reply whose tool call cannot be run: its arguments end half-written, with words beside it. */
+    static LoopRig.Reply malformed() {
+        return c -> new LlmResponse("Running it once more to be sure.", List.of(), "the model's arguments for tool '"
+                + MENU + "' are not a JSON object (Unexpected end-of-input):\n{\"debug\": ", "tool_use", null, null,
+                null, null, List.of(new LlmResponse.Usage(null, 1_000, 100, 0, 0)));
+    }
+
+    /** A reply that ended at a limit of the model: {@code stop} is the provider's stop reason. */
+    static LoopRig.Reply endedAt(String stop) {
+        return c -> Replies.of("The check", 1_000, 100, 0, 0, stop);
+    }
+
+    /** The call fails with {@code failure}. */
+    static LoopRig.Reply failing(RuntimeException failure) {
+        return c -> {
+            throw failure;
+        };
+    }
+
+    /**
+     * Every kind of reply to the question that does not say what was asked. In the loop's steps
+     * each has a way of its own to go on -- a call runs, a question is told nobody can answer it,
+     * an empty reply and a call that cannot be read are asked again, a decline and a provider that
+     * cannot be reached move the task to the local model, a request too long is folded and sent
+     * again -- and after the question none of those is taken.
+     */
+    static Stream<Arguments> repliesThatSayNothingAsked() {
+        return Stream.of(
+                Arguments.of("a call of the skill", call(MENU, Map.of("debug", true))),
+                Arguments.of("a call of a tool that only reads", call(AgentAction.SKILL_MANAGE, Map.of("action", "read", "name", MENU))),
+                Arguments.of("a call of a tool that does not exist", call("no_such_tool", Map.of())),
+                Arguments.of("a question to the user", call(AgentAction.ASK_USER, Map.of("message", "Which check do you mean?"))),
+                Arguments.of("text", prose("The check passed.")),
+                Arguments.of("an empty reply", empty()),
+                Arguments.of("a call that cannot be read", malformed()),
+                Arguments.of("a reply declined as reasoning extraction", TaskEndToEndTest.declined("reasoning_extraction")),
+                Arguments.of("a reply declined on a safety check", TaskEndToEndTest.declined("cyber")),
+                Arguments.of("a provider that cannot be reached", LocalModeTest.noInternet()),
+                Arguments.of("a call that failed on the way", failing(EmptyReplyTest.unreachable())),
+                Arguments.of("a request the provider refuses as it stands", failing(new LlmException("anthropic", "HTTP 400: invalid_request_error", 400, null))),
+                Arguments.of("a request the gateway does not send", failing(new EgressRefused("anthropic", 1, "mail_reader", 2, "user", 40))),
+                Arguments.of("a reply cut off at the model's output limit", endedAt("max_tokens")),
+                Arguments.of("a request longer than the model's window", endedAt("model_context_window_exceeded")),
+                Arguments.of("a respond without the parameter", respond("The check passed.")),
+                Arguments.of("a respond whose check is none of the three", verdict("Checked.", "ok")),
+                Arguments.of("a call that breaks inside", failing(new IllegalStateException("the stream broke"))));
     }
 
     private Fix fix;
@@ -78,14 +161,21 @@ class AnswerOwedTest {
         return String.join("\n", LoopRig.userParts(fix.rig.cloud.calls("think").get(n)));
     }
 
+    /** The conversation think call {@code n} sent, from 0: its messages without the lists of tools added on the way. */
+    private List<LlmMessage> conversation(int n) {
+        return fix.rig.cloud.calls("think").get(n).messages().stream()
+                .filter(m -> m.role() != LlmMessage.Role.TOOLS).toList();
+    }
+
     private int thinks() {
         return fix.rig.cloud.calls("think").size();
     }
 
-    /** The step rows of a task that say why they ran nothing, in order. */
-    private List<String> reasons(String taskId) {
-        return fix.rig.jdbc.queryForList("SELECT json_extract(details, '$.reason') FROM events WHERE event_type = "
-                + "'step' AND task_id = ? AND json_extract(details, '$.reason') IS NOT NULL ORDER BY id", String.class, taskId);
+    /** The steps of a task as its page and its record read them. */
+    private List<Map<String, Object>> steps(String taskId) {
+        @SuppressWarnings("unchecked")
+        var steps = (List<Map<String, Object>>) new TaskTraceService(fix.rig.events).trace("u1", taskId).orElseThrow().get("steps");
+        return steps;
     }
 
     /** The last thing the owner was told in the chat of scheduled results. */
@@ -93,10 +183,18 @@ class AnswerOwedTest {
         return fix.told().get(fix.told().size() - 1);
     }
 
+    /** What stands in a request where the task gave the answer it is asked about. */
+    private static String standIn() throws Exception {
+        var respond = new java.util.LinkedHashMap<String, Object>();
+        respond.put("tool", "respond");
+        respond.put("params", Map.of("message", AgentLoop.ANSWER_KEPT));
+        return new com.fasterxml.jackson.databind.ObjectMapper().writeValueAsString(respond);
+    }
+
     // ───────────────────────── a repair's verdict ─────────────────────────
 
     @Test
-    @DisplayName("a repair that ends in prose after a check that passed is asked once, and 'check: passed' with an empty message makes it fixed: the owner's report is the prose answer, whole")
+    @DisplayName("a repair that ends in prose after a check that passed is asked once, and 'check: passed' makes it fixed: the owner's report is the prose answer, whole")
     void aProseEndingIsAskedForItsVerdict(@TempDir Path tmp) throws Exception {
         fix = new Fix(tmp);
         fix.rig.queue.start();
@@ -110,24 +208,20 @@ class AnswerOwedTest {
         assertEquals(ANSWER, row.get("report"), "the answer it gave, whole");
         assertEquals(1, ((Number) row.get("completed")).intValue());
         assertEquals(7, thinks(), "the run's two steps, the repair's four, and the one question");
-        // What the model was told, where it is told every step that ran nothing: after its own answer.
-        var asked = fix.rig.cloud.calls("think").get(6);
-        assertTrue(sent(6).contains(VERDICT_OWED), sent(6));
-        var respond = new java.util.LinkedHashMap<String, Object>();
-        respond.put("tool", "respond");
-        respond.put("params", Map.of("message", ANSWER));
-        String replayed = new com.fasterxml.jackson.databind.ObjectMapper().writeValueAsString(respond);
-        assertTrue(asked.messages().stream().anyMatch(m -> m.role() == com.ownclaw.llm.LlmMessage.Role.ASSISTANT
-                && m.content().equals(replayed)), "its answer is replayed as the respond it stands for: " + asked.messages());
+        assertTrue(sent(6).contains("[respond] OK (0ms)\n" + VERDICT_OWED), sent(6));
         // The owner: fixed and checked, with the answer as it was written.
         String note = note();
         assertTrue(note.contains("Fixed and checked: it was run again, and the problem is gone."), note);
         assertTrue(note.contains("What the repair said:\n\n" + ANSWER), note);
-        assertFalse(note.contains("Not delivered yet"), note);
-        // The task page shows the question as the step it was.
-        assertEquals(List.of(VERDICT_OWED), reasons((String) row.get("repair_task_id")));
-        // Mutation: the loop delivering an answer that owes something as it did (the "not the ending
-        // yet" block dropped) -> unverified, "Changed, but not checked", and six think calls.
+        assertFalse(note.contains("Your answer is kept"), note);
+        // The repair's steps: the one that answered, a step that worked, with what was asked in a line.
+        var answered = steps((String) row.get("repair_task_id")).getLast();
+        assertEquals(AgentAction.RESPOND, answered.get("tool"));
+        assertEquals(Boolean.TRUE, answered.get("ok"));
+        assertEquals(VERDICT_NOTED, answered.get("reason"));
+        // Mutation: the loop delivering an answer that owes something as it did (the respond branch
+        // without its "if (owed != null) return askedOnce") -> unverified, "Changed, but not
+        // checked", and six think calls.
     }
 
     @Test
@@ -147,100 +241,122 @@ class AnswerOwedTest {
         assertEquals("not_fixed", row.get("outcome"), String.valueOf(row.get("report")));
         assertEquals(said, row.get("report"));
         assertTrue(note().contains("Changed, but run again it still shows the problem."), note());
-        // Mutation: the ending of a kept answer not reading the reply's check (setReportedCheck only
-        // where the reply's own message is the answer) -> unverified.
+        // Mutation: the reply's check not read (askedOnce without its setReportedCheck) -> unverified.
+        // The same of 'problems' (without its setReportedProblems) -> aProseEndingIsAskedForProblems
+        // starts no repair.
     }
 
     @Test
-    @DisplayName("a respond call that leaves 'check' out is asked the same way, and a message given again with the verdict is the answer")
-    void aCallWithoutCheckIsAskedAndAMessageGivenAgainReplacesIt(@TempDir Path tmp) throws Exception {
+    @DisplayName("a respond call that leaves 'check' out is asked the same way, and only 'check' is read from the reply: a message it gives again is not delivered, and the report stays the answer the repair gave")
+    void aCallWithoutCheckIsAskedAndTheRepliesMessageIsNotRead(@TempDir Path tmp) throws Exception {
         fix = new Fix(tmp);
         fix.rig.queue.start();
         fix.scriptMenu(true);
         scriptFixAndCheck(fix.rig, Map.of("debug", true), respond("Changed the headers and ran it."));
-        fix.rig.cloud.think.add(verdict("It was blocked with HTTP 455; it asks as a browser now, and run again both "
-                + "menus are read.", "passed"));
+        fix.rig.cloud.think.add(verdict("Passed.", "passed"));
         fix.unattended(TASK);
         var row = fix.ended(fix.lastId());
 
         assertEquals("fixed", row.get("outcome"), String.valueOf(row.get("report")));
-        assertEquals("It was blocked with HTTP 455; it asks as a browser now, and run again both menus are read.",
-                row.get("report"), "the message given with the verdict");
+        assertEquals("Changed the headers and ran it.", row.get("report"), "the answer it gave, not the reply's word");
         assertTrue(sent(6).contains(VERDICT_OWED), sent(6));
-        // Mutation: the kept answer the task's answer whatever the reply writes (another = false) ->
-        // the report is "Changed the headers and ran it.".
+        assertFalse(note().contains("Passed."), note());
+        // Mutation: the reply's message taken for the answer where it gives one (askedOnce completing
+        // with answerFor of the reply's text when it is not blank) -> the report is "Passed.".
     }
 
-    @Test
-    @DisplayName("asked once: a second answer with no usable check ends the repair unverified as before, with the answer it gave first")
-    void aSecondAnswerWithoutCheckEndsIt(@TempDir Path tmp) throws Exception {
-        fix = new Fix(tmp);
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("repliesThatSayNothingAsked")
+    @DisplayName("whatever replies to a repair's question ends the repair: completed, its report the answer it gave, unverified as before there was a question -- after exactly one more call, with nothing the reply calls run, nothing asked again, and the local model asked nothing")
+    void anyReplyEndsTheRepairWithTheAnswerItGave(String kind, LoopRig.Reply reply, @TempDir Path tmp) throws Exception {
+        var local = LocalModeTest.localModel();     // there, and able to take a task over: it is not handed this one
+        fix = new Fix(tmp, null, registry -> null, local);
         fix.rig.queue.start();
         fix.scriptMenu(true);
         scriptFixAndCheck(fix.rig, Map.of("debug", true), prose(ANSWER));
-        fix.rig.cloud.think.add(prose("The check passed."));
+        fix.rig.cloud.think.add(reply);
+        // What a step of the loop's would go on to, were the reply one of its own: none is asked for.
+        fix.rig.cloud.think.add(verdict("Second thoughts.", "passed"));
+        local.think.add(respond("The local model: it looks fine to me."));
         fix.unattended(TASK);
         var row = fix.ended(fix.lastId());
 
-        assertEquals("unverified", row.get("outcome"));
-        assertEquals(ANSWER, row.get("report"), "the answer it gave, not the reply that again said nothing code reads");
-        assertEquals(7, thinks(), "asked once");
+        assertEquals(1, ((Number) row.get("completed")).intValue(), kind + ": it ran to its answer");
+        assertEquals(ANSWER, row.get("report"), kind);
+        assertEquals("unverified", row.get("outcome"), kind);
+        assertEquals(7, thinks(), kind + ": the run's two steps, the repair's four, and the one question");
+        assertTrue(local.calls.isEmpty(), kind + ": the local model was asked about a repair it did not do");
+        assertEquals(2, fix.menuCalls.size(), kind + ": the run's call and the repair's check -- none after the question");
         String note = note();
-        assertTrue(note.contains("Changed, but not checked: the repair did not run it again after its change and say "
-                + "the check passed."), note);
-        assertTrue(note.contains(ANSWER), note);
-        // A check that is none of the three is no check either.
-        assertNull(SkillSelfRepair.usableCheck("ok"));
-        assertNull(SkillSelfRepair.usableCheck(true));
-        assertNull(SkillSelfRepair.usableCheck(null));
-        assertEquals("passed", SkillSelfRepair.usableCheck(" passed "));
-        // Mutation: any message the reply writes taken for the answer (another without its test of
-        // what the reply brought) -> the report is "The check passed.".
+        assertTrue(note.contains("Changed, but not checked"), kind + ": " + note);
+        assertTrue(note.contains("What the repair said:\n\n" + ANSWER), kind + ": " + note);
+        assertFalse(note.contains("local model") || note.contains("**Stopped:**"), kind + ": " + note);
+        // Mutations, each what a step of the loop's does with such a reply: the call it makes run
+        // (askedOnce handing it to executeTool) -> the skill runs a third time; a reply that is no
+        // respond asked for again -> eight think calls; the local model asked where the cloud gave
+        // no reply (a call to it in askedOnce's catch) -> it is asked; the task ended as a step with
+        // no reply ends (noAnswer there) -> the repair did not complete, and its report is
+        // "**Stopped:** ..."; an error, or the gateway's refusal, let out of askedOnce -> the repair
+        // ends on it.
     }
 
     @Test
-    @DisplayName("a repair that goes back to work when asked, and then answers in prose, ends with that answer: it was written after the work, and it is not asked a second time")
-    void workAfterTheQuestionSupersedesTheKeptAnswer(@TempDir Path tmp) throws Exception {
-        String later = "Run once more without debug it reads both menus as well, so the change holds.";
+    @DisplayName("the request that asks does not hold the answer: where the repair gave it stands a line of code's, the question follows it, and every message before is what the request before sent")
+    void theQuestionsRequestDoesNotHoldTheAnswer(@TempDir Path tmp) throws Exception {
         fix = new Fix(tmp);
         fix.rig.queue.start();
         fix.scriptMenu(true);
         scriptFixAndCheck(fix.rig, Map.of("debug", true), prose(ANSWER));
-        fix.rig.cloud.think.add(call(MENU, Map.of()));       // asked for its verdict, it runs the skill again
-        fix.rig.cloud.think.add(prose(later));
+        fix.rig.cloud.think.add(verdict("", "passed"));
         fix.unattended(TASK);
-        var row = fix.ended(fix.lastId());
+        assertEquals("fixed", fix.ended(fix.lastId()).get("outcome"));
 
-        assertEquals(later, row.get("report"), "what it wrote after its last run");
-        assertEquals("unverified", row.get("outcome"), "it never said how the check went");
-        assertEquals(8, thinks(), "asked once: the second prose answer ended it");
-        assertEquals(List.of(VERDICT_OWED), reasons((String) row.get("repair_task_id")));
-        // Mutation: the kept answer standing through work (another without "or the kept answer no
-        // longer stands") -> the report is the answer it gave before it ran the skill again.
+        List<LlmMessage> answering = conversation(5), asking = conversation(6);
+        String request = TaskEndToEndTest.all(asking);
+        for (String sentence : List.of("The site answered HTTP 455 to the default client", "It now asks as a browser",
+                "the check run confirmed it")) {
+            assertFalse(request.contains(sentence), "the model is sent its own answer again: " + request);
+        }
+        // Two messages more than the request it answered: its answer's place, and the question.
+        assertEquals(answering.size() + 2, asking.size());
+        LlmMessage place = asking.get(asking.size() - 2), question = asking.getLast();
+        assertEquals(LlmMessage.Role.ASSISTANT, place.role());
+        assertEquals(standIn(), place.content());
+        assertEquals(LlmMessage.Role.USER, question.role());
+        assertEquals("[respond] OK (0ms)\n" + VERDICT_OWED, question.lasting());
+        // And nothing before them is rewritten: the provider reads it from its cache.
+        for (int i = 0; i < answering.size() - 1; i++) {
+            assertEquals(answering.get(i).role(), asking.get(i).role(), "message " + i);
+            assertEquals(answering.get(i).content(), asking.get(i).content(), "message " + i + " was rewritten");
+        }
+        LlmMessage newest = answering.getLast();
+        assertNotNull(newest.lasting(), "the premise: the request before ended with its newest result");
+        assertEquals(newest.lasting(), asking.get(answering.size() - 1).content(), "the result the request before cached");
+        // Mutations: the answer's step recorded as the answer it was (askedOnce's stand-in holding
+        // the kept answer's text) -> the request holds the answer, whole; the question recorded as
+        // a step of the loop's own, which joins the turn before it (a tool named "_asked") -> the
+        // result the request before cached is rewritten, and there is one message more, not two.
     }
 
     @Test
-    @DisplayName("a repair whose run after the question fails is not fixed by code, and its report is what it wrote after that run")
-    void aFailedRunAfterTheQuestionIsNotFixed(@TempDir Path tmp) throws Exception {
-        String later = "Run once more it failed outright with a connection reset: the change does not hold.";
+    @DisplayName("an answer that follows steps that ran nothing is asked about like any other: the reply ends the task with the answer whatever it is, so the question can cost it nothing")
+    void anAnswerAfterStepsThatRanNothingIsAskedToo(@TempDir Path tmp) throws Exception {
         fix = new Fix(tmp);
         fix.rig.queue.start();
         fix.scriptMenu(true);
-        scriptFixAndCheck(fix.rig, Map.of("debug", true), prose(ANSWER));
-        fix.rig.cloud.think.add(c -> {
-            fix.menuFails.set(true);
-            return call(MENU, Map.of("debug", true)).answer(c);
-        });
-        fix.rig.cloud.think.add(prose(later));
+        scriptFixAndCheck(fix.rig, Map.of("debug", true), respond(""));     // not delivered: empty
+        fix.rig.cloud.think.add(respond(""));                                // again
+        fix.rig.cloud.think.add(prose(ANSWER));
+        fix.rig.cloud.think.add(verdict("", "passed"));
         fix.unattended(TASK);
         var row = fix.ended(fix.lastId());
 
-        assertEquals(later, row.get("report"));
-        assertEquals("not_fixed", row.get("outcome"), "by code: its last run after the change failed");
-        assertTrue(note().contains("Changed, but run again it still shows the problem."), note());
-        assertFalse(note().contains("the check run confirmed it"), "the owner reads the answer the failed run superseded: " + note());
-        // Mutation: as aCallWithoutCheckIsAskedAndAMessageGivenAgainReplacesIt's -> the owner reads
-        // "the check run confirmed it" under "run again it still shows the problem".
+        assertEquals("fixed", row.get("outcome"));
+        assertEquals(ANSWER, row.get("report"));
+        assertEquals(9, thinks());
+        // Mutation: the question left out after two steps that ran nothing, as it was while a third
+        // would have ended the task (asked only while nothing.steps < NOTHING_TO_RUN_IN_A_ROW - 1)
+        // -> eight think calls, and unverified.
     }
 
     @Test
@@ -270,6 +386,11 @@ class AnswerOwedTest {
                 + "not be run as it is declared now");
         ctx.skillChanged();
         assertFalse(SkillSelfRepair.awaitsCheck(ctx, free), "changed again, and not run since");
+        // A check that is none of the three is no check either.
+        assertNull(SkillSelfRepair.usableCheck("ok"));
+        assertNull(SkillSelfRepair.usableCheck(true));
+        assertNull(SkillSelfRepair.usableCheck(null));
+        assertEquals("passed", SkillSelfRepair.usableCheck(" passed "));
         // Mutation: awaitsCheck without its test of whether the skill may be run -> asked of the
         // rewritten skill, whose check the outcome never reads.
     }
@@ -327,6 +448,26 @@ class AnswerOwedTest {
     }
 
     @Test
+    @DisplayName("a repair whose skill_create left the skill's files as they were is not asked either: it is 'unchanged' whatever it says of a check, and its run was no run after a change")
+    void aChangeThatLeftTheFilesAsTheyWereIsNotAsked(@TempDir Path tmp) throws Exception {
+        fix = new Fix(tmp);
+        // The write works, and leaves the authored files byte for byte as they were.
+        fix.rig.skills.create = p -> "Skill '" + p.get("name") + "' updated and registered.";
+        fix.rig.queue.start();
+        fix.scriptMenu(true);
+        scriptFixAndCheck(fix.rig, Map.of("debug", true), prose(ANSWER));
+        fix.rig.cloud.think.add(verdict("", "passed"));         // what a question would be answered
+        fix.unattended(TASK);
+        var row = fix.ended(fix.lastId());
+
+        assertEquals("unchanged", row.get("outcome"));
+        assertEquals(ANSWER, row.get("report"));
+        assertEquals(6, thinks(), "a billed question whose answer decides nothing");
+        // Mutation: owed asking whatever the write left (its test of changedTheCode dropped) -> a
+        // seventh think call.
+    }
+
+    @Test
     @DisplayName("a skill its repair may not run is not asked how a check went that could not be made")
     void aSkillThatIsNeverRunIsNotAsked(@TempDir Path tmp) throws Exception {
         var sent = new java.util.concurrent.CopyOnWriteArrayList<Map<String, Object>>();
@@ -351,91 +492,7 @@ class AnswerOwedTest {
     }
 
     @Test
-    @DisplayName("the question never costs a repair its answer: when the reply to it never comes, the repair ends completed with the answer it gave, and no other model is asked")
-    void theReplyThatNeverComesLeavesTheAnswer(@TempDir Path tmp) throws Exception {
-        var local = LocalModeTest.localModel();     // there, and able to take a task over: it is not handed this one
-        fix = new Fix(tmp, null, registry -> null, local);
-        fix.rig.queue.start();
-        fix.scriptMenu(true);
-        scriptFixAndCheck(fix.rig, Map.of("debug", true), prose(ANSWER));
-        fix.rig.cloud.think.add(LocalModeTest.noInternet());    // the question's call
-        fix.rig.cloud.think.add(LocalModeTest.noInternet());    // asked once more, as any broken connection is
-        fix.unattended(TASK);
-        var row = fix.ended(fix.lastId());
-
-        assertEquals("unverified", row.get("outcome"), "as before there was a question");
-        assertEquals(1, ((Number) row.get("completed")).intValue(), "it ran to its answer");
-        assertEquals(ANSWER, row.get("report"));
-        assertTrue(local.calls.isEmpty(), "the local model was asked about a repair it did not do: " + local.calls);
-        String note = note();
-        assertTrue(note.contains("Changed, but not checked"), note);
-        assertTrue(note.contains("What the repair said:\n\n" + ANSWER), note);
-        assertFalse(note.contains("Written by the local model") || note.contains("**Stopped:**"), note);
-        // Mutations: the task's ending as the loop left it (orKeptAnswer returning it unchanged) -> the
-        // report is "**Stopped:** the cloud model (anthropic) could not be used ...", told as a repair
-        // that did not finish; the task free to move to the local model while its answer stands
-        // (canGoLocal without that test) -> the local model is asked.
-    }
-
-    @Test
-    @DisplayName("replies to the question that hold nothing end the repair with the answer it gave, not as a task that produced nothing")
-    void emptyRepliesLeaveTheAnswer(@TempDir Path tmp) throws Exception {
-        fix = new Fix(tmp);
-        fix.rig.queue.start();
-        fix.scriptMenu(true);
-        scriptFixAndCheck(fix.rig, Map.of("debug", true), prose(ANSWER));
-        fix.rig.cloud.think.add(empty());
-        fix.rig.cloud.think.add(empty());
-        fix.unattended(TASK);
-        var row = fix.ended(fix.lastId());
-
-        assertEquals("unverified", row.get("outcome"));
-        assertEquals(1, ((Number) row.get("completed")).intValue());
-        assertEquals(ANSWER, row.get("report"));
-        // Mutation: as theReplyThatNeverComesLeavesTheAnswer's first -> "The model produced nothing
-        // that could be run or delivered 3 times in a row."
-    }
-
-    @Test
-    @DisplayName("a question to the user in reply, which nobody can answer, ran nothing: the answer the repair gave still stands when its next reply brings no check")
-    void aQuestionInReplyLeavesTheAnswerStanding(@TempDir Path tmp) throws Exception {
-        fix = new Fix(tmp);
-        fix.rig.queue.start();
-        fix.scriptMenu(true);
-        scriptFixAndCheck(fix.rig, Map.of("debug", true), prose(ANSWER));
-        fix.rig.cloud.think.add(call(AgentAction.ASK_USER, Map.of("message", "Which check do you mean?")));
-        fix.rig.cloud.think.add(prose("The check passed."));
-        fix.unattended(TASK);
-        var row = fix.ended(fix.lastId());
-
-        assertEquals(ANSWER, row.get("report"), "the answer it gave: nothing ran after it");
-        assertEquals("unverified", row.get("outcome"));
-        assertEquals(8, thinks());
-        // Mutation: the step that tells unattended work nobody can answer not counted as one that
-        // ran nothing (its context.ranNothing() dropped) -> the report is "The check passed.".
-    }
-
-    @Test
-    @DisplayName("a repair that answers the question only with questions to a user who is not there ends completed with the answer it gave, not waiting for an answer nobody gives")
-    void questionsInReplyDoNotCostTheAnswer(@TempDir Path tmp) throws Exception {
-        fix = new Fix(tmp);
-        fix.rig.queue.start();
-        fix.scriptMenu(true);
-        scriptFixAndCheck(fix.rig, Map.of("debug", true), prose(ANSWER));
-        fix.rig.cloud.think.add(call(AgentAction.ASK_USER, Map.of("message", "Which check do you mean?")));
-        fix.rig.cloud.think.add(call(AgentAction.ASK_USER, Map.of("message", "Which check do you mean?")));
-        fix.unattended(TASK);
-        var row = fix.ended(fix.lastId());
-
-        assertEquals(ANSWER, row.get("report"));
-        assertEquals("unverified", row.get("outcome"));
-        assertEquals(1, ((Number) row.get("completed")).intValue(), "it ran to its answer");
-        // Mutation: a task left waiting for the user although its answer stands (orKeptAnswer passing
-        // NEEDS_INPUT on) -> the repair is told as one that did not finish, its report the question.
-    }
-
-    @Test
-    @DisplayName("the owner's Stop while the repair is being asked ends it as a Stop ends any task: stopped, no verdict, whatever it had answered")
+    @DisplayName("the owner's Stop while the repair is being asked ends it as a Stop ends any task: stopped, no verdict, whatever it had answered and whatever the call brought back")
     void aStopWhileAskedIsAStop(@TempDir Path tmp) throws Exception {
         fix = new Fix(tmp);
         fix.rig.queue.start();
@@ -443,7 +500,7 @@ class AnswerOwedTest {
         scriptFixAndCheck(fix.rig, Map.of("debug", true), prose(ANSWER));
         fix.rig.cloud.think.add(c -> {
             fix.rig.cancellation.request("u1", (String) fix.repairRow(0).get("repair_task_id"), "you pressed Stop");
-            return empty().answer(c);
+            return verdict("", "passed").answer(c);     // the reply was on its way already
         });
         fix.unattended(TASK);
         var row = fix.ended(fix.lastId());
@@ -453,34 +510,56 @@ class AnswerOwedTest {
         assertTrue(String.valueOf(row.get("report")).startsWith("**Stopped:**"), String.valueOf(row.get("report")));
         assertTrue(note().contains("Changed, but the repair did not finish, so the change was not checked. The next "
                 + "time the problem shows, a repair starts again."), note());
-        // Mutation: a Stop overridden by the answer the task is keeping (orKeptAnswer taking CANCELLED
-        // for an ending to replace) -> the stopped repair is recorded completed, and judged.
+        // Mutation: the kept answer delivered whenever the call came back (askedOnce looking, after
+        // the call, only at whether the call heard the Stop) -> the stopped repair is recorded
+        // completed, and fixed.
     }
 
     @Test
-    @DisplayName("an answer that follows two steps that ran nothing is not asked about: one more would end the task, so it is the ending, as it was")
-    void notAskedWhenTheQuestionWouldEndTheTask(@TempDir Path tmp) throws Exception {
+    @DisplayName("a repair stopped by the time it answers is asked nothing: the Stop ends it there, with no call more and no line in its steps that says it was asked")
+    void aTaskStoppedByTheTimeItAnswersIsNotAsked(@TempDir Path tmp) throws Exception {
         fix = new Fix(tmp);
         fix.rig.queue.start();
         fix.scriptMenu(true);
-        scriptFixAndCheck(fix.rig, Map.of("debug", true), respond(""));     // not delivered: empty
-        fix.rig.cloud.think.add(respond(""));                                // again
-        fix.rig.cloud.think.add(prose(ANSWER));
+        scriptFixAndCheck(fix.rig, Map.of("debug", true), c -> {
+            fix.rig.cancellation.request("u1", (String) fix.repairRow(0).get("repair_task_id"), "you pressed Stop");
+            return prose(ANSWER).answer(c);             // the answer was on its way already
+        });
+        fix.rig.cloud.think.add(verdict("", "passed"));
         fix.unattended(TASK);
         var row = fix.ended(fix.lastId());
 
-        assertEquals("unverified", row.get("outcome"));
-        assertEquals(ANSWER, row.get("report"));
-        assertEquals(8, thinks());
-        assertTrue(reasons((String) row.get("repair_task_id")).stream().noneMatch(r -> r.startsWith("Not delivered yet")),
-                "a question nobody was asked is on the record: " + reasons((String) row.get("repair_task_id")));
-        // Mutation: the question asked however many steps ran nothing before it -> a third such step
-        // is recorded, "Not delivered yet: ...", with no call to answer it.
+        assertEquals(0, ((Number) row.get("completed")).intValue(), "stopped is no verdict");
+        assertTrue(String.valueOf(row.get("report")).startsWith("**Stopped:**"), String.valueOf(row.get("report")));
+        assertEquals(6, thinks(), "asked although it was stopped");
+        assertTrue(steps((String) row.get("repair_task_id")).stream().noneMatch(s -> AgentAction.RESPOND.equals(s.get("tool"))),
+                "its steps say it was asked: " + steps((String) row.get("repair_task_id")));
+        // Mutation: askedOnce asking without a look at the Stop first -> a seventh think call, and
+        // a step that says the repair was asked how its check went.
     }
 
     // ───────────────────────── unattended work's problems ─────────────────────────
 
     static final String SAID = "Here are today's menus.\n\nCafe One: soup, schnitzel.\nCafe Two: could not be read.";
+
+    static final String MAIL_TASK = "Read my mail and tell me what the bank wrote.";
+
+    /** A private result: what a skill that holds the mailbox's password read. */
+    static final String MAIL = "From the bank, 3 Nov: your statement is ready. Closing balance 48,213.07 in the "
+            + "account ending 4417; the standing order of 12,000.00 to the landlord left on the first.";
+
+    /** A rig whose {@code mail_reader} reads the mail, privately, counting its runs in {@code reads}. */
+    private static Fix withMail(Path tmp, com.ownclaw.llm.LlmProvider local, AtomicInteger reads) throws Exception {
+        var reader = tool("mail_reader", List.of("IMAP_PASS"), p -> {
+            reads.incrementAndGet();
+            return MAIL;
+        });
+        Fix f = local == null ? new Fix(tmp, reader) : new Fix(tmp, null, registry -> null, local, reader);
+        f.rig.config.getPrivacy().setPersonalSources(List.of("IMAP_"));
+        f.rig.jdbc.update("INSERT INTO users (id, display_name) VALUES ('u1', 'Owner')");
+        f.rig.vault.storeCredential("u1", "IMAP_PASS", "pw-12345678");
+        return f;
+    }
 
     @Test
     @DisplayName("an unattended run that ends in prose is asked once, and the problems it then lists start a repair; its answer is the prose, whole")
@@ -493,7 +572,9 @@ class AnswerOwedTest {
 
         assertTrue(r.success(), r.response());
         assertEquals(3, thinks());
-        assertTrue(sent(2).contains(PROBLEMS_OWED), sent(2));
+        assertTrue(sent(2).contains("[respond] OK (0ms)\n" + PROBLEMS_OWED), sent(2));
+        assertFalse(TaskEndToEndTest.all(fix.rig.cloud.calls("think").get(2).messages()).contains("Cafe One: soup"),
+                "the model is sent its own answer again");
         var rows = fix.repairs();
         assertEquals(1, rows.size(), rows.toString());
         assertEquals("running", rows.get(0).get("outcome"));
@@ -504,18 +585,160 @@ class AnswerOwedTest {
     }
 
     @Test
-    @DisplayName("asked once: a second answer in prose ends the run with the first, and nothing is repaired -- as before")
-    void aSecondProseAnswerEndsTheRun(@TempDir Path tmp) throws Exception {
+    @DisplayName("only 'problems' is read from the reply: a line written in its 'message' beside them is not delivered in place of the run's answer")
+    void aMessageBesideTheProblemsIsNotDelivered(@TempDir Path tmp) throws Exception {
         fix = new Fix(tmp);
         fix.rig.cloud.think.add(call(MENU, Map.of()));
         fix.rig.cloud.think.add(prose(SAID));
-        fix.rig.cloud.think.add(prose("Every tool did its whole job."));
+        fix.rig.cloud.think.add(problems("No tool had a problem.", List.of()));
         AgentResult r = fix.unattended(TASK);
 
-        assertEquals(SAID, r.response());
-        assertEquals(3, thinks());
+        assertEquals(SAID, r.response(), "the question cost the run its answer");
+        assertNull(r.ownerText());
         assertTrue(fix.repairs().isEmpty(), fix.repairs().toString());
-        // Mutation: as aSecondAnswerWithoutCheckEndsIt's -> the run's answer is "Every tool did its whole job.".
+        // Mutation: as aCallWithoutCheckIsAskedAndTheRepliesMessageIsNotRead's -> the scheduled
+        // run's whole result is "No tool had a problem.".
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("repliesThatSayNothingAsked")
+    @DisplayName("whatever replies to an unattended run's question ends the run: completed with the answer it gave -- a private result it showed for the owner alone, as it was -- after exactly one more call, on the cloud, with nothing run and nothing repaired")
+    void anyReplyEndsTheRunWithTheAnswerItGave(String kind, LoopRig.Reply reply, @TempDir Path tmp) throws Exception {
+        var local = LocalModeTest.localModel();
+        var reads = new AtomicInteger();
+        fix = withMail(tmp, local, reads);
+        fix.rig.cloud.think.add(call("mail_reader", Map.of()));
+        fix.rig.cloud.think.add(prose("{{1}}"));
+        fix.rig.cloud.think.add(reply);
+        fix.rig.cloud.think.add(problems("Second thoughts.", List.of(Map.of("tool", "mail_reader", "what", "It read one mail."))));
+        local.think.add(respond("The local model: I do not know what ran."));
+        AgentResult r = fix.unattended(MAIL_TASK);
+
+        assertEquals(AgentResult.TerminationReason.COMPLETED, r.terminationReason(), kind + ": " + r.response());
+        assertEquals(AgentLoop.PRIVATE_NOTE, r.response(), kind);
+        assertEquals(AgentLoop.PRIVATE_RESULT_HEADER + MAIL, r.ownerText(), kind + ": what the owner alone is shown");
+        assertEquals(3, thinks(), kind + ": the run's two steps and the one question");
+        assertTrue(local.calls.isEmpty(), kind + ": the local model was asked about a run it did not do");
+        assertEquals(1, reads.get(), kind + ": nothing ran after the question");
+        assertEquals(0, fix.menuCalls.size(), kind);
+        assertTrue(fix.repairs().isEmpty(), kind + ": " + fix.repairs());
+        // Mutations: each of anyReplyEndsTheRepairWithTheAnswerItGave's; and the kept answer
+        // delivered without the text it had for the owner (askedOnce completing without
+        // withOwnerText) -> he reads the note that a private answer exists, and not the mail.
+    }
+
+    @Test
+    @DisplayName("work the cloud only orchestrates stays where it is too: a skill it calls itself in reply to the question is not run and not refused into another step, and the local model is asked nothing")
+    void orchestratedWorkIsNotHandedToTheLocalModel(@TempDir Path tmp) throws Exception {
+        var local = LocalModeTest.localModel();
+        var calls = new java.util.concurrent.CopyOnWriteArrayList<Map<String, Object>>();
+        // A local tier that can take delegated work: the cloud orchestrates, and is given no skill to run.
+        var rig = new LoopRig(tmp, List.of(SkillSelfRepairTest.skill(MENU, false, List.of(), false, calls,
+                p -> com.ownclaw.agent.tools.ToolResult.success(DEGRADED))), 600, local,
+                (registry, config, llm) -> new ThinkingEngine(registry, config, llm) {
+                    @Override
+                    boolean localTierReady(AgentContext context) {
+                        return true;
+                    }
+                });
+        rig.skills.source = name -> "def run(params):\n    return {}\n";
+        var repair = new SkillSelfRepair(rig.jdbc, rig.config, rig.skills, rig.registry, rig.queue,
+                new ResultDelivery(rig.chat, rig.emitter), rig.chat, rig.events, ZoneId.of("UTC"));
+        rig.loop.setSelfRepair(repair);
+        try {
+            rig.cloud.think.add(call(AgentAction.DELEGATE, Map.of("calls", List.of(Map.of("tool", MENU, "params", Map.of())))));
+            rig.cloud.think.add(prose(SAID));
+            rig.cloud.think.add(call(MENU, Map.of()));              // asked; it calls the skill itself, which it is not offered
+            // In the reviewer's probe the next call was declined, the run moved to the local model,
+            // and what it then wrote was the run's digest.
+            rig.cloud.think.add(TaskEndToEndTest.declined("cyber"));
+            local.think.add(respond("local model: I do not know what ran."));
+            AgentResult r = rig.loop.executeFull("u1", TASK, true);
+
+            assertEquals(AgentResult.TerminationReason.COMPLETED, r.terminationReason(), r.response());
+            assertEquals(SAID, r.response());
+            assertEquals(3, rig.cloud.calls("think").size());
+            assertEquals(1, calls.size(), "the delegation ran the skill, and nothing ran it again");
+            assertTrue(local.calls.isEmpty(), "moved to the local model: " + local.calls.size());
+            // Mutation: a reply that is no respond asked for again, as a step that ran nothing is
+            // (anyReplyEndsTheRepairWithTheAnswerItGave's second) -> a fourth think call: the one
+            // that was declined, from where the run went to the local model.
+        } finally {
+            rig.queue.stop();
+        }
+    }
+
+    @Test
+    @DisplayName("a Stop while an unattended run is being asked ends it stopped, and a private result its answer had shown is given to the owner in full: the answer that showed it was not delivered")
+    void aStopWhileAskedGivesTheOwnerWhatTheAnswerShowed(@TempDir Path tmp) throws Exception {
+        fix = withMail(tmp, null, new AtomicInteger());
+        fix.rig.cloud.think.add(call("mail_reader", Map.of()));
+        fix.rig.cloud.think.add(prose("{{1}}"));
+        fix.rig.cloud.think.add(c -> {
+            fix.rig.cancellation.requestAll("u1", "you pressed Stop");
+            c.progress().onProgress();              // a call that is streaming hears the Stop here
+            return empty().answer(c);
+        });
+        AgentResult r = fix.unattended(MAIL_TASK);
+
+        assertEquals(AgentResult.TerminationReason.CANCELLED, r.terminationReason(), r.response());
+        assertEquals(3, thinks());
+        assertFalse(r.response().contains("Closing balance"), "the record of the task holds a private result: " + r.response());
+        assertNotNull(r.ownerText(), "the owner is given the private result nowhere: " + r.response());
+        assertTrue(r.ownerText().contains(AgentLoop.PRIVATE_RESULT_HEADER + "**result 1 (mail_reader):**\n\n" + MAIL), r.ownerText());
+        assertFalse(r.response().contains("shown above"), r.response());
+        // Mutation: the results the kept answer showed left marked as shown (stoppedUnanswered
+        // without nothingShown) -> the stopped ending says "shown above" of the mail, and it is
+        // nowhere.
+    }
+
+    @Test
+    @DisplayName("the question is the loop's own: the run's step log keeps a line of code's about it, as a step that worked -- not the question, which every later message of the chat of scheduled results would send the cloud again, and not a failed step")
+    void theQuestionStaysOutOfTheRunsRecord(@TempDir Path tmp) throws Exception {
+        fix = new Fix(tmp);
+        fix.rig.jdbc.update("INSERT INTO users (id, display_name) VALUES ('u1', 'Owner')");
+        var results = new LinkedBlockingQueue<StatusMessage>();
+        fix.rig.emitter.subscribe("u1", results, m -> {
+            if (m.type() == StatusMessage.Type.RESULT) results.add(m);
+        });
+        fix.rig.cloud.think.add(call(MENU, Map.of()));
+        fix.rig.cloud.think.add(prose(SAID));
+        fix.rig.cloud.think.add(problems("", List.of()));
+        var scheduler = new ScheduledTaskService(fix.rig.jdbc, fix.rig.queue, fix.rig.emitter, fix.rig.events,
+                fix.rig.chat, new ResultDelivery(fix.rig.chat, fix.rig.emitter));
+        fix.rig.queue.start();
+        scheduler.scheduleDeferred("u1", TASK, Instant.now().minusSeconds(60));
+        scheduler.pollDueTasks();
+        assertNotNull(results.poll(60, TimeUnit.SECONDS), "the scheduled result was not delivered");
+
+        // The step log: the answer's step, a step that worked, with what was asked in a line.
+        String run = fix.rig.jdbc.queryForObject("SELECT task_id FROM events WHERE event_type = 'step' AND "
+                + "json_extract(details, '$.tool') = 'respond'", String.class);
+        var steps = steps(run);
+        assertEquals(List.of(MENU, AgentAction.RESPOND), steps.stream().map(s -> s.get("tool")).toList());
+        assertEquals(Boolean.TRUE, steps.get(1).get("ok"), "the loop's own question is shown as a failure of the task");
+        assertEquals(PROBLEMS_NOTED, steps.get(1).get("reason"));
+        // And the page draws the line of a step that worked as a note, not as an error.
+        String page;
+        try (var in = AnswerOwedTest.class.getResourceAsStream("/static/index.html")) {
+            assertNotNull(in, "static/index.html is not on the classpath");
+            page = new String(in.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+        }
+        assertTrue(page.contains("if (s.reason) d.appendChild(node('div', 'task-result-content' + (s.ok ? '' : ' error'), s.reason));"));
+
+        // A later message in that chat: the run's record goes to the cloud with it, and no question.
+        fix.rig.cloud.think.add(respond("You are welcome."));
+        fix.rig.turn(fix.rig.chat.scheduledSession("u1"), "thanks");
+        var thinks = fix.rig.cloud.calls("think");
+        String later = TaskEndToEndTest.all(thinks.get(thinks.size() - 1).messages());
+        assertTrue(later.contains("2. ✓ respond — " + PROBLEMS_NOTED), "the premise: the record of the run is sent: " + later);
+        for (String ofTheQuestion : List.of("Your answer is kept", "Call respond once more", "is read from it")) {
+            assertFalse(later.contains(ofTheQuestion), "a later task is sent the question as part of the run's record: " + later);
+        }
+        // Mutations: the step's row keeping the question as its reason (noteAsked handed owed.asked)
+        // -> every later message of the chat sends it; the row written as a step that failed
+        // (noteAsked's observation a failure) -> the page counts a failed step in a run that had
+        // none; the page drawing every step's reason as an error, as it did -> the line is gone.
     }
 
     @Test
@@ -642,6 +865,8 @@ class AnswerOwedTest {
 
         assertEquals(3, thinks());
         assertTrue(sent(2).contains(PROBLEMS_OWED), sent(2));
+        String asking = TaskEndToEndTest.all(fix.rig.cloud.calls("think").get(2).messages());
+        assertFalse(asking.contains("Here are today's menus."), "the model is sent its own answer again: " + asking);
         assertEquals(1, fix.repairs().size());
         assertTrue(r.response().startsWith("Here are today's menus.\n\n_🔧 Self-repair started for " + MENU), r.response());
 
@@ -684,7 +909,7 @@ class AnswerOwedTest {
             String second = String.join("\n", LoopRig.userParts(thinks.get(1)));
             assertTrue(second.contains("You described what you were going to do instead of doing it, and nothing has "
                     + "run yet."), second);
-            assertFalse(second.contains("Not delivered yet"), "a plan was kept as the task's answer: " + second);
+            assertFalse(second.contains("Your answer is kept"), "a plan was kept as the task's answer: " + second);
             assertEquals(1, calls.size(), "the delegation ran the skill");
             assertTrue(String.join("\n", LoopRig.userParts(thinks.get(3))).contains(PROBLEMS_OWED),
                     String.join("\n", LoopRig.userParts(thinks.get(3))));
