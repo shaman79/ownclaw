@@ -310,7 +310,7 @@ class EmptyReplyTest {
     }
 
     @Test
-    @DisplayName("a tool call that cannot be run is shown to the model as it wrote it, counted, and asked again -- not an ending")
+    @DisplayName("a tool call that cannot be run is shown to the model as it wrote it -- the call, not the words beside it -- counted, and asked again: not an ending")
     void aCallThatCannotBeRunIsAskedAgain(@TempDir Path tmp) throws Exception {
         // Anthropic does not check a tool input it streams: the arguments can end half-written.
         String arguments = "{\"to\": \"owner@example.org\", \"body\": \"The capital is";
@@ -332,11 +332,18 @@ class EmptyReplyTest {
         assertTrue(told.contains("Your previous reply held a tool call that cannot be run, so nothing was run."), told);
         // Through the gateway's filter, as every part is: the address as its placeholder, which is
         // what a cloud model shown only placeholders writes to begin with.
-        assertTrue(told.contains(arguments.replace("owner@example.org", "<email_1>"))
-                        && told.contains("Sending the answer."),
-                "the model is shown what it wrote, the call as it wrote it included: " + told);
+        assertTrue(told.contains(arguments.replace("owner@example.org", "<email_1>")),
+                "the model is shown the call as it wrote it: " + told);
+        // The words it wrote beside the call are kept with the step, and not quoted back: what a
+        // step is told stays in every later request of the task, and no step's own words do
+        // (EarlierWordsNotReplayedTest).
+        assertFalse(told.contains("Sending the answer."), "the words beside the call are sent back: " + told);
+        assertTrue(String.valueOf(ctx.trajectory().turns().get(0).action().params().get("message"))
+                .startsWith("Sending the answer.\n\n"), "the step keeps what the model wrote, whole");
         assertFalse(told.contains("never came"), "the reply came: " + told);
         assertEquals(340 + 320, ctx.cloudTokens(), "the reply that could not be run was billed, and is counted");
+        // Mutation: the reply quoted back whole, as it was (the engine's unusable(wrote, wrote, ...)
+        // for a call that cannot be run) -> the model is sent "Sending the answer." again.
     }
 
     /** A call that never reached the model: what a network that cannot be reached throws. */

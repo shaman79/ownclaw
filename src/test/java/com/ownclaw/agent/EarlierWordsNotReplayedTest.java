@@ -5,6 +5,7 @@ import com.ownclaw.core.ResultDelivery;
 import com.ownclaw.core.ScheduledTaskService;
 import com.ownclaw.interfaces.CommandHandler;
 import com.ownclaw.llm.LlmMessage;
+import com.ownclaw.llm.LlmResponse;
 import com.ownclaw.llm.Replies;
 import com.ownclaw.llm.ToolCall;
 import com.ownclaw.observability.ChatStatusEmitter.StatusMessage;
@@ -35,6 +36,14 @@ import static org.junit.jupiter.api.Assertions.*;
  * without them never. So no request replays them, from a task's first step; they stay in the
  * trajectory, in the owner's chat and on the task page. And where nobody is waiting, no step the
  * cloud takes asks for words beside its call at all.
+ * <p>
+ * What that covers, exactly: the words beside a call that ran, in the replay of its step; and the
+ * words beside a call that could not be run, which were quoted back with the call until the
+ * review of 18 Nov 2026 -- and what a step is told stays in every later request of its task. Two
+ * replies are still quoted to the model whole, being the reply itself and not words beside a
+ * call: an answer unattended work gives before any of it ran ("You described what you were going
+ * to do ..."), and on the text protocol a reply that is no action. Both stay in the task's later
+ * requests.
  */
 class EarlierWordsNotReplayedTest {
 
@@ -115,6 +124,36 @@ class EarlierWordsNotReplayedTest {
         for (int i = 0; i < WORDS.size(); i++) assertEquals(WORDS.get(i), steps.get(i).action().reasoning());
         // Mutation: the replay's assistant turn written with the words (actionText(true) in
         // buildAnthropicMessages) -> the second request holds the first step's.
+    }
+
+    @Test
+    @DisplayName("a call that cannot be run is quoted back alone: the words the model wrote beside it are kept with the step, and are in no later request of the task")
+    void wordsBesideACallThatCannotBeRunAreNotQuotedBack(@TempDir Path tmp) throws Exception {
+        var rig = new LoopRig(tmp, List.of(NOOP));
+        String words = "The gateway answers, so I am checking DNS next because the resolver looked slow.";
+        // Anthropic does not check a tool input it streams: the arguments can end half-written.
+        String cannotRun = "the model's arguments for tool 'noop' are not a JSON object (Unexpected end-of-input):\n"
+                + "{\"n\": ";
+        rig.cloud.think.add(c -> new LlmResponse(words, List.of(), cannotRun, "tool_use", null, null, null, null,
+                List.of(new LlmResponse.Usage(null, 1_000, 100, 0, 0))));
+        rig.cloud.think.add(call("noop", Map.of()));
+        rig.cloud.think.add(respond("all quiet"));
+        AgentResult r = rig.turn(rig.chat.createSession("u1", "Network"), "check the network");
+
+        assertEquals(AgentResult.TerminationReason.COMPLETED, r.terminationReason(), r.response());
+        var thinks = rig.cloud.calls("think");
+        assertEquals(3, thinks.size());
+        assertTrue(lastUser(thinks.get(1)).contains("Your previous reply held a tool call that cannot be run, so nothing "
+                + "was run. It was:\n\n" + cannotRun + "\n\nMake the call again, whole, in the form your tools are "
+                + "called in."), lastUser(thinks.get(1)));
+        for (int i = 1; i < thinks.size(); i++) {
+            assertFalse(all(thinks.get(i)).contains(words), "request " + (i + 1) + " sends the words beside the call "
+                    + "that could not be run: " + all(thinks.get(i)));
+        }
+        // Kept with the step, whole, as any step's are.
+        assertEquals(words + "\n\n" + cannotRun, r.trajectory().turns().get(0).action().params().get("message"));
+        // Mutation: the reply quoted back whole, as it was (the engine's unusable(wrote, wrote, ...)
+        // for a call that cannot be run) -> the second and the third request hold the words.
     }
 
     @Test

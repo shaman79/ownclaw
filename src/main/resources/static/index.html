@@ -3697,7 +3697,9 @@
         } else {
             d.appendChild(tdRow('Result', 'Completed'));
         }
-        if (s.reason) d.appendChild(node('div', 'task-result-content error', s.reason));
+        // A step that worked can carry a note too -- the answer a task was then asked about, once
+        // (AgentLoop#askedOnce): drawn as what it is, not as an error.
+        if (s.reason) d.appendChild(node('div', 'task-result-content' + (s.ok ? '' : ' error'), s.reason));
         (s.artifacts || []).forEach(function(a) {
             d.appendChild(tdRow(a.handle, a.tool + ' · ' + tdChars(a.chars) + ' · '
                     + (a.label === 'PRIVATE' ? 'private' + tdWhy(a.why) : a.label === 'PUBLIC' ? 'public' : 'label not recorded')));

@@ -217,46 +217,14 @@ public class AgentContext {
     public Object reportedProblems() { return reportedProblems; }
     public void setReportedProblems(Object problems) { this.reportedProblems = problems; }
 
-    /** What a repair's delivered final answer said in {@code check}, as written, or null ({@link SkillSelfRepair#checked}). */
+    /**
+     * What a repair's delivered final answer said in {@code check} -- or, where it was asked for
+     * that once, its reply ({@code AgentLoop#askedOnce}); the same holds of {@code problems} above
+     * -- as written, or null ({@link SkillSelfRepair#checked}).
+     */
     private volatile Object reportedCheck;
     public Object reportedCheck() { return reportedCheck; }
     public void setReportedCheck(Object check) { this.reportedCheck = check; }
-
-    /**
-     * The answer the task gave before it was asked, once, for what that answer owed whoever reads
-     * it by code ({@link SkillSelfRepair#owed}) -- a repair how its check went, unattended work
-     * what did not do its whole job -- kept whole, or null while nothing was asked. It is the
-     * task's answer unless the reply to the question writes another ({@code AgentLoop}).
-     */
-    private volatile AgentLoop.Answer keptAnswer;
-
-    /**
-     * How many turns the trajectory had when the kept answer was last the task's last word: when it
-     * was kept, and after each step since that ran nothing ({@link #ranNothing}).
-     */
-    private volatile int keptAnswerAt = -1;
-
-    AgentLoop.Answer keptAnswer() { return keptAnswer; }
-
-    /** Keep {@code answer} as the task is about to be asked for what it owed: the step that asks is recorded next. */
-    void keepAnswer(AgentLoop.Answer answer) {
-        keptAnswer = answer;
-        keptAnswerAt = trajectory.size();
-    }
-
-    /** A step that ran nothing has just been recorded: a kept answer that stood before it stands still. */
-    void ranNothing() {
-        if (keptAnswer != null && keptAnswerAt == trajectory.size() - 1) keptAnswerAt = trajectory.size();
-    }
-
-    /**
-     * Whether the kept answer is still the task's last word: every step since it was given ran
-     * nothing -- the question itself, a reply that was empty or could not be used. Once a step has
-     * run, the task is at work again, and what it writes after that work is its answer.
-     */
-    boolean keptAnswerStands() {
-        return keptAnswer != null && keptAnswerAt == trajectory.size();
-    }
 
     public TaskOptions options() { return options; }
     public void setOptions(TaskOptions options) { this.options = options; }
@@ -1380,6 +1348,13 @@ public class AgentContext {
 
     /** Whether the task's answer or question shows this result in full. See {@link #markShown}. */
     public boolean isShown(Artifact a) { return shown.contains(a.n()); }
+
+    /**
+     * The answer that showed results was not delivered after all -- the task was stopped while it
+     * was being asked about it ({@code AgentLoop#askedOnce}) -- so no result is on the screen: the
+     * ending lists each in full, where "shown above" would leave a private one nowhere.
+     */
+    public void nothingShown() { shown.clear(); }
 
     /**
      * The secret vault values this task's text is scrubbed of: those the vault holds now
