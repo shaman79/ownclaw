@@ -414,6 +414,13 @@ public class LocalExecutor {
      * of a result, not a parameter. A name that begins with an underscore is the system's own,
      * and never the cloud's to write ({@link ToolFinder#systemName}).
      * <p>
+     * The second rule is there for the name a skill would ignore without a word -- 'body' for
+     * body_text, and the mail goes out without its text. A name the skill does not declare and
+     * its code reads ({@link Tool#readsParameter}) is not such a name, and is let through: an
+     * alias, an optional setting. Refused, the cloud had no way to pass one. The first rule
+     * holds whatever the code does: a parameter declared required is required, though the code
+     * has a default for it -- the declaration is what the cloud is told.
+     * <p>
      * A tool that declares no parameters at all is not held to the second rule: there is nothing
      * to check a name against. Nor is a skill whose declaration could not be read in full
      * ({@link ToolFinder.Declared#whole}): the names that were read are not known to be all it
@@ -430,7 +437,8 @@ public class LocalExecutor {
         for (String name : written.keySet()) {
             if (ToolFinder.systemName(name)) {
                 wrong.add("'" + name + "' is not yours to pass: a name that begins with _ is the system's own");
-            } else if (reading.whole() && !declared.isEmpty() && !declared.containsKey(name)) {
+            } else if (reading.whole() && !declared.isEmpty() && !declared.containsKey(name)
+                    && !tool.readsParameter(name)) {
                 wrong.add("'" + name + "' is not one of its parameters");
             }
         }

@@ -197,6 +197,42 @@ public class DynamicSkill implements Tool {
     @Override public int estimatedMaxDurationSeconds() { return timeoutSec; }
     @Override public List<String> requiredCredentials() { return requiredCredentials; }
 
+    /**
+     * Whether skill.py reads {@code name} from the parameters it is handed, read from the file
+     * when asked: the code may have changed since the skill was loaded.
+     */
+    @Override
+    public boolean readsParameter(String name) {
+        try {
+            String code = SkillJail.readAuthored(skillDir.resolve("skill.py"));
+            return code != null && readsParameter(code, name);
+        } catch (IOException e) {
+            return false;
+        }
+    }
+
+    /**
+     * Whether a skill's source reads {@code name} from {@code params} by that name:
+     * {@code params.get('name'}, {@code params['name']}, {@code params.pop('name'},
+     * {@code params.setdefault('name'}, or {@code 'name' in params} -- in either quote.
+     * <p>
+     * A call the cloud wrote is refused for a name its skill does not declare, because a skill
+     * ignores such a name without a word: a mail's text passed as 'body', which the mailer does
+     * not read, is a mail sent without it. A name the code reads is not ignored. Production has
+     * two that their skills read and do not declare, an alias and an optional timeout, and the
+     * cloud had no way to pass either (the review of e16a1ff, 2026-11-18).
+     * <p>
+     * A plain pattern over the text, not a reading of the Python: it also finds the name in a
+     * comment or a string, and misses one read through another variable. Either way the worst
+     * is what held before the check -- a name let through that the skill ignores, or one refused
+     * that it would have read.
+     */
+    private static boolean readsParameter(String code, String name) {
+        String quoted = "(?:'" + Pattern.quote(name) + "'|\"" + Pattern.quote(name) + "\")";
+        return Pattern.compile("\\bparams\\s*(?:\\.\\s*(?:get|pop|setdefault)\\s*\\(|\\[)\\s*" + quoted
+                + "|" + quoted + "\\s+(?:not\\s+)?in\\s+params\\b").matcher(code).find();
+    }
+
     @Override
     public List<String> ungranted(String userId) {
         if (requiredCredentials.isEmpty() || credentialVault == null || userId == null) return List.of();

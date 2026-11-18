@@ -42,6 +42,8 @@ import static org.junit.jupiter.api.Assertions.*;
  * -- a JSON string -- wrote shorthand as it came, and the registry read only the definitions that
  * were maps. {"url": "string", "timeout": {"type": "integer"}} was a skill declaring timeout
  * alone, and a delegated call naming url was refused, with a list of parameters that left url out.
+ * And a declaration read in full still need not be all a skill takes: a name its code reads and
+ * its declaration leaves out -- production has two -- could not be passed at all.
  * <p>
  * The skills here are made by the real skill_create ({@link SkillManager#createSkill}) and run by
  * the real loop, through delegate's exact calls.
@@ -411,6 +413,90 @@ class SkillDeclarationTest {
         // Mutations: a description is the text of whatever the declaration holds, as before ->
         // "  - url (string, required): null"; a type likewise -> depth has the type "null",
         // which is none a schema has: "  - depth (optional)".
+    }
+
+    // ───────────────────────── a name the code reads ─────────────────────────
+
+    @Test
+    @DisplayName("a name the skill does not declare and its code reads is let through -- the call naming it runs, and the skill gets it -- while one its code does not read is refused as it was: the skill would ignore it without a word")
+    void aNameTheCodeReads(@TempDir Path tmp) throws Exception {
+        DynamicSkill skill = new Workshop(tmp).make("page_fetch", "{\"url\": {\"type\": \"string\", \"required\": true}}");
+        var params = new LinkedHashMap<String, Object>();
+        params.put("url", "https://example.org");
+        params.put("headers_only", true);
+
+        assertEquals(List.of(), LocalExecutor.misfit(skill, params));
+        AgentObservation ran = delegated(tmp, skill, params);
+        assertTrue(ran.success() && ran.output().contains("fetched headers of https://example.org"), ran.output());
+        assertEquals(List.of("'body' is not one of its parameters"),
+                LocalExecutor.misfit(skill, Map.of("url", "https://example.org", "body", "Hello")));
+
+        // Asked of the code as it is now, not as it was when the skill was loaded; and code that
+        // cannot be read reads nothing.
+        Files.writeString(skill.skillDir().resolve("skill.py"),
+                "def run(params):\n    return {'output': params['url'], 'success': True}\n");
+        assertEquals(List.of("'headers_only' is not one of its parameters"), LocalExecutor.misfit(skill, params));
+        Files.delete(skill.skillDir().resolve("skill.py"));
+        assertEquals(List.of("'headers_only' is not one of its parameters"), LocalExecutor.misfit(skill, params));
+        // Mutations: misfit does not ask the code -> headers_only is refused, and the cloud has
+        // no way to pass it; a skill is taken to read every name -> 'body' is let through, and
+        // ignored; the code is read once, when the skill is loaded -> headers_only is still let
+        // through after the code that read it is gone.
+    }
+
+    /** Whether a skill whose code holds this line reads 'x' from the parameters it is handed. */
+    private static boolean readsX(DynamicSkill skill, String line) throws Exception {
+        Files.writeString(skill.skillDir().resolve("skill.py"), "def run(params):\n    " + line + "\n    return {}\n");
+        return skill.readsParameter("x");
+    }
+
+    @Test
+    @DisplayName("code reads a name where it takes it from params by that name -- params.get, params[...], params.pop, params.setdefault, 'name' in params, in either quote -- and not where it names another parameter, another variable or a value")
+    void howCodeReadsAName(@TempDir Path tmp) throws Exception {
+        DynamicSkill skill = onDisk(tmp, "page_fetch", "parameters:", "  url: string");
+        for (String reads : List.of(
+                "v = params.get('x', 30)", "v = params.get(\"x\")", "v = params['x']", "v = params[\"x\"]",
+                "v = params.pop('x', None)", "v = params.pop(\"x\")", "params.setdefault('x', 5)",
+                "params.setdefault(\"x\", 5)", "if 'x' in params: pass", "if \"x\" not in params: pass",
+                "v = params . get ( 'x' )", "v = params [ \"x\" ]", "v = self.params.get('x')",
+                "v = params.get('y') or params.get('x')")) {
+            assertTrue(readsX(skill, reads), reads);
+        }
+        for (String readsNone : List.of(
+                "v = params.get('x_list')", "v = params.get('max')", "v = params['xy']", "v = options.get('x')",
+                "v = my_params['x']", "if params.get('mode') == 'x': pass", "if 'x' in params_seen: pass",
+                "v = params.get(x)", "v = params.getlist('x')", "v = params.get('y', 'x')", "v = 'x'")) {
+            assertFalse(readsX(skill, readsNone), readsNone);
+        }
+        // A name is its text, whatever a pattern would make of it.
+        Files.writeString(skill.skillDir().resolve("skill.py"),
+                "def run(params):\n    return params.get('aXb') or params.get('c.d')\n");
+        assertTrue(skill.readsParameter("aXb"));
+        assertTrue(skill.readsParameter("c.d"));
+        assertFalse(skill.readsParameter("a.b"), "as a pattern, a.b is aXb");
+        assertFalse(skill.readsParameter("a(b"), "and a(b is none at all");
+        assertFalse(skill.readsParameter("a"));
+        // Mutations: a form left out of the pattern -- get, the subscript, pop, setdefault, in,
+        // not in -> the lines written that way read nothing; only one quote counts -> half of
+        // them; the quote need not close -> 'x_list' and 'xy' read x; any variable's get counts
+        // -> options and my_params do; params need not begin its word -> my_params does; nor
+        // end it -> 'x' in params_seen does; the name is a pattern -> a.b is read where the code
+        // reads aXb, and asking for a(b throws.
+    }
+
+    @Test
+    @DisplayName("a parameter declared required is required though the code has a default for it: the call that leaves it out is refused, and nothing runs")
+    void aRequiredParameterTheCodeDefaults(@TempDir Path tmp) throws Exception {
+        DynamicSkill skill = new Workshop(tmp).make("page_fetch", "{\"url\": {\"type\": \"string\", \"required\": true}, "
+                + "\"method\": {\"type\": \"string\", \"required\": true}}");
+
+        AgentObservation refused = delegated(tmp, skill, Map.of("url", "https://example.org"));
+
+        assertFalse(refused.success(), refused.output());
+        assertTrue(refused.output().contains("- call 1 (page_fetch): 'method' is required and was left out."),
+                refused.output());
+        assertFalse(refused.output().contains("fetched"), refused.output());
+        // Mutation: a required name the code reads may be left out -> the call runs, by GET.
     }
 
     // ───────────────────────── a declaration that could not be read in full ─────────────────────────

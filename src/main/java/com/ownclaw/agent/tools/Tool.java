@@ -40,6 +40,14 @@ public interface Tool {
     default boolean declaredInFull() { return true; }
 
     /**
+     * Whether the tool's own code reads a parameter of this name, declared or not: a skill reads
+     * an alias, or an optional setting, that its declaration never mentions. A call that writes
+     * such a name is not refused for it ({@code LocalExecutor#misfit}) -- the name is not one the
+     * tool would ignore. False where that is not known, as for a tool whose code cannot be read.
+     */
+    default boolean readsParameter(String name) { return false; }
+
+    /**
      * Execute the tool with the given parameters.
      *
      * @param params   the parameters provided by the agent
