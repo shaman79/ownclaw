@@ -7244,17 +7244,59 @@
     var pasteSecond = '', pastedInSecond = 0;
 
     /**
-     * The files on a clipboard. One the browser named itself -- "image.png", for every image it
-     * holds -- is named for when it was pasted, so two screenshots are two names; a file copied
-     * in a file manager keeps its own. A copied folder is left out: reading it fails the whole
-     * upload. It has no type, but neither has a README or a Makefile, so the file system entry
-     * says which is which where there is one, and the type only where there is not.
+     * Whether a file system entry says nothing in this browser: whether it is Firefox, which gives
+     * one to a file no file system holds. Chromium gives none to image data on the clipboard, so
+     * there an entry means a file manager's copy. Firefox wraps every file of a paste in one, the
+     * clipboard's image data too -- as "/image.png" where it speaks English -- and read as a file
+     * manager's, that made every screenshot pasted in Firefox a private file, which the cloud model
+     * was never shown (Firefox 158, 2026-11-25). Asked once, of a file this page makes in memory.
+     * <p>
+     * Of Firefox alone. WebKit gives such a file an entry too, but no paste was run in it, and it
+     * dates a file of a file system now when it cannot read the file's date (WebKit 26.6): there
+     * an entry is believed, as it was.
+     */
+    var entryForAnyFile = (function() {
+        try {
+            // Gecko's own: a number in Firefox, undefined in Chromium and in WebKit.
+            if (typeof window.mozInnerScreenX !== 'number') return false;
+            var probe = new DataTransfer();
+            probe.items.add(new File(['x'], 'probe.png', { type: 'image/png' }));
+            return typeof probe.items[0].webkitGetAsEntry === 'function' && !!probe.items[0].webkitGetAsEntry();
+        } catch (err) {
+            return false;   // cannot be asked: an entry is believed, as it was
+        }
+    })();
+
+    /**
+     * Whether the paste itself made {@code f}. Image data on the clipboard becomes a file when it is
+     * pasted and is dated then -- in Firefox the paste's own millisecond, in every paste measured --
+     * where a file of a file system keeps the date it was last written, which Firefox reports to
+     * the millisecond. So in Firefox an image file written to a disk within this second, copied in
+     * a file manager and pasted, is taken for the clipboard's image data: what is left of not
+     * being told.
+     */
+    function madeByThePaste(f) {
+        return Math.abs(Date.now() - f.lastModified) < 1000;
+    }
+
+    /**
+     * The files on a clipboard. One the browser named itself -- "image.png" or its word for it in
+     * another language, for every image it holds -- is named for when it was pasted, so two
+     * screenshots are two names; a file copied in a file manager keeps its own. A copied folder is
+     * left out: reading it fails the whole upload. It has no type, but neither has a README or a
+     * Makefile, so the file system entry says which is which where there is one, and the type only
+     * where there is not.
      */
     function pastedFiles(data) {
         if (!data) return [];
         var found = [];
-        var onDisk = [];   // whether each has a file system entry: a file manager's copy has one
+        var onDisk = [];   // whether a file system holds each: a file manager's copy, not image data
+        var madeNow = [];  // whether the paste itself made each, where only its date says so
         var items = data.items || [];
+        // A clipboard of image data lists "Files" alone in Firefox (measured). One that holds a file
+        // of a file system is expected to list this type beside it -- not run here: a headless
+        // clipboard takes no such file -- and where it is listed, a file is a file.
+        var holdsDiskFile = Array.prototype.indexOf.call(data.types || [], 'application/x-moz-file') >= 0;
         for (var i = 0; i < items.length; i++) {
             if (items[i].kind !== 'file') continue;
             // A browser that cannot say whether a file system holds a file: it may be a file manager's.
@@ -7262,14 +7304,18 @@
             var entry = canTell ? items[i].webkitGetAsEntry() : null;
             if (entry ? entry.isDirectory : !items[i].type) continue;
             var f = items[i].getAsFile();
+            if (!f) continue;
+            // An entry is a file system's where the browser gives one to its files only; where it
+            // gives one to every file, an image the paste itself made is the clipboard's image data.
+            var made = !!entry && entryForAnyFile && !holdsDiskFile && /^image\//.test(f.type) && madeByThePaste(f);
             // Of no known origin: a file, as one from a file manager is -- never a pasted picture.
-            if (f) { found.push(f); onDisk.push(!canTell || !!entry); }
+            found.push(f); onDisk.push(!canTell || (!!entry && !made)); madeNow.push(made);
         }
         // A browser that lists the clipboard's files but not its items.
         if (!found.length && data.files) {
             for (var j = 0; j < data.files.length; j++) {
                 // Of no known origin: a file, as one from a file manager is -- never a pasted picture.
-                if (data.files[j].type) { found.push(data.files[j]); onDisk.push(true); }
+                if (data.files[j].type) { found.push(data.files[j]); onDisk.push(true); madeNow.push(false); }
             }
         }
         // The time of day: short enough to show whole in a chip, and the message has its date.
@@ -7278,7 +7324,10 @@
         var stamp = two(d.getHours()) + two(d.getMinutes()) + two(d.getSeconds());
         if (stamp !== pasteSecond) { pasteSecond = stamp; pastedInSecond = 0; }
         return found.map(function(f, k) {
-            if (f.name && !/^image\.\w+$/i.test(f.name)) return f;
+            // A name of its own is a file manager's file -- but not where the paste made the file:
+            // Firefox names the clipboard's image data in its own language ("image.png" in English,
+            // "obrazek.png" in Czech, "grafik.png" in German), and that is the browser's name too.
+            if (f.name && !/^image\.\w+$/i.test(f.name) && !madeNow[k]) return f;
             var ext = (f.type.split('/')[1] || '').replace(/\+.*$/, '').replace('jpeg', 'jpg').replace(/[^A-Za-z0-9]/g, '');
             pastedInSecond++;
             var name = 'pasted-' + (/^image\//.test(f.type) ? 'image-' : 'file-') + stamp
