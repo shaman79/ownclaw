@@ -200,8 +200,14 @@ class ChatPastePageTest {
     @DisplayName("an upload OwnClaw does not answer -- a restart's 502, 503, 504, or no answer at all -- is sent again for a while; a refusal is not")
     void anUploadDuringARestartIsSentAgain() {
         String u = between("function uploadFiles(files, pasted) {", "function createFileChip(");
-        assertTrue(u.contains("postUpload(formData, chips, Date.now(), 1) .then(function(data) {"), u);
-        String post = between("function postUpload(formData, chips, startedAt, attempt) {", "function createFileChip(");
+        assertTrue(u.contains("postUpload(formData, chips, Date.now(), 1, authToken) .then(function(data) {"), u);
+        String post = between("function postUpload(formData, chips, startedAt, attempt, token) {", "function createFileChip(");
+        assertTrue(post.contains("headers: { 'Authorization': 'Bearer ' + token },"), "as whoever made the first try: " + post);
+        assertEquals(2, post.split("if \\(authToken !== token\\) throw new Error\\('you signed out while it was being sent'\\);", -1).length - 1,
+                "signed out meanwhile, before the wait and after it: " + post);
+        assertTrue(page.contains("fileChips.innerHTML = ''; pendingFiles = []; setConnState(false, 'Offline');"),
+                "the box's files go with the account");
+        assertTrue(page.contains("logoutBtn.addEventListener('click', function() { logout(); });"), "the click is no reason");
         assertTrue(post.contains("if (notAnswering(r.status)) return again('HTTP ' + r.status);"), post);
         assertTrue(post.contains("}, function(err) { return again(err && err.message ? err.message : 'no answer'); });"), post);
         assertTrue(post.contains("if (!chips.some(function(c) { return c.isConnected; })) return Promise.resolve({ files: [] });"),
@@ -213,7 +219,8 @@ class ChatPastePageTest {
         assertTrue(page.contains("if (!picked && fileChips.querySelector('.file-chip.uploading')) {"),
                 "the message waits for chips still uploading, retried ones too");
         // Mutation: retry every status -> a refused file (413, 400) is sent for 90 seconds; drop the
-        // chip check -> a removed paste is uploaded anyway.
+        // chip check -> a removed paste is uploaded anyway; read authToken on each try -> a file
+        // retried across a sign-out lands in the next account (review, 2026-11-26).
     }
 
     @Test

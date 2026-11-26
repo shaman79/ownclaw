@@ -6156,6 +6156,9 @@
         searchResults.innerHTML = '';
         searchResults.classList.remove('visible');
         searchInput.value = '';
+        // The files waiting in the box: not left for whoever signs in next in this tab.
+        fileChips.innerHTML = '';
+        pendingFiles = [];
         setConnState(false, 'Offline');
         hideConnBanner();
         resetActivity();
@@ -6172,7 +6175,7 @@
     authSubmit.addEventListener('click', doAuth);
     authPassword.addEventListener('keydown', function(e) { if (e.key === 'Enter') doAuth(); });
     authUsername.addEventListener('keydown', function(e) { if (e.key === 'Enter') authPassword.focus(); });
-    logoutBtn.addEventListener('click', logout);
+    logoutBtn.addEventListener('click', function() { logout(); });
 
     //  Connection state 
     function setConnState(online, label) {
@@ -7349,7 +7352,7 @@
             chips.push(chip);
         }
         if (!chips.length) return;
-        postUpload(formData, chips, Date.now(), 1)
+        postUpload(formData, chips, Date.now(), 1, authToken)
         .then(function(data) {
             if (data.error) {
                 chips.forEach(function(c) { c.remove(); });
@@ -7394,26 +7397,33 @@
     /**
      * The upload sent, and sent again while OwnClaw does not answer -- the proxy answers 502, 503
      * or 504 in its place, or nothing answers at all -- for {@link UPLOAD_RETRY_MS}, a little
-     * longer between tries each time; its chips keep uploading meanwhile, and say why, and the
-     * message waits for them (send). Stopped when every chip is removed. Any other answer is the
-     * answer: a refusal is not tried again.
+     * longer between tries each time; its chips keep uploading meanwhile, and say why, and a
+     * message is not sent until they are done (send). Stopped when every chip is removed. Any other answer is the
+     * answer: a refusal is not tried again. Each try is made as whoever made the first
+     * ({@code token}): signed out meanwhile, or someone else signed in in this tab, it stops --
+     * the file is not theirs to keep.
      */
-    function postUpload(formData, chips, startedAt, attempt) {
+    function postUpload(formData, chips, startedAt, attempt, token) {
         function again(why) {
             if (!chips.some(function(c) { return c.isConnected; })) return Promise.resolve({ files: [] });
+            if (authToken !== token) throw new Error('you signed out while it was being sent');
             if (Date.now() - startedAt >= UPLOAD_RETRY_MS) {
                 throw new Error('OwnClaw did not answer for ' + Math.round(UPLOAD_RETRY_MS / 1000) + ' seconds (' + why
                         + ') -- paste or attach the file again');
             }
             chips.forEach(function(c) {
-                c.title = 'OwnClaw is not answering (' + why + ') -- it is likely restarting onto an update. Trying again...';
+                c.title = 'OwnClaw is not answering (' + why + ') — it may be restarting onto an update, or the network '
+                    + 'dropped. Trying again…';
             });
             return new Promise(function(resolve) { setTimeout(resolve, Math.min(1000 * attempt, 5000)); })
-                .then(function() { return postUpload(formData, chips, startedAt, attempt + 1); });
+                .then(function() {
+                    if (authToken !== token) throw new Error('you signed out while it was being sent');
+                    return postUpload(formData, chips, startedAt, attempt + 1, token);
+                });
         }
         return fetch('/api/files/upload', {
             method: 'POST',
-            headers: { 'Authorization': 'Bearer ' + authToken },
+            headers: { 'Authorization': 'Bearer ' + token },
             body: formData
         }).then(function(r) {
             if (notAnswering(r.status)) return again('HTTP ' + r.status);
