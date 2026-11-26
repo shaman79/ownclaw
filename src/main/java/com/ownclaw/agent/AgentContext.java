@@ -1533,7 +1533,12 @@ public class AgentContext {
                     // An error the cloud was shown, as it was shown: released as a PUBLIC result's
                     // bytes are -- the hit's own too, when a second failure says what the first one
                     // did.
-                    if (a.shownError() != null && holds(a.shownError(), stretch)) return true;
+                    // What stands at its ends where it is quoted -- "[ERROR] ", a "[" on the next line --
+                    // is punctuation, which holds nothing: the rest must be the error's, whole.
+                    if (a.shownError() != null) {
+                        String core = core(stretch);
+                        if (!core.isEmpty() && holds(a.shownError(), core)) return true;
+                    }
                     if (a.n() == hitHandle) break;
                     if (!a.isPrivate() && holds(a.output(), stretch)) return true;
                 }
@@ -1559,6 +1564,14 @@ public class AgentContext {
                 }
                 return false;
             }
+        }
+
+        /** {@code stretch} without what is no letter and no digit at its ends. */
+        private static String core(String stretch) {
+            int a = 0, b = stretch.length();
+            while (a < b && !Character.isLetterOrDigit(stretch.charAt(a))) a++;
+            while (b > a && !Character.isLetterOrDigit(stretch.charAt(b - 1))) b--;
+            return stretch.substring(a, b);
         }
 
         /** Whether the source of skill {@code tool} holds {@code stretch}, normalised. */

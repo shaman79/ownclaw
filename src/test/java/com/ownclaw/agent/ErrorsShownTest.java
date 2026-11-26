@@ -155,6 +155,12 @@ class ErrorsShownTest {
                 new Artifact.Decision(Label.PRIVATE, List.of(Artifact.quotes(failed.n())), true));
         assertNull(ctx.firstLeakIn(failed.describe()), failed.describe());
         assertNull(ctx.firstLeakIn("Step 2:\n" + failed.describe() + "\nStep 3: the local model answered."));
+        for (String quoting : List.of("[ERROR] " + ERROR + " That is all.", ERROR + "\n[Step 2] I stopped.", "(" + ERROR + ")")) {
+            var other = withFile("Položka;Cena\nObědové menu;155 Kč\n");
+            var f = record(other, "ocr_image_to_text", "ERROR: " + ERROR, other.decide(List.of(), List.of(), false, "ERROR: " + ERROR, ERROR));
+            record(other, "local_answer", quoting, new Artifact.Decision(Label.PRIVATE, List.of(Artifact.quotes(f.n())), true));
+            assertNull(other.firstLeakIn("Step 2:\n" + f.describe() + "\nStep 3."), quoting);
+        }
         // Mutation: put the error inline after a colon, and excuse only the stretch as found -> a hit
         // on ": tesseract is not installed or ", and every later request is refused.
     }
