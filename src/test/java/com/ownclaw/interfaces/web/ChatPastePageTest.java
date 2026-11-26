@@ -200,8 +200,12 @@ class ChatPastePageTest {
     @DisplayName("an upload OwnClaw does not answer -- a restart's 502, 503, 504, or no answer at all -- is sent again for a while; a refusal is not")
     void anUploadDuringARestartIsSentAgain() {
         String u = between("function uploadFiles(files, pasted) {", "function createFileChip(");
-        assertTrue(u.contains("postUpload(formData, chips, Date.now(), 1, authToken) .then(function(data) {"), u);
+        assertTrue(u.contains("var token = authToken; postUpload(formData, chips, Date.now(), 1, token) .then(function(data) {"), u);
+        assertTrue(u.contains("method: 'DELETE', headers: { 'Authorization': 'Bearer ' + token }"),
+                "a file whose chip is gone is deleted as whoever sent it: " + u);
         String post = between("function postUpload(formData, chips, startedAt, attempt, token) {", "function createFileChip(");
+        assertTrue(post.contains("if (!chips.some(function(c) { return c.isConnected; })) return { files: [] }; "
+                + "if (authToken !== token) throw new Error("), "after the wait the chips first, silently: " + post);
         assertTrue(post.contains("headers: { 'Authorization': 'Bearer ' + token },"), "as whoever made the first try: " + post);
         assertEquals(2, post.split("if \\(authToken !== token\\) throw new Error\\('you signed out while it was being sent'\\);", -1).length - 1,
                 "signed out meanwhile, before the wait and after it: " + post);
