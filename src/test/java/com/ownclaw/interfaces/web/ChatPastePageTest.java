@@ -261,8 +261,8 @@ class ChatPastePageTest {
     void namesInNoticesAreLiteral() {
         String u = between("function uploadFiles(files, pasted) {", "function createFileChip(");
         assertTrue(u.contains("addMsg('system', mdLiteral(files[i].name) + ' is empty, so it was not attached.');"), u);
-        assertTrue(u.contains("addMsg('system', 'Upload failed: ' + mdLiteral(data.error));"), u);
-        assertTrue(u.contains("addMsg('system', 'Upload failed: ' + mdLiteral(err.message));"), u);
+        assertTrue(u.contains("if (shown) addMsg('system', 'Upload failed: ' + mdLiteral(data.error));"), u);
+        assertTrue(u.contains("if (shown) addMsg('system', 'Upload failed: ' + mdLiteral(err.message));"), u);
         assertTrue(page.contains("return String(text).replace(/[\\\\`*_{}\\[\\]()#+\\-.!<>|~&]/g, '\\\\$&');"),
                 "every character markdown or HTML could read, escaped");
     }

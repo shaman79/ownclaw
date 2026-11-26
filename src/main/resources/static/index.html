@@ -7357,8 +7357,10 @@
         postUpload(formData, chips, Date.now(), 1, token)
         .then(function(data) {
             if (data.error) {
+                // Signed out meanwhile: sign-out took the chips, and the next account is told nothing.
+                var shown = chips.some(function(c) { return c.isConnected; });
                 chips.forEach(function(c) { c.remove(); });
-                addMsg('system', 'Upload failed: ' + mdLiteral(data.error));
+                if (shown) addMsg('system', 'Upload failed: ' + mdLiteral(data.error));
                 return;
             }
             var uploaded = data.files || [];
@@ -7379,8 +7381,9 @@
             }
         })
         .catch(function(err) {
+            var shown = chips.some(function(c) { return c.isConnected; });
             chips.forEach(function(c) { c.remove(); });
-            addMsg('system', 'Upload failed: ' + mdLiteral(err.message));
+            if (shown) addMsg('system', 'Upload failed: ' + mdLiteral(err.message));
         });
     }
 
