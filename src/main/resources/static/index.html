@@ -7696,7 +7696,10 @@
         } else if (!cloudSeesImages) {
             line = '☁️ not seen: the cloud model is sent no images';
             full = 'OwnClaw sends images to Anthropic\'s models only, and this chat\'s cloud model is sent none; the '
-                    + 'local model cannot see images either. Skills are given it as a file.';
+                    + 'local model cannot see images either. '
+                    + (chip.dataset.carries ? 'Its file data — ' + chip.dataset.carries + ' — is given to the cloud model '
+                        + 'as text, through the privacy filter. ' : '')
+                    + 'Skills are given it as a file.';
         } else {
             line = '☁️ the cloud model will see it';
             full = 'The cloud model is shown this picture as it is: the privacy filter reads text, not pictures. '

@@ -509,14 +509,6 @@ public class FileStorageService implements CloudImages {
     }
 
     /**
-     * Read a file's content as text, whole. Returns null if there is no such file or it cannot
-     * be read as UTF-8 text.
-     * <p>
-     * A file over 100 KB used to come back as null, so its text was never indexed for the privacy
-     * canary and nothing of it could be recognised on its way out. The upload limit is the only
-     * bound on its size.
-     */
-    /**
      * The file data of the image stored as {@code fileId}, whose file carries {@code beside} beside
      * its picture ({@link PastedImage#metadata}): its EXIF, XMP, text, comments, in words
      * ({@link ImageFileData}). The owner's decision of 2026-11-26: an image he lets the cloud model
@@ -534,6 +526,14 @@ public class FileStorageService implements CloudImages {
         }
     }
 
+    /**
+     * Read a file's content as text, whole. Returns null if there is no such file or it cannot
+     * be read as UTF-8 text.
+     * <p>
+     * A file over 100 KB used to come back as null, so its text was never indexed for the privacy
+     * canary and nothing of it could be recognised on its way out. The upload limit is the only
+     * bound on its size.
+     */
     public String readAsText(String fileId) {
         Path path = getFilePath(fileId);
         if (path == null || !Files.exists(path)) return null;

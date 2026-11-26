@@ -213,9 +213,99 @@ class ImageFileDataTest {
         byte[] png = TestImages.withChunk(TestImages.png(8, 8), "zTXt", TestImages.concat(latin1("Bomb\0\0"), deflate(zeros)));
         png = TestImages.withChunk(png, "tEXt", latin1("Software\0ExampleShot"));
         String data = ImageFileData.of(png, "text", 1 << 20);
-        assertTrue(data.contains("Unpacked, the compressed text \"Bomb\" takes the file's text past 1,048,576 bytes"), data);
+        assertTrue(data.contains("Text \"Bomb\", compressed, unpacks to more than this says of one file -- 1,048,576 characters"), data);
         assertTrue(data.contains("Text \"Software\":\nExampleShot"), data);
         assertTrue(data.length() < 2000, "nothing of it is said: " + data.length());
+    }
+
+    @Test
+    @DisplayName("101 KB that unpack to 99 MB, at the real bound: said in a line, in well under a second, holding no more than the bound")
+    void theReviewersBomb() throws Exception {
+        byte[] ff = new byte[99 << 20];
+        java.util.Arrays.fill(ff, (byte) 0xFF);
+        byte[] packed = deflate(ff);
+        ff = null;
+        byte[] png = TestImages.withChunk(TestImages.png(8, 8), "iTXt", TestImages.concat(latin1("Bomb\0\1\0\0\0"), packed));
+        png = TestImages.withChunk(png, "zTXt", TestImages.concat(latin1("Again\0\0"), packed));
+        long started = System.nanoTime();
+        String data = ImageFileData.of(png, "text");
+        assertTrue(System.nanoTime() - started < 5_000_000_000L, "quick");
+        // "Again" is put in after its header, so before "Bomb": unpacked first, as far as the bound.
+        assertTrue(data.contains("Text \"Again\", compressed, unpacks to more than this says of one file"), data);
+        assertTrue(data.contains("Text \"Bomb\", compressed, " + ImageFileData.count(packed.length) + ": more than"),
+                "the second is not unpacked at all: " + data);
+        assertTrue(data.length() < 2000, data);
+    }
+
+    @Test
+    @DisplayName("IPTC written in Latin-1, as many tools write it with no character set named: read as text")
+    void latin1Iptc() throws Exception {
+        byte[] caption = "Café de la Paix, René".getBytes(StandardCharsets.ISO_8859_1);
+        byte[] iptc = TestImages.concat("Photoshop 3.0\0".getBytes(StandardCharsets.ISO_8859_1), resource(0x0404,
+                TestImages.concat(new byte[]{0x1C, 2, 120, 0, (byte) caption.length}, caption, new byte[]{0x1C, 2, 0, 0, 2, 0, 4})));
+        String data = ImageFileData.of(TestImages.withSegment(jpeg(), 0xED, iptc), "IPTC data");
+        assertTrue(data.contains("Caption/Abstract: Café de la Paix, René"), data);
+        assertTrue(data.contains("Record Version: 00 04"), "binary stays binary: " + data);
+    }
+
+    @Test
+    @DisplayName("EXIF that GIMP and ImageMagick write into a PNG as hex text ('Raw profile type exif'): read as EXIF, the place with it")
+    void rawProfileExif() throws Exception {
+        byte[] exif = TestImages.phoneExif();
+        var hex = new StringBuilder("\nexif\n").append(String.format("%8d", exif.length)).append('\n');
+        for (int i = 0; i < exif.length; i++) {
+            hex.append(String.format("%02x", exif[i] & 0xFF));
+            if (i % 36 == 35) hex.append('\n');
+        }
+        byte[] png = TestImages.withChunk(TestImages.png(16, 16), "zTXt",
+                TestImages.concat(latin1("Raw profile type exif\0\0"), deflate(latin1(hex.toString()))));
+        String data = ImageFileData.of(png, "text");
+        assertTrue(data.contains("Place where it was taken (GPS): 51.477389 N, 0.000389 W"), data);
+        assertFalse(data.contains("45786966"), "no hex: " + data);
+    }
+
+    @Test
+    @DisplayName("the same part ten thousand times: said once, with how many more; a 16 MB EXIF directory of 65,535 entries read in seconds")
+    void repeatsAndSize() throws Exception {
+        var many = new ByteArrayOutputStream();
+        byte[] picture = jpeg();
+        many.write(picture, 0, 2);
+        for (int i = 0; i < 10_000; i++) TestImages.segment(many, 0xE3, new byte[0]);
+        many.write(picture, 2, picture.length - 2);
+        String data = ImageFileData.of(many.toByteArray(), "data of another program");
+        assertTrue(data.contains("Data of another program (APP3), 0 bytes of binary data.\n(The same again, 9999 more times.)"), data);
+        assertTrue(data.length() < 500, data);
+
+        // One directory of 65,535 entries, the first's value at the end, each other's after the last's.
+        int entries = 65_535, each = 200;
+        int table = 8 + 2 + 12 * entries + 4;
+        var tiff = java.nio.ByteBuffer.allocate(table + each * entries).order(java.nio.ByteOrder.LITTLE_ENDIAN);
+        tiff.put(new byte[]{'I', 'I', 42, 0}).putInt(8).putShort((short) entries);
+        for (int i = 0; i < entries; i++) {
+            int at = i == 0 ? table + each * (entries - 1) : table + each * (i - 1);
+            tiff.putShort((short) 0x010E).putShort((short) 2).putInt(each).putInt(at);
+        }
+        byte[] png = TestImages.withChunk(TestImages.png(8, 8), "eXIf", tiff.array());
+        long started = System.nanoTime();
+        data = ImageFileData.of(png, "EXIF data");
+        assertTrue(System.nanoTime() - started < 5_000_000_000L, "in seconds, not minutes: " + (System.nanoTime() - started) / 1_000_000 + " ms");
+        assertTrue(data.contains("(The same again, 65534 more times.)"), data.substring(0, Math.min(500, data.length())));
+    }
+
+    @Test
+    @DisplayName("a phone's video after the picture is binary data, however long, and never decoded; past the bound, what is left is said to be there")
+    void videoAndTheBound() throws Exception {
+        byte[] video = new byte[3 << 20];
+        new Random(7).nextBytes(video);
+        System.arraycopy(latin1("\0\0\0\u0018ftypmp42"), 0, video, 0, 12);
+        String data = ImageFileData.of(TestImages.concat(jpeg(), video), "bytes after the picture's end");
+        assertTrue(data.contains("After the picture's end, 3,145,728 bytes of binary data."), data);
+
+        byte[] photo = jpeg();
+        for (int i = 0; i < 100; i++) photo = TestImages.withSegment(photo, 0xFE, latin1("comment " + i + " " + "x".repeat(90)));
+        data = ImageFileData.of(photo, "a comment", 4096);
+        assertTrue(data.length() < 4096 + 600, data.length() + ": " + data);
+        assertTrue(data.contains("more than this says of one file -- 4,096 characters in all"), data);
     }
 
     @Test

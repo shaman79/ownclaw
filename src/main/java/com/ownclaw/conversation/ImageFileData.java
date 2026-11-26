@@ -23,21 +23,25 @@ import java.util.TreeMap;
  * Read from the file's own structure, as {@link CloudImageCopy} walks it, but forgiving: a part
  * that cannot be read is said to be there, and the walk goes on where it can. Binary data -- a
  * maker's own notes, a thumbnail, a colour profile, a run of more than {@link #MANY_NUMBERS}
- * numbers -- is named and sized, not spelled out byte by
- * byte: no model reads a picture or a camera's notes from their bytes, and a skill can read the
- * file. Compressed text is unpacked up to what an upload may be in all ({@link #UNPACK_LIMIT}); a
- * file whose text unpacks to more was made to, and is said to.
+ * numbers -- is named and sized, not spelled out byte by byte: no model reads a picture or a
+ * camera's notes from their bytes, and a skill can read the file. The same line many times over is
+ * said once, with how many more times.
+ * <p>
+ * What one file's data is said in is at most {@link #MOST_TEXT} characters, and its compressed
+ * parts are unpacked to at most as many bytes in all: more than any camera or editor writes -- a
+ * phone's photo carries a few kilobytes -- and a bound on the server's memory, not on content: a
+ * PNG of 101 KB that unpacked to 99 MB of text took a gigabyte to say. Past it, what is left is
+ * said to be there, and a skill can read the file. Each part's size is checked before it is decoded.
  */
 public final class ImageFileData {
 
     private ImageFileData() {}
 
-    /**
-     * The most a file's compressed parts are unpacked to, in all: 100 MB, what an upload may be
-     * (FileUploadController). Text that large could have been sent as it is; a few kilobytes that
-     * unpack past it were made to.
-     */
-    static final long UNPACK_LIMIT = 100L << 20;
+    /** The most characters one file's data is said in, and the most bytes its compressed parts are unpacked to. */
+    static final int MOST_TEXT = 16 << 20;
+
+    /** The most numbers of one EXIF entry said one by one; more are named and sized ({@link #value}). */
+    static final int MANY_NUMBERS = 64;
 
     /**
      * The file data of the image in {@code file}, or null when it holds nothing beside the picture.
@@ -47,25 +51,23 @@ public final class ImageFileData {
      *               hidden in a table, a setting of the wrong length
      */
     public static String of(byte[] file, String beside) {
-        return of(file, beside, UNPACK_LIMIT);
+        return of(file, beside, MOST_TEXT);
     }
 
-    static String of(byte[] file, String beside, long unpackLimit) {
-        var out = new Out(unpackLimit);
+    static String of(byte[] file, String beside, int most) {
+        var out = new Out(most);
         if (file != null) {
             try {
                 if (starts(file, 0, new byte[]{(byte) 0x89, 'P', 'N', 'G', '\r', '\n', 0x1A, '\n'})) png(file, out);
                 else if (file.length > 2 && (file[0] & 0xFF) == 0xFF && (file[1] & 0xFF) == 0xD8) jpeg(file, out);
-                else if (starts(file, 0, "GIF8".getBytes(StandardCharsets.ISO_8859_1))) gif(file, out);
+                else if (starts(file, 0, "GIF8")) gif(file, out);
             } catch (RuntimeException broken) {
                 out.section("The rest of the file's structure could not be read here; a skill can read the file.");
             }
         }
-        if (beside == null && out.isEmpty()) return null;
-        var sb = new StringBuilder();
-        if (beside != null) sb.append("Beside the picture, the file holds: ").append(beside).append(".\n");
-        sb.append(out.text());
-        return sb.toString().strip();
+        String said = out.text();
+        if (beside == null && said.isEmpty()) return null;
+        return ((beside == null ? "" : "Beside the picture, the file holds: " + beside + ".\n") + said).strip();
     }
 
     // ── PNG ──
@@ -89,22 +91,24 @@ public final class ImageFileData {
             switch (type) {
                 case "IEND" -> {
                     trailing(d, Math.min(d.length, end + 4), out);
-                    if (frames > 0) out.section("It is an animation of " + frames + " frames: the first is the picture.");
+                    if (frames > 1) out.section("It is an animation of " + frames + " frames: the first is the picture.");
                     return;
                 }
                 case "tEXt" -> {
                     int nul = indexOf(d, start, end, (byte) 0);
-                    if (nul < 0) out.section("A text with no keyword, " + count(length) + ": " + text(d, start, end));
-                    else out.block("Text \"" + latin1(d, start, nul) + "\":", latin1(d, nul + 1, end));
+                    String key = nul < 0 ? "" : latin1(d, start, nul);
+                    int from = nul < 0 ? start : nul + 1;
+                    String label = nul < 0 ? "A text with no keyword" : "Text \"" + printable(key) + "\"";
+                    if (out.roomFor(end - from, label)) said(key, label, text(d, from, end), out);
                 }
                 case "zTXt" -> {
                     int nul = indexOf(d, start, end, (byte) 0);
                     if (nul < 0 || nul + 2 > end) {
                         out.section("A compressed text with no keyword, " + count(length) + ", not read.");
                     } else {
-                        String key = latin1(d, start, nul);
-                        byte[] unpacked = out.unpack(d, nul + 2, end, "the compressed text \"" + key + "\"");
-                        if (unpacked != null) out.block("Text \"" + key + "\":", latin1(unpacked, 0, unpacked.length));
+                        String key = latin1(d, start, nul), label = "Text \"" + printable(key) + "\"";
+                        byte[] unpacked = out.unpack(d, nul + 2, end, label);
+                        if (unpacked != null) said(key, label, unpacked, out);
                     }
                 }
                 case "iTXt" -> itxt(d, start, end, out);
@@ -121,7 +125,7 @@ public final class ImageFileData {
                 case "iCCP" -> {
                     int nul = indexOf(d, start, end, (byte) 0);
                     String name = nul < 0 ? "" : latin1(d, start, nul);
-                    byte[] profile = nul < 0 || nul + 2 > end ? null : out.unpack(d, nul + 2, end, "its colour profile");
+                    byte[] profile = nul < 0 || nul + 2 > end ? null : out.unpack(d, nul + 2, end, "Its colour profile");
                     out.section(colourProfile(name, profile, length));
                 }
                 case "acTL" -> {
@@ -149,19 +153,72 @@ public final class ImageFileData {
         int lang = indexOf(d, nul + 3, end, (byte) 0);
         int translated = lang < 0 ? -1 : indexOf(d, lang + 1, end, (byte) 0);
         if (translated < 0) {
-            out.section("A text \"" + key + "\" whose structure is broken, " + count(end - start) + ", not read.");
+            out.section("A text \"" + printable(key) + "\" whose structure is broken, " + count(end - start) + ", not read.");
             return;
         }
-        String language = latin1(d, nul + 3, lang), translation = utf8(d, lang + 1, translated);
-        String label = "Text \"" + key + "\"" + (translation.isBlank() ? "" : " (\"" + translation + "\")")
-                + (language.isBlank() ? "" : ", in " + language) + ":";
-        if (key.equals("XML:com.adobe.xmp")) label = "XMP:";
+        String language = printable(latin1(d, nul + 3, lang)), translation = text(d, lang + 1, translated);
+        String label = key.equals("XML:com.adobe.xmp") ? "XMP" : "Text \"" + printable(key) + "\""
+                + (translation.isBlank() ? "" : " (\"" + translation + "\")") + (language.isBlank() ? "" : ", in " + language);
         if (compressed) {
-            byte[] unpacked = out.unpack(d, translated + 1, end, "the compressed text \"" + key + "\"");
-            if (unpacked != null) out.block(label, utf8(unpacked, 0, unpacked.length));
-        } else {
-            out.block(label, utf8(d, translated + 1, end));
+            byte[] unpacked = out.unpack(d, translated + 1, end, label);
+            if (unpacked != null) said(key, label, unpacked, out);
+        } else if (out.roomFor(end - translated - 1, label)) {
+            said(key, label, text(d, translated + 1, end), out);
         }
+    }
+
+    /** A PNG text's bytes, as text or as what they are. */
+    private static void said(String key, String label, byte[] bytes, Out out) {
+        String s = readable(bytes, 0, bytes.length);
+        if (s == null || s.isBlank()) out.section(label + ", " + count(bytes.length) + " of binary data, unpacked.");
+        else said(key, label, s, out);
+    }
+
+    /**
+     * A PNG text, said -- or, a profile exiv2 or ImageMagick wrote as text ("Raw profile type exif":
+     * its name, its length, its bytes in hex), read as the profile it is: GIMP writes EXIF so.
+     */
+    private static void said(String key, String label, String text, Out out) {
+        String type = key.startsWith("Raw profile type ") ? key.substring(17).strip().toLowerCase(Locale.ROOT) : null;
+        byte[] raw = type == null ? null : unhex(text);
+        if (raw == null) {
+            out.block(label + ":", text);
+            return;
+        }
+        int n = raw.length;
+        switch (type) {
+            case "exif" -> exif(raw, starts(raw, 0, "Exif\0\0") ? 6 : 0, n, "EXIF", out);
+            case "iptc", "8bim" -> {
+                if (starts(raw, 0, "Photoshop 3.0\0")) photoshop(raw, 14, n, out);
+                else if (starts(raw, 0, "8BIM")) photoshop(raw, 0, n, out);
+                else iptc(raw, 0, n, out);
+            }
+            case "xmp" -> out.block("XMP:", text(raw, 0, n));
+            case "icc", "icm" -> out.section(colourProfile("", raw, n));
+            default -> out.part("A profile \"" + printable(type) + "\"", raw, 0, n);
+        }
+    }
+
+    /** A raw profile's bytes: after its name and its length, hex digits across lines; null when it is not that. */
+    private static byte[] unhex(String text) {
+        String[] head = text.strip().split("\\s+", 3);
+        if (head.length < 3 || !head[1].matches("[0-9]{1,10}")) return null;
+        long length = Long.parseLong(head[1]);
+        var out = new ByteArrayOutputStream();
+        int high = -1;
+        for (int i = 0; i < head[2].length(); i++) {
+            char c = head[2].charAt(i);
+            if (Character.isWhitespace(c)) continue;
+            int v = Character.digit(c, 16);
+            if (v < 0) return null;
+            if (high < 0) {
+                high = v;
+            } else {
+                out.write(high << 4 | v);
+                high = -1;
+            }
+        }
+        return out.size() == length ? out.toByteArray() : null;
     }
 
     // ── JPEG ──
@@ -208,7 +265,9 @@ public final class ImageFileData {
             for (var parts : extended.values()) {
                 var all = new ByteArrayOutputStream();
                 parts.values().forEach(all::writeBytes);
-                out.block("XMP, continued (extended XMP):", utf8(all.toByteArray(), 0, all.size()));
+                if (out.roomFor(all.size(), "XMP, continued (extended XMP)")) {
+                    out.block("XMP, continued (extended XMP):", text(all.toByteArray(), 0, all.size()));
+                }
             }
         }
     }
@@ -237,7 +296,7 @@ public final class ImageFileData {
                 if (starts(d, start, "Exif\0\0")) {
                     exif(d, start + 6, end, "EXIF", out);
                 } else if (starts(d, start, "http://ns.adobe.com/xap/1.0/\0")) {
-                    out.block("XMP:", utf8(d, start + 29, end));
+                    if (out.roomFor(length, "XMP")) out.block("XMP:", text(d, start + 29, end));
                 } else if (starts(d, start, "http://ns.adobe.com/xmp/extension/\0") && length >= 35 + 40) {
                     String guid = latin1(d, start + 35, start + 67);
                     long offset = u32(d, start + 71, false);
@@ -264,7 +323,9 @@ public final class ImageFileData {
             case 0xEE -> {
                 if (!(starts(d, start, "Adobe") && length == 12)) out.part("Data of another program (APP14)", d, start, end);
             }
-            case 0xFE -> out.block("Comment:", text(d, start, end));
+            case 0xFE -> {
+                if (out.roomFor(length, "A comment")) out.block("Comment:", text(d, start, end));
+            }
             default -> out.part("Data of another program (APP" + (marker - 0xE0) + ")", d, start, end);
         }
     }
@@ -307,32 +368,46 @@ public final class ImageFileData {
                 p += 8;
                 int local = d[p++] & 0xFF;
                 if ((local & 0x80) != 0) p += 3 << ((local & 7) + 1);
-                p = subBlocks(d, p + 1, null);
+                p = subBlocks(d, p + 1, null, 0, new long[1]);
             } else if (b == 0x21) {
                 int label = d[p++] & 0xFF;
+                String id = null;
                 if (label == 0xFF) {
                     int idLength = d[p++] & 0xFF;
-                    String id = latin1(d, p, p + idLength);
+                    id = latin1(d, p, p + idLength);
                     p += idLength;
-                    int raw = p;
-                    var data = new ByteArrayOutputStream();
-                    p = subBlocks(d, p, data);
+                }
+                int raw = p;
+                // Kept to what can be said of it; its whole size counted.
+                var data = new ByteArrayOutputStream();
+                long[] size = {0};
+                p = subBlocks(d, p, data, out.room(), size);
+                byte[] bytes = data.toByteArray();
+                boolean whole = bytes.length == size[0];
+                if (id != null) {
                     if (id.equals("NETSCAPE2.0") || id.equals("ANIMEXTS1.0")) continue;
                     if (id.startsWith("XMP Data")) {
-                        out.block("XMP:", gifXmp(d, raw, p));
+                        if (out.roomFor(p - raw, "XMP")) out.block("XMP:", gifXmp(d, raw, p));
                     } else if (id.startsWith("ICCRGBG1")) {
-                        out.section(colourProfile("", data.toByteArray(), data.size()));
-                    } else {
-                        byte[] bytes = data.toByteArray();
+                        out.section(colourProfile("", whole ? bytes : null, size[0]));
+                    } else if (whole) {
                         out.part("Data of another program (\"" + printable(id) + "\")", bytes, 0, bytes.length);
+                    } else {
+                        out.roomFor(size[0], "Data of another program (\"" + printable(id) + "\")");
                     }
-                } else {
-                    var data = new ByteArrayOutputStream();
-                    p = subBlocks(d, p, data);
-                    byte[] bytes = data.toByteArray();
-                    if (label == 0xFE) out.block("Comment:", text(bytes, 0, bytes.length));
-                    else if (label == 0x01) out.block("Text drawn on the picture:", text(bytes, Math.min(12, bytes.length), bytes.length));
-                    else if (label != 0xF9) out.part(String.format(Locale.ROOT, "An extension 0x%02X", label), bytes, 0, bytes.length);
+                } else if (label == 0xFE) {
+                    if (whole && out.roomFor(size[0], "A comment")) out.block("Comment:", text(bytes, 0, bytes.length));
+                    else if (!whole) out.roomFor(size[0], "A comment");
+                } else if (label == 0x01) {
+                    if (whole && out.roomFor(size[0], "Text drawn on the picture")) {
+                        out.block("Text drawn on the picture:", text(bytes, Math.min(12, bytes.length), bytes.length));
+                    } else if (!whole) {
+                        out.roomFor(size[0], "Text drawn on the picture");
+                    }
+                } else if (label != 0xF9) {
+                    String what = String.format(Locale.ROOT, "An extension 0x%02X", label);
+                    if (whole) out.part(what, bytes, 0, bytes.length);
+                    else out.roomFor(size[0], what);
                 }
             } else {
                 out.section("The file's structure breaks off; the rest, " + count(d.length - p + 1) + ", was not read.");
@@ -342,13 +417,17 @@ public final class ImageFileData {
         if (frames > 1) out.section("It is an animation of " + frames + " frames: the first is the picture.");
     }
 
-    /** The sub-blocks from {@code p}, their data written to {@code data} when it is given: where they end. */
-    private static int subBlocks(byte[] d, int p, ByteArrayOutputStream data) {
+    /**
+     * The sub-blocks from {@code p}, their data -- to {@code keep} bytes -- written to {@code data}
+     * when it is given, and their whole size to {@code size[0]}: where they end.
+     */
+    private static int subBlocks(byte[] d, int p, ByteArrayOutputStream data, long keep, long[] size) {
         while (p < d.length) {
-            int size = d[p++] & 0xFF;
-            if (size == 0) return p;
-            int stop = Math.min(d.length, p + size);
-            if (data != null) data.write(d, p, stop - p);
+            int length = d[p++] & 0xFF;
+            if (length == 0) return p;
+            int stop = Math.min(d.length, p + length);
+            size[0] += stop - p;
+            if (data != null && data.size() < keep) data.write(d, p, (int) Math.min(stop - p, keep - data.size()));
             p = stop;
         }
         return p;
@@ -359,7 +438,7 @@ public final class ImageFileData {
      * after it -- so the text is the raw bytes to the packet's end.
      */
     private static String gifXmp(byte[] d, int from, int to) {
-        String raw = utf8(d, from, Math.max(from, to - 1));
+        String raw = text(d, from, Math.max(from, to - 1));
         int end = raw.indexOf("<?xpacket end=");
         if (end >= 0) {
             int close = raw.indexOf("?>", end);
@@ -388,12 +467,9 @@ public final class ImageFileData {
 
     private static final int EXIF_IFD = 0x8769, GPS_IFD = 0x8825, INTEROP_IFD = 0xA005;
 
-    /** The most numbers of one entry said one by one; more are named and sized ({@link #value}). */
-    static final int MANY_NUMBERS = 64;
-
     /** The TIFF structure EXIF is, from {@code start} to {@code end} of {@code d}. */
     private static void exif(byte[] d, int start, int end, String title, Out out) {
-        var lines = new ArrayList<String>();
+        var lines = new Lines(out.room() - title.length() - 2);
         try {
             boolean little;
             if (starts(d, start, "II")) little = true;
@@ -410,51 +486,40 @@ public final class ImageFileData {
             var gps = new Gps();
             long ifd0 = tiff.u32(4);
             long ifd1 = directory(tiff, ifd0, Directory.MAIN, lines, gps);
-            if (ifd1 > 0) {
-                var thumb = new ArrayList<String>();
+            if (ifd1 > 0 && !lines.full()) {
+                var thumb = new Lines(lines.room() - 20);
                 directory(tiff, ifd1, Directory.THUMBNAIL, thumb, gps);
                 if (!thumb.isEmpty()) {
                     lines.add("Of its thumbnail:");
-                    for (String t : thumb) lines.add("  " + t);
+                    for (String t : thumb.all()) lines.add("  " + t);
                 }
             }
             String position = gps.position();
-            if (position != null) lines.add(0, position);
+            if (position != null) lines.first(position);
         } catch (RuntimeException broken) {
             lines.add("(The rest of its EXIF data could not be read.)");
         }
-        if (!lines.isEmpty()) out.block(title + ":", String.join("\n", lines));
+        if (!lines.isEmpty()) out.block(title + ":", lines.joined());
     }
 
     /**
      * Where a TIFF structure lies in a file, and its byte order -- offsets are from its start -- and
      * which of its bytes a directory or a value has been read from: each is read once. A crafted
      * file whose directories all name the same bytes, or whose entries all name one long value,
-     * would otherwise be said thousands of times over from a few kilobytes.
+     * would otherwise be said thousands of times over from a few kilobytes. The ranges read are kept
+     * by where they start, so that each look is one lookup, whatever the file's size.
      */
     private static final class Tiff {
         private final byte[] d;
         private final int start, end;
         private final boolean little;
-        private final java.util.BitSet read = new java.util.BitSet();
+        private final TreeMap<Long, Long> read = new TreeMap<>();
 
         Tiff(byte[] d, int start, int end, boolean little) {
             this.d = d;
             this.start = start;
             this.end = end;
             this.little = little;
-        }
-
-        byte[] d() {
-            return d;
-        }
-
-        int start() {
-            return start;
-        }
-
-        boolean little() {
-            return little;
         }
 
         int length() {
@@ -464,10 +529,12 @@ public final class ImageFileData {
         /** Whether {@code size} bytes at {@code at} were read from by no other part; they are now. */
         boolean claim(long at, long size) {
             check(at, size);
-            int from = (int) at, to = (int) (at + size);
-            int next = read.nextSetBit(from);
-            if (next >= 0 && next < to) return false;
-            read.set(from, to);
+            long to = at + size;
+            var before = read.floorEntry(at);
+            if (before != null && before.getValue() > at) return false;
+            var after = read.ceilingEntry(at);
+            if (after != null && after.getKey() < to) return false;
+            read.put(at, to);
             return true;
         }
 
@@ -499,16 +566,20 @@ public final class ImageFileData {
             double lon = longitude[0] + longitude[1] / 60 + longitude[2] / 3600;
             if (!Double.isFinite(lat) || !Double.isFinite(lon)) return null;
             String s = String.format(Locale.ROOT, "Place where it was taken (GPS): %.6f %s, %.6f %s", lat,
-                    latitudeRef == null ? "N" : latitudeRef, lon, longitudeRef == null ? "E" : longitudeRef);
+                    hemisphere(latitudeRef), lon, hemisphere(longitudeRef));
             if (altitude != null && Double.isFinite(altitude)) {
                 s += String.format(Locale.ROOT, ", %.1f m %s sea level", altitude, below ? "below" : "above");
             }
             return s;
         }
+
+        private static String hemisphere(String ref) {
+            return ref == null || ref.isBlank() ? "(its hemisphere not given)" : ref;
+        }
     }
 
     /** The entries of the directory at {@code at}, said as lines; the offset of the next directory, or 0. */
-    private static long directory(Tiff t, long at, Directory kind, List<String> lines, Gps gps) {
+    private static long directory(Tiff t, long at, Directory kind, Lines lines, Gps gps) {
         if (at == 0) return 0;
         int entries = t.u16(at);
         long next = at + 2 + 12L * entries;
@@ -518,7 +589,7 @@ public final class ImageFileData {
             return 0;
         }
         Long thumbOffset = null, thumbLength = null;
-        for (int i = 0; i < entries; i++) {
+        for (int i = 0; i < entries && !lines.full(); i++) {
             long e = at + 2 + 12L * i;
             int tag = t.u16(e), type = t.u16(e + 2);
             long count = t.u32(e + 4);
@@ -563,8 +634,11 @@ public final class ImageFileData {
                 else thumbLength = v;
                 continue;
             }
-            String said = value(t, kind, tag, type, count, value, gps);
-            lines.add(name + ": " + said);
+            if (bytes > lines.room()) {
+                lines.add(name + ": " + count(bytes) + ", more than this says of one file, not read here");
+                continue;
+            }
+            lines.add(name + ": " + value(t, kind, tag, type, count, value, gps, lines.room()));
         }
         if (thumbOffset != null || thumbLength != null) {
             lines.add("Thumbnail: a JPEG picture" + (thumbLength == null ? "" : " of " + count(thumbLength)) + ", not shown to you");
@@ -573,8 +647,8 @@ public final class ImageFileData {
     }
 
     /** One entry's value, in words. */
-    private static String value(Tiff t, Directory kind, int tag, int type, long count, long at, Gps gps) {
-        int from = (int) (t.start() + at);
+    private static String value(Tiff t, Directory kind, int tag, int type, long count, long at, Gps gps, long room) {
+        int from = (int) (t.start + at);
         int size = switch (type) {
             case 3, 8 -> 2;
             case 4, 9, 11, 13 -> 4;
@@ -582,20 +656,21 @@ public final class ImageFileData {
             default -> 1;
         };
         int to = (int) (from + count * size);
-        byte[] d = t.d();
+        byte[] d = t.d;
+        boolean tiffTags = kind != Directory.GPS && kind != Directory.INTEROP;
         // Text in its own form first: the makers' and Windows' own.
         if (kind == Directory.EXIF && tag == 0x927C) return count(count) + " of the camera maker's own data (binary)";
-        if (kind != Directory.GPS && kind != Directory.INTEROP && tag >= 0x9C9B && tag <= 0x9C9F && (type == 1 || type == 7)) {
+        if (tiffTags && tag >= 0x9C9B && tag <= 0x9C9F && (type == 1 || type == 7)) {
             return trimmed(new String(d, from, to - from, StandardCharsets.UTF_16LE));
         }
-        if (kind != Directory.GPS && kind != Directory.INTEROP && tag == 0x02BC && (type == 1 || type == 7)) return utf8(d, from, to).strip();
-        if (kind != Directory.GPS && kind != Directory.INTEROP && tag == 0x83BB) {
-            var iptc = new Out(0);
+        if (tiffTags && tag == 0x02BC && (type == 1 || type == 7)) return text(d, from, to).strip();
+        if (tiffTags && tag == 0x83BB) {
+            var iptc = new Out((int) Math.min(Integer.MAX_VALUE, room));
             iptc(d, from, to, iptc);
             return "\n" + iptc.text().strip();
         }
         if (type == 7 && (kind == Directory.EXIF && tag == 0x9286 || kind == Directory.GPS && (tag == 27 || tag == 28))) {
-            return commented(d, from, to, t.little());
+            return commented(d, from, to, t.little);
         }
         if (type == 2) {
             String s = text(d, from, to);
@@ -606,7 +681,7 @@ public final class ImageFileData {
             return s;
         }
         if (type == 7 || type == 1 && count > 8) {
-            String s = textOrNull(d, from, to);
+            String s = readable(d, from, to);
             if (s != null && !s.isBlank()) return s;
             if (count <= 16) return hex(d, from, to);
             return count(count) + " of binary data";
@@ -623,12 +698,12 @@ public final class ImageFileData {
             switch (type) {
                 case 1 -> { n = d[p] & 0xFF; v = Long.toString((long) n); }
                 case 6 -> { n = d[p]; v = Long.toString((long) n); }
-                case 3 -> { n = u16(d, p, t.little()); v = Long.toString((long) n); }
-                case 8 -> { n = (short) u16(d, p, t.little()); v = Long.toString((long) n); }
-                case 4, 13 -> { n = u32(d, p, t.little()); v = Long.toString((long) n); }
-                case 9 -> { n = (int) u32(d, p, t.little()); v = Long.toString((long) n); }
+                case 3 -> { n = u16(d, p, t.little); v = Long.toString((long) n); }
+                case 8 -> { n = (short) u16(d, p, t.little); v = Long.toString((long) n); }
+                case 4, 13 -> { n = u32(d, p, t.little); v = Long.toString((long) n); }
+                case 9 -> { n = (int) u32(d, p, t.little); v = Long.toString((long) n); }
                 case 5, 10 -> {
-                    long num = u32(d, p, t.little()), den = u32(d, p + 4, t.little());
+                    long num = u32(d, p, t.little), den = u32(d, p + 4, t.little);
                     if (type == 10) {
                         num = (int) num;
                         den = (int) den;
@@ -636,10 +711,10 @@ public final class ImageFileData {
                     n = den == 0 ? Double.NaN : (double) num / den;
                     v = den == 1 ? Long.toString(num) : num + "/" + den;
                 }
-                case 11 -> { n = Float.intBitsToFloat((int) u32(d, p, t.little())); v = Double.toString(n); }
+                case 11 -> { n = Float.intBitsToFloat((int) u32(d, p, t.little)); v = Double.toString(n); }
                 default -> {
-                    long hi = u32(d, p, t.little()), lo = u32(d, p + 4, t.little());
-                    n = Double.longBitsToDouble(t.little() ? lo << 32 | hi : hi << 32 | lo);
+                    long hi = u32(d, p, t.little), lo = u32(d, p + 4, t.little);
+                    n = Double.longBitsToDouble(t.little ? lo << 32 | hi : hi << 32 | lo);
                     v = Double.toString(n);
                 }
             }
@@ -654,7 +729,7 @@ public final class ImageFileData {
             if (tag == 6 && numbers.length > 0) gps.altitude = numbers[0];
         }
         String words = count > MANY_NUMBERS ? count + " numbers, " + count(count * size) + " of binary data" : values.toString();
-        if ((kind == Directory.MAIN || kind == Directory.THUMBNAIL) && tag == 0x0112) words += " (the picture shown to you is already turned upright)";
+        if (kind == Directory.MAIN && tag == 0x0112) words += " (the picture shown to you is already turned upright)";
         return words;
     }
 
@@ -749,10 +824,10 @@ public final class ImageFileData {
             110, "Credit", 115, "Source", 116, "Copyright Notice", 118, "Contact", 120, "Caption/Abstract",
             122, "Writer/Editor", 130, "Image Type", 131, "Image Orientation", 135, "Language Identifier");
 
-    /** IPTC-IIM datasets: 0x1C, record, dataset, length, data. */
+    /** IPTC-IIM datasets: 0x1C, record, dataset, length, data -- text in UTF-8 when it is that, else Latin-1. */
     private static void iptc(byte[] d, int p, int end, Out out) {
-        var lines = new ArrayList<String>();
-        while (p + 5 <= end && d[p] == 0x1C) {
+        var lines = new Lines(out.room() - 10);
+        while (p + 5 <= end && d[p] == 0x1C && !lines.full()) {
             int record = d[p + 1] & 0xFF, dataset = d[p + 2] & 0xFF;
             long length = u16(d, p + 3, false);
             int start = p + 5;
@@ -771,12 +846,14 @@ public final class ImageFileData {
             String name = record == 2 ? IPTC_NAMES.get(dataset) : null;
             if (record == 1 && dataset == 90) name = "Coded Character Set";
             if (name == null) name = "Dataset " + record + ":" + dataset;
-            String said = textOrNull(d, start, stop);
-            lines.add(name + ": " + (said != null ? said : stop - start <= 16 ? hex(d, start, stop) : count(stop - start) + " of binary data"));
+            String said = length > lines.room() ? null : readable(d, start, stop);
+            lines.add(name + ": " + (said != null ? said : stop - start <= 16 ? hex(d, start, stop)
+                    : count(stop - start) + (length > lines.room() ? ", more than this says of one file, not read here"
+                    : " of binary data")));
             p = stop;
         }
         if (p < end && lines.isEmpty()) lines.add(count(end - p) + " in no form this reads");
-        if (!lines.isEmpty()) out.block("IPTC:", String.join("\n", lines));
+        if (!lines.isEmpty()) out.block("IPTC:", lines.joined());
     }
 
     // ── Colour profiles ──
@@ -785,7 +862,7 @@ public final class ImageFileData {
     private static String colourProfile(String name, byte[] profile, long size) {
         String described = profile == null ? null : iccDescription(profile);
         var sb = new StringBuilder("A colour profile");
-        if (!name.isBlank()) sb.append(" named \"").append(name).append('"');
+        if (!name.isBlank()) sb.append(" named \"").append(printable(name)).append('"');
         if (described != null && !described.isBlank() && !described.equals(name)) {
             sb.append(name.isBlank() ? " " : ", ").append("described as \"").append(described).append('"');
         }
@@ -824,65 +901,132 @@ public final class ImageFileData {
 
     // ── Words ──
 
-    /** What is said, part by part. */
+    /** Why a part is not said: what is said of one file would pass {@link #MOST_TEXT}. */
+    private static String tooMuch(long most) {
+        return "more than this says of one file -- " + String.format(Locale.ROOT, "%,d characters", most)
+                + " in all, more than any camera or editor writes "
+                + "-- so it was not read here; a skill can read the file";
+    }
+
+    /**
+     * What is said, part by part: at most its {@code most} characters, each part's size checked
+     * before it is decoded ({@link #roomFor}), and the same part said again only counted.
+     */
     private static final class Out {
         private final StringBuilder sb = new StringBuilder();
-        private final long unpackLimit;
-        private long unpacked;
+        private final int most;
+        private long unpackLeft;
+        private String last;
+        private int again;
+        private long notSaid;
 
-        Out(long unpackLimit) {
-            this.unpackLimit = unpackLimit;
+        Out(int most) {
+            this.most = most;
+            this.unpackLeft = most;
         }
 
-        boolean isEmpty() {
-            return sb.isEmpty();
+        /** The characters that can still be said. */
+        long room() {
+            return Math.max(0, most - sb.length());
         }
 
-        String text() {
-            return sb.toString();
+        /** Whether {@code bytes} of {@code what} can be said; when not, that is said instead. */
+        boolean roomFor(long bytes, String what) {
+            if (bytes + what.length() + 4 <= room()) return true;
+            section(what + ", " + count(bytes) + ": " + tooMuch(most) + ".");
+            return false;
         }
 
         void section(String line) {
-            if (!sb.isEmpty()) sb.append('\n');
-            sb.append(line).append('\n');
+            put(line + "\n");
         }
 
         void block(String heading, String body) {
-            if (!sb.isEmpty()) sb.append('\n');
-            sb.append(heading).append('\n').append(body.strip()).append('\n');
+            put(heading + "\n" + body.strip() + "\n");
         }
 
-        /** A part of another program's: its text when it is text, else what it is and its size. */
+        /**
+         * A part of another program's: its text when it is text, else what it is and its size --
+         * known from its first kilobytes, so that a phone's video after the picture is binary data,
+         * whatever its size, and is never decoded.
+         */
         void part(String what, byte[] d, int from, int to) {
-            String text = textOrNull(d, from, to);
+            if (readable(d, from, Math.min(to, from + 4096)) == null) {
+                section(what + ", " + count(to - from) + " of binary data.");
+                return;
+            }
+            if (!roomFor(to - from, what)) return;
+            String text = readable(d, from, to);
             if (text != null && !text.isBlank()) block(what + ", as text:", text);
             else section(what + ", " + count(to - from) + " of binary data.");
         }
 
+        private void put(String piece) {
+            piece = clean(piece);
+            if (piece.equals(last)) {
+                again++;
+                return;
+            }
+            settle();
+            String spaced = sb.isEmpty() ? piece : "\n" + piece;
+            if (spaced.length() > room()) {
+                notSaid++;
+                last = null;
+                return;
+            }
+            sb.append(spaced);
+            last = piece;
+        }
+
+        /** The same part again, counted: said once now, with how many more times. */
+        private void settle() {
+            if (again == 0) return;
+            String note = "(The same again, " + again + (again == 1 ? " more time.)" : " more times.)") + "\n";
+            if (note.length() <= room()) sb.append(note);
+            again = 0;
+        }
+
+        String text() {
+            settle();
+            if (notSaid > 0) {
+                sb.append("\n").append(notSaid == 1 ? "One more part" : String.format(Locale.ROOT, "%,d more parts", notSaid))
+                  .append(" of what the file holds: ").append(tooMuch(most)).append(".\n");
+                notSaid = 0;
+            }
+            return sb.toString();
+        }
+
         /**
          * {@code d} from {@code from} to {@code to}, zlib-inflated: null, said why, when it is broken
-         * or would take the file past {@link #unpackLimit} in all.
+         * or would take what the file's parts unpack to, or what is said of it, past {@code most}.
          */
         byte[] unpack(byte[] d, int from, int to, String what) {
+            long limit = Math.min(unpackLeft, room());
+            if (limit <= 0) {
+                section(what + ", compressed, " + count(to - from) + ": " + tooMuch(most) + ".");
+                return null;
+            }
             var inflater = new java.util.zip.Inflater();
             try {
                 inflater.setInput(d, from, to - from);
                 var all = new ByteArrayOutputStream();
-                byte[] buffer = new byte[1 << 16];
+                byte[] buffer = new byte[8192];
+                long total = 0;
                 while (!inflater.finished()) {
                     int got = inflater.inflate(buffer);
                     if (got == 0 && (inflater.needsInput() || inflater.needsDictionary())) break;
-                    unpacked += got;
-                    if (unpacked > unpackLimit) {
-                        section("Unpacked, " + what + " takes the file's text past " + count(unpackLimit)
-                                + " -- more than an upload may be -- so it was not unpacked here; a skill can read the file.");
+                    total += got;
+                    if (total > limit) {
+                        unpackLeft -= total;
+                        section(what + ", compressed, unpacks to " + tooMuch(most) + ".");
                         return null;
                     }
                     all.write(buffer, 0, got);
                 }
+                unpackLeft -= total;
                 return all.toByteArray();
             } catch (java.util.zip.DataFormatException broken) {
-                section(capitalized(what) + " is broken and could not be unpacked.");
+                section(what + ", compressed, is broken and could not be unpacked.");
                 return null;
             } finally {
                 inflater.end();
@@ -890,8 +1034,76 @@ public final class ImageFileData {
         }
     }
 
-    private static String capitalized(String s) {
-        return s.isEmpty() ? s : Character.toUpperCase(s.charAt(0)) + s.substring(1);
+    /** Lines to be said as one part, to at most {@code room} characters, the same line again only counted. */
+    private static final class Lines {
+        private final List<String> lines = new ArrayList<>();
+        private final long room;
+        private long chars;
+        private String last;
+        private int again;
+        private boolean full;
+
+        Lines(long room) {
+            this.room = Math.max(0, room);
+        }
+
+        long room() {
+            return Math.max(0, room - chars - 200);
+        }
+
+        boolean full() {
+            return full;
+        }
+
+        boolean isEmpty() {
+            return lines.isEmpty() && again == 0;
+        }
+
+        void add(String line) {
+            if (line.equals(last)) {
+                again++;
+                return;
+            }
+            settle();
+            if (!fits(line)) return;
+            lines.add(line);
+            chars += line.length() + 1;
+            last = line;
+        }
+
+        /** A line said before all the others: the place, which a model looks for first. */
+        void first(String line) {
+            if (!fits(line)) return;
+            lines.addFirst(line);
+            chars += line.length() + 1;
+        }
+
+        private boolean fits(String line) {
+            if (chars + line.length() + 1 <= room) return true;
+            full = true;
+            return false;
+        }
+
+        private void settle() {
+            if (again == 0) return;
+            String note = "(The same again, " + again + (again == 1 ? " more time.)" : " more times.)");
+            again = 0;
+            if (fits(note)) {
+                lines.add(note);
+                chars += note.length() + 1;
+            }
+        }
+
+        List<String> all() {
+            settle();
+            return lines;
+        }
+
+        String joined() {
+            settle();
+            String s = String.join("\n", lines);
+            return full ? s + "\n(The rest: " + tooMuch(room) + ".)" : s;
+        }
     }
 
     /** "1 byte", "3,144 bytes". */
@@ -908,22 +1120,40 @@ public final class ImageFileData {
         return sb.toString();
     }
 
-    /** Text as a file writes it: UTF-8 when it is that, else Latin-1; NULs at its end dropped, those inside a line break. */
+    /** Text a file declares as text: UTF-8 when it is that, else Latin-1; NULs at its end dropped, those inside a line break. */
     static String text(byte[] d, int from, int to) {
         String s = strictUtf8(d, from, to);
         return trimmed(s != null ? s : latin1(d, from, to));
     }
 
-    /** {@link #text} when the bytes are UTF-8 text -- no control characters but tabs and line breaks; else null. */
-    static String textOrNull(byte[] d, int from, int to) {
-        String s = strictUtf8(d, from, to);
-        if (s == null) return null;
-        s = trimmed(s);
+    /**
+     * Bytes a file holds, as text when they are text -- {@link #text}, of which at most one character
+     * in a hundred a control character -- else null: binary data. Latin-1 is read too, as IPTC writes
+     * a caption with no character set named: "Café", not "Café" as binary.
+     */
+    static String readable(byte[] d, int from, int to) {
+        String s = text(d, from, to);
+        int odd = 0;
+        for (int i = 0; i < s.length(); i++) if (odd(s.charAt(i))) odd++;
+        return odd * 100L > s.length() ? null : s;
+    }
+
+    /** A control character but a tab or a line break, C1 too, or the character put for bytes that are not UTF-8. */
+    private static boolean odd(char c) {
+        return c < 0x20 && c != '\t' && c != '\n' && c != '\r' || c >= 0x7F && c <= 0x9F || c == 0xFFFD;
+    }
+
+    /** {@code s} with each control character but a tab or a line break a space: said as text, never as a terminal's or a parser's. */
+    static String clean(String s) {
+        StringBuilder sb = null;
         for (int i = 0; i < s.length(); i++) {
             char c = s.charAt(i);
-            if (c < 0x20 && c != '\t' && c != '\n' && c != '\r' || c == 0x7F) return null;
+            if (c != 0xFFFD && odd(c)) {
+                if (sb == null) sb = new StringBuilder(s);
+                sb.setCharAt(i, ' ');
+            }
         }
-        return s;
+        return sb == null ? s : sb.toString();
     }
 
     private static String strictUtf8(byte[] d, int from, int to) {
@@ -939,10 +1169,6 @@ public final class ImageFileData {
         int end = s.length();
         while (end > 0 && s.charAt(end - 1) == 0) end--;
         return s.substring(0, end).replace('\0', '\n');
-    }
-
-    private static String utf8(byte[] d, int from, int to) {
-        return to <= from ? "" : new String(d, from, to - from, StandardCharsets.UTF_8);
     }
 
     private static String latin1(byte[] d, int from, int to) {

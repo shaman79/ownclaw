@@ -516,11 +516,10 @@ public class TaskTraceService {
             a.put("height", d.path("height").asInt());
             a.put("imageWidth", d.path("imageWidth").asInt());
             a.put("imageHeight", d.path("imageHeight").asInt());
-            // Its file carries more than the picture: what skills read from it is private.
-            if (d.path("resultsPrivate").asBoolean(false)) {
-                a.put("resultsPrivate", true);
-                a.put("metadata", d.path("metadata").asText(null));
-            }
+            // What its file carries beside the picture: before 2026-11-26 that made what skills read
+            // from it private (resultsPrivate); since, the cloud model is given it too.
+            if (d.path("resultsPrivate").asBoolean(false)) a.put("resultsPrivate", true);
+            if (d.hasNonNull("metadata")) a.put("metadata", d.path("metadata").asText());
         }
         return a;
     }

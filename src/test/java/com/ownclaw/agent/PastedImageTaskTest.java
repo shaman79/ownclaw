@@ -535,11 +535,29 @@ class PastedImageTaskTest {
 
         // And through the loop: the picture goes, as a copy of its pixels, and its place with it.
         rig.cloud.think.add(respond("At the observatory."));
-        rig.turn(LocalModeTest.session(rig), "where was it taken?", List.of(photo.id()));
+        AgentResult r = rig.turn(LocalModeTest.session(rig), "where was it taken?", List.of(photo.id()));
         LlmMessage sent = first(rig.cloud.calls("think").get(0));
         assertNotNull(sent.images().getFirst().sent(), "the picture is sent");
         assertTrue(LocalModeTest.all(rig.cloud.calls("think").getFirst()).contains("51.477389 N, 0.000389 W"),
                 "and the place it was taken");
+        // The task page says what its file carried, which went too.
+        @SuppressWarnings("unchecked")
+        var page = (Map<String, Object>) new com.ownclaw.interfaces.web.TaskTraceController(
+                new com.ownclaw.observability.TaskTraceService(rig.events), rig.files).trace("u1", r.taskId()).getBody();
+        @SuppressWarnings("unchecked")
+        var artifact = ((List<Map<String, Object>>) page.get("artifacts")).getFirst();
+        assertEquals("EXIF data", artifact.get("metadata"), String.valueOf(artifact));
+        assertNull(artifact.get("resultsPrivate"), String.valueOf(artifact));
+
+        // Its file gone by the time a task reads it: the picture is still shown, with no file data, and
+        // still no result is private.
+        var gone = rig.files.store("u1", "image.jpg", "image/jpeg", new ByteArrayInputStream(jpeg), true);
+        java.nio.file.Files.delete(rig.files.getFilePath(gone.id()));
+        var later = new AgentContext("u1", "d4e5f6a7", "and this one?");
+        AgentLoop.registerAttachments(later, List.of(gone.id()), rig.files, rig.events);
+        assertEquals(1, later.pasted().size());
+        assertTrue(later.sharedFiles().isEmpty(), "no file data to give");
+        assertTrue(later.files().isEmpty(), "and no result private");
         // Mutation: count shown images with metadata in files() again -> the place stays private and the model
         // is told every result is.
     }
