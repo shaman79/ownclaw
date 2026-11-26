@@ -2850,7 +2850,7 @@
             </select>
         </label>
     </div>
-    <div class="input-hint"><span id="hint-keys">Enter to send &nbsp;&middot;&nbsp; Shift+Enter for new line</span> &nbsp;&middot;&nbsp; <span id="hint-images">Images you paste or drop here -- screenshots, photos -- are shown to the cloud model as pictures (the privacy filter reads text, not pictures); other files, and anything you attach with 📎, stay private</span> &nbsp;&middot;&nbsp; <strong>/help</strong> for commands</div>
+    <div class="input-hint"><span id="hint-keys">Enter to send &nbsp;&middot;&nbsp; Shift+Enter for new line</span> &nbsp;&middot;&nbsp; <span id="hint-images">Images you paste or drop here — screenshots, photos (PNG, JPEG, GIF) — are shown to the cloud model as pictures (the privacy filter reads text, not pictures); other files, and anything you attach with 📎, stay private</span> &nbsp;&middot;&nbsp; <strong>/help</strong> for commands</div>
 </div>
 
     </div><!-- end #chat-main -->
@@ -3817,7 +3817,7 @@
             var item = node('div', 'task-trace-item');
             // An image the owner pasted: the cloud model is shown it, at the size it reads.
             if (a.kind === 'pasted image') {
-                item.appendChild(node('div', 'task-trace-line', a.handle + ' your pasted image'
+                item.appendChild(node('div', 'task-trace-line', a.handle + ' your pasted or dropped image'
                         + (a.name != null ? ' "' + a.name + '"' : '') + ' · ' + (a.contentType || 'image') + ', '
                         + a.imageWidth + '×' + a.imageHeight + ' px'));
                 // Shown only when a request that went carried it: none on a Free task, or with no cloud.
@@ -7205,14 +7205,17 @@
     });
 
     // Drag & drop: an image dropped on the box is shown to the cloud model, as a pasted one is;
-    // every other file is attached as one picked with 📎 is, and stays private.
+    // every other file is attached as one picked with 📎 is, and stays private -- and so does every
+    // file dropped on 📎 itself, which says it keeps them private.
     var inputWrap = document.querySelector('.input-wrap');
     inputWrap.addEventListener('dragover', function(e) { e.preventDefault(); inputWrap.classList.add('dragover'); });
     inputWrap.addEventListener('dragleave', function() { inputWrap.classList.remove('dragover'); });
     inputWrap.addEventListener('drop', function(e) {
         e.preventDefault();
         inputWrap.classList.remove('dragover');
-        if (e.dataTransfer.files.length) uploadGiven(Array.prototype.slice.call(e.dataTransfer.files));
+        if (!e.dataTransfer.files.length) return;
+        if (attachBtn.contains(e.target)) uploadFiles(e.dataTransfer.files);
+        else uploadGiven(Array.prototype.slice.call(e.dataTransfer.files));
     });
 
     // Paste: files on the clipboard -- a screenshot, "Copy image" in a browser, a photo or any file
@@ -7240,17 +7243,47 @@
 
     /**
      * Files pasted or dropped on the box: the images among them uploaded as pictures to show the
-     * cloud model, the rest as files, private.
+     * cloud model, each under a name this page makes (pastedName) -- a file's own name can carry
+     * what the picture does not, an account number, and skills are handed the file by it -- and
+     * the rest as files, private, under their own names. The server names a shown image so too.
      */
     function uploadGiven(files) {
-        var images = files.filter(isImage);
+        var images = files.filter(isImage).map(function(f) { return PASTED_NAME.test(f.name || '') ? f : renamed(f); });
         var others = files.filter(function(f) { return !isImage(f); });
         if (images.length) uploadFiles(images, true);
         if (others.length) uploadFiles(others, false);
     }
 
+    /** A name pastedName made: pasted-image-HHMMSS, a count within the second, an extension. */
+    var PASTED_NAME = /^pasted-image-\d{6}(?:-\d+)?(?:\.[A-Za-z0-9]+)?$/;
+
+    /** {@code f} under the next name pastedName makes; {@code f} itself where no File can be made. */
+    function renamed(f) {
+        try {
+            return new File([f], pastedName(f), { type: f.type });
+        } catch (err) {
+            return f;   // no File constructor: the clipboard's own name
+        }
+    }
+
     /** The second the last pasted file was named in, and how many were named in it. */
     var pasteSecond = '', pastedInSecond = 0;
+
+    /**
+     * The next name of a pasted or dropped file: pasted-image- or pasted-file-, the time of day --
+     * short enough to show whole in a chip, and the message has its date -- a count when more are
+     * named within the second, and the extension of its type.
+     */
+    function pastedName(f) {
+        var d = new Date();
+        function two(n) { return (n < 10 ? '0' : '') + n; }
+        var stamp = two(d.getHours()) + two(d.getMinutes()) + two(d.getSeconds());
+        if (stamp !== pasteSecond) { pasteSecond = stamp; pastedInSecond = 0; }
+        pastedInSecond++;
+        var ext = ((f.type || '').split('/')[1] || '').replace(/\+.*$/, '').replace('jpeg', 'jpg').replace(/[^A-Za-z0-9]/g, '');
+        return 'pasted-' + (isImage(f) ? 'image-' : 'file-') + stamp
+            + (pastedInSecond > 1 ? '-' + pastedInSecond : '') + (ext ? '.' + ext : '');
+    }
 
     /**
      * Whether the paste itself made {@code f}: image data on the clipboard becomes a file when it is
@@ -7264,8 +7297,8 @@
     /**
      * The files on a clipboard. One the browser named itself -- "image.png", or its word for it in
      * another language ("obrazek.png" in a Czech Firefox), which the paste made just now -- is named
-     * for when it was pasted, so two screenshots are two names; a file copied in a file manager
-     * keeps its own. A copied folder is left out: reading it fails the whole upload. It has no type,
+     * for when it was pasted (pastedName), so two screenshots are two names; a file copied in a file
+     * manager keeps its own here -- an image's is replaced as it is uploaded (uploadGiven). A copied folder is left out: reading it fails the whole upload. It has no type,
      * but neither has a README or a Makefile, so the file system entry says which is which where
      * there is one, and the type only where there is not.
      */
@@ -7286,22 +7319,9 @@
                 if (data.files[j].type) found.push(data.files[j]);
             }
         }
-        // The time of day: short enough to show whole in a chip, and the message has its date.
-        var d = new Date();
-        function two(n) { return (n < 10 ? '0' : '') + n; }
-        var stamp = two(d.getHours()) + two(d.getMinutes()) + two(d.getSeconds());
-        if (stamp !== pasteSecond) { pasteSecond = stamp; pastedInSecond = 0; }
         return found.map(function(f) {
             if (f.name && !/^image\.\w+$/i.test(f.name) && !(isImage(f) && madeByThePaste(f))) return f;
-            var ext = (f.type.split('/')[1] || '').replace(/\+.*$/, '').replace('jpeg', 'jpg').replace(/[^A-Za-z0-9]/g, '');
-            pastedInSecond++;
-            var name = 'pasted-' + (isImage(f) ? 'image-' : 'file-') + stamp
-                + (pastedInSecond > 1 ? '-' + pastedInSecond : '') + (ext ? '.' + ext : '');
-            try {
-                return new File([f], name, { type: f.type });
-            } catch (err) {
-                return f;   // no File constructor: the clipboard's own name
-            }
+            return renamed(f);
         });
     }
 
@@ -7486,8 +7506,9 @@
         cloudSeesImages = cloud.seesImages !== false;
         var hint = document.getElementById('hint-images');
         if (hint) hint.textContent = cloudSeesImages
-                ? 'Images you paste or drop here -- screenshots, photos -- are shown to the cloud model as pictures (the '
-                    + 'privacy filter reads text, not pictures); other files, and anything you attach with 📎, stay private'
+                ? 'Images you paste or drop here — screenshots, photos (PNG, JPEG, GIF) — are shown to the cloud model as '
+                    + 'pictures (the privacy filter reads text, not pictures); other files, and anything you attach with 📎, '
+                    + 'stay private'
                 : 'This chat\'s cloud model is sent no images: images you paste or drop are not shown to it, and skills '
                     + 'are given them as files; other files, and anything you attach with 📎, stay private';
         refreshSeen();

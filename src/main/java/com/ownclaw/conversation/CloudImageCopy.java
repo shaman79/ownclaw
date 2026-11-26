@@ -53,8 +53,9 @@ import java.util.concurrent.TimeoutException;
  * format and no other -- a reader picked by ImageIO's own guess takes a text file for a WBMP.
  * Anything else stays private: a WebP, which the JDK cannot decode, and a progressive or other
  * multi-scan JPEG, whose reading takes memory in proportion to its whole declared size, however
- * small the file -- a 200-byte one declaring 30,000 x 30,000 pixels took a server down. Browsers
- * paste neither: they put a pasted image on the clipboard as a PNG.
+ * small the file -- a 200-byte one declaring 30,000 x 30,000 pixels took a server down. A
+ * screenshot is neither -- browsers put one on the clipboard as a PNG -- but a photo saved from the
+ * web or a messenger can be progressive, and stays private.
  * <p>
  * The copy is always the decoded pixels, encoded again -- never the pasted bytes, whatever their
  * structure says: what leaves is the picture and nothing a file can carry beside it or hide in it.
@@ -886,7 +887,7 @@ public final class CloudImageCopy {
                 if (length < 6) return Header.refused("it is not a JPEG the server can read: its frame is broken");
                 in.skip(1);
                 int height = in.u16(), width = in.u16();
-                if (height == 0) return Header.refused("it is not a baseline JPEG, the kind browsers paste");
+                if (height == 0) return Header.refused("it is not a baseline JPEG, the kind cameras and screenshots make");
                 if (tooManyPixels(width, height)) return Header.refused(TOO_MANY_PIXELS);
                 components = in.u8();
                 if (length < 6 + 3 * components) return Header.refused(broken);
@@ -943,18 +944,18 @@ public final class CloudImageCopy {
                 if (marker == 0xCC) beside.add(HIDDEN);
                 in.skip(length);
             } else {
-                return Header.refused("it is not a baseline JPEG, the kind browsers paste");
+                return Header.refused("it is not a baseline JPEG, the kind cameras and screenshots make");
             }
         }
         // Baseline and extended sequential (SOF0, SOF1) in one interleaved scan: read row by row. A
         // progressive, lossless, hierarchical or arithmetic-coded frame -- or a sequential one in
         // several scans -- is read into buffers of its whole declared size first.
         if (frame != 0xC0 && frame != 0xC1) {
-            return Header.refused("it is a progressive or other special JPEG, which browsers never paste and which takes "
+            return Header.refused("it is a progressive or other special JPEG, which takes "
                     + "memory in proportion to its whole size to read, so it stays private -- skills still get it");
         }
         if (scans != 1 || !interleaved) {
-            return Header.refused("it is a JPEG in several scans, which browsers never paste and which takes memory in "
+            return Header.refused("it is a JPEG in several scans, which takes memory in "
                     + "proportion to its whole size to read, so it stays private -- skills still get it");
         }
         for (int t = 0; t < 4; t++) {

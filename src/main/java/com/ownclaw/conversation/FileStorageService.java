@@ -25,10 +25,10 @@ import java.util.UUID;
  * tracks metadata in the {@code file_attachments} table,
  * and links files to conversation messages via {@code message_attachments}.
  * <p>
- * Every file is private but an image pasted into the web chat box, which the cloud model is shown:
- * marked so here, at upload, when the page says it is clipboard image data it named itself and the
- * bytes decode as an image, with the copy the cloud model is sent ({@link CloudImageCopy}). The
- * gateway reads that copy through {@link #copyOf} and through nothing else.
+ * Every file is private but an image pasted or dropped on the web chat box, which the cloud model
+ * is shown: marked so here, at upload, when the page says it is such an image and the bytes decode
+ * as one, with the copy the cloud model is sent ({@link CloudImageCopy}). The gateway reads that
+ * copy through {@link #copyOf} and through nothing else.
  */
 @Service
 public class FileStorageService implements CloudImages {
@@ -81,11 +81,12 @@ public class FileStorageService implements CloudImages {
     public record Stored(String id, boolean shownToCloud, String privateBecause, CloudImageCopy.Copy copy) {}
 
     /**
-     * {@link #store(String, String, String, InputStream)}, and -- when the page says the file is
-     * image data from the clipboard that it named itself ({@code pasted}) -- shown to the cloud
-     * model if its bytes decode as an image: its copy made, once, beside it when it is not the file
-     * itself, and recorded with its type, pixel size and hash. Anything else stays private, and so
-     * does every file sent without the claim: the claim alone makes nothing an image.
+     * {@link #store(String, String, String, InputStream)}, and -- when the page says the file is an
+     * image the owner pasted or dropped on the chat box ({@code pasted}) -- shown to the cloud model
+     * if its bytes decode as an image: its copy made, once, beside it when it is not the file itself,
+     * and recorded with its type, pixel size and hash. Anything else stays private, and so does every
+     * file sent without the claim: the claim alone makes nothing an image. A file sent with it is
+     * kept under a name the page makes ({@link #shownName}), never its own.
      */
     public Stored store(String userId, String originalName, String contentType, InputStream data,
                         boolean pasted) throws IOException {
@@ -102,8 +103,7 @@ public class FileStorageService implements CloudImages {
         String id = UUID.randomUUID().toString();
 
         // Sanitize the original name: keep only the last segment, strip path separators
-        String safeName = Path.of(originalName).getFileName().toString();
-        if (safeName.isBlank()) safeName = "upload";
+        String safeName = nameKept(originalName, contentType, pasted);
 
         // Generate stored name to avoid collisions: id_originalname
         // No ':' on disk: a container gets the file as "-v host:container:ro", and a colon in the
@@ -122,6 +122,35 @@ public class FileStorageService implements CloudImages {
         // read back through the ops API.
         log.info("Stored file: id={}, user={}, type={}, bytes={}", id, userId, contentType, bytes);
         return pasted ? shown(userId, id, dest, checkedBy) : new Stored(id, false, null, null);
+    }
+
+    /**
+     * The name an upload is kept under, and answered with: the last segment of the name it came
+     * with, path separators stripped -- or, sent to be shown ({@code pasted}), a name the page made
+     * ({@link #shownName}).
+     */
+    public static String nameKept(String originalName, String contentType, boolean pasted) {
+        String safeName = Path.of(originalName).getFileName() == null ? "" : Path.of(originalName).getFileName().toString();
+        if (safeName.isBlank()) safeName = "upload";
+        return pasted ? shownName(safeName, contentType) : safeName;
+    }
+
+    /** A name the page makes for an image it shows: pasted-image-HHMMSS, a count within the second, an extension. */
+    private static final java.util.regex.Pattern PASTED_NAME =
+            java.util.regex.Pattern.compile("pasted-image-[0-9]+(?:-[0-9]+)?(?:\\.[A-Za-z0-9]+)?");
+
+    /**
+     * What a file uploaded to be shown is called: the name the page made for it, or else
+     * pasted-image and the extension of its type. Never its own: a photo dropped on the box keeps
+     * its name in a file manager -- "Vypis uctu 123456789.png" -- and skills are handed the file
+     * by its name, and what a skill reads of a file that holds the picture alone goes to the cloud.
+     */
+    static String shownName(String safeName, String contentType) {
+        if (PASTED_NAME.matcher(safeName).matches()) return safeName;
+        String sub = contentType == null || contentType.indexOf('/') < 0 ? ""
+                : contentType.substring(contentType.indexOf('/') + 1).replaceAll("[;+].*$", "").replace("jpeg", "jpg")
+                        .replaceAll("[^A-Za-z0-9]", "");
+        return "pasted-image" + (sub.isEmpty() ? "" : "." + sub);
     }
 
     /**

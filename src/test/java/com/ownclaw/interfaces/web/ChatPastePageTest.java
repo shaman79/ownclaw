@@ -58,18 +58,26 @@ class ChatPastePageTest {
     @Test
     @DisplayName("every image pasted or dropped goes up as a picture to show, by its type alone; every other file, and all picked with 📎, as a file")
     void imagesAreShownWhereverTheyCameFrom() {
-        String given = between("function uploadGiven(files) {", "var pasteSecond");
-        assertTrue(given.contains("var images = files.filter(isImage); var others = files.filter(function(f) { return !isImage(f); }); "
-                + "if (images.length) uploadFiles(images, true); if (others.length) uploadFiles(others, false);"), given);
+        String given = between("function uploadGiven(files) {", "var PASTED_NAME");
+        assertTrue(given.contains("var images = files.filter(isImage).map(function(f) { return PASTED_NAME.test(f.name || '') ? f : renamed(f); }); "
+                + "var others = files.filter(function(f) { return !isImage(f); }); "
+                + "if (images.length) uploadFiles(images, true); if (others.length) uploadFiles(others, false); }"), given);
         String is = between("function isImage(f) {", "function uploadGiven(files) {");
-        assertTrue(is.contains("return /^image\\//.test(f.type || '');"), is);
-        // Dropped files are given as pasted ones are; 📎 uploads them as files, never with the claim.
+        assertEquals("function isImage(f) { return /^image\\//.test(f.type || ''); } /** * Files pasted or dropped on the box: ",
+                is.substring(0, is.indexOf("the images among")), "its whole body");
+        // Dropped files are given as pasted ones are -- but on 📎 itself, as 📎 takes them: never with the claim.
         String drop = between("inputWrap.addEventListener('drop', function(e) {", "inputEl.addEventListener('paste'");
-        assertTrue(drop.contains("if (e.dataTransfer.files.length) uploadGiven(Array.prototype.slice.call(e.dataTransfer.files));"), drop);
+        assertTrue(drop.contains("if (!e.dataTransfer.files.length) return; if (attachBtn.contains(e.target)) uploadFiles(e.dataTransfer.files); "
+                + "else uploadGiven(Array.prototype.slice.call(e.dataTransfer.files)); });"), drop);
         assertTrue(page.contains("fileInput.addEventListener('change', function() { if (fileInput.files.length) uploadFiles(fileInput.files);"),
                 "📎 is the private way to give a picture: no claim");
+        // Every call of uploadFiles, the claim made in one alone: 📎, a drop on 📎, uploadGiven's two.
+        assertEquals(5, page.split("uploadFiles\\(", -1).length - 1, "four calls and the definition");
         assertEquals(1, page.split("uploadFiles\\(images, true\\)", -1).length - 1, "one place makes the claim");
+        assertEquals(1, page.split("uploadFiles\\(others, false\\)", -1).length - 1, "and one says it is no claim");
         assertEquals(3, page.split("uploadGiven\\(", -1).length - 1, "its definition, the drop and the paste");
+        assertEquals(1, page.split("addEventListener\\('paste'", -1).length - 1, "one paste listener");
+        assertEquals(1, page.split("addEventListener\\('drop'", -1).length - 1, "one drop listener");
         String f = between("function pastedFiles(data) {", "function uploadFiles(");
         for (String gone : new String[]{"clipboardImages", "onDisk", "madeNow", "entryForAnyFile", "holdsDiskFile"}) {
             assertFalse(page.contains(gone), "where a file came from decides nothing now: " + gone);
@@ -82,12 +90,16 @@ class ChatPastePageTest {
         // Mutation: uploadGiven(files) -> uploadFiles(files, true) -> a pasted PDF goes up with the
         // claim (the server keeps it private, but the chip's line is the image's); the drop back to
         // uploadFiles(e.dataTransfer.files) -> a dropped photo is private; 📎 through uploadGiven ->
-        // there is no private way to give a picture.
+        // there is no private way to give a picture; drop the 📎 test in the drop -> a photo dropped
+        // on 📎 is shown (review, 2026-11-26).
     }
 
     @Test
-    @DisplayName("only what a file is called rests on when the paste made it: the browser's own name, in any language, is replaced")
+    @DisplayName("only what a file is called rests on when the paste made it: the browser's own name, in any language, is replaced; every shown image is named by the page")
     void theDateNamesNoMore() {
+        String given = between("function uploadGiven(files) {", "var PASTED_NAME");
+        assertTrue(given.contains("PASTED_NAME.test(f.name || '') ? f : renamed(f)"), "a shown image's own name could carry an account number");
+        assertTrue(page.contains("var PASTED_NAME = /^pasted-image-\\d{6}(?:-\\d+)?(?:\\.[A-Za-z0-9]+)?$/;"));
         String made = between("function madeByThePaste(f) {", "function pastedFiles(data) {");
         assertTrue(made.contains("return Math.abs(Date.now() - f.lastModified) < 1000; }"), made);
         String f = between("function pastedFiles(data) {", "function uploadFiles(");
@@ -142,7 +154,7 @@ class ChatPastePageTest {
         assertTrue(note.contains("cloudSeesImages = cloud.seesImages !== false;"), note);
         assertTrue(page.contains("noteCloud({ seesImages: provider === 'anthropic' });"), "the settings page's provider too");
         assertTrue(note.contains("var hint = document.getElementById('hint-images'); if (hint) hint.textContent = cloudSeesImages "
-                + "? 'Images you paste or drop here -- screenshots, photos -- are shown to the cloud model"), "and the hint under the box: " + note);
+                + "? 'Images you paste or drop here — screenshots, photos (PNG, JPEG, GIF) — are shown to the cloud model"), "and the hint under the box: " + note);
         assertTrue(page.contains("<span id=\"hint-images\">Images you paste or drop here"), "the hint's words are that span");
         assertTrue(note.contains("'This chat\\'s cloud model is sent no images: images you paste or drop are not shown to it, "
                 + "and skills ' + 'are given them as files;"), note);
@@ -169,9 +181,10 @@ class ChatPastePageTest {
                 + "if (entry ? entry.isDirectory : !items[i].type) continue;"), "a folder out, a README in: " + f);
         assertTrue(f.contains("if (f.name && !/^image\\.\\w+$/i.test(f.name) && !(isImage(f) && madeByThePaste(f))) return f;"),
                 "a file copied in a file manager keeps its name: " + f);
-        assertTrue(f.contains("if (stamp !== pasteSecond) { pasteSecond = stamp; pastedInSecond = 0; }"), f);
-        assertTrue(f.contains("+ (pastedInSecond > 1 ? '-' + pastedInSecond : '')"), f);
-        assertTrue(f.contains("return new File([f], name, { type: f.type });"), f);
+        assertTrue(f.contains("return renamed(f);"), f);
+        String name = between("function pastedName(f) {", "/** * Whether the paste itself made");
+        assertTrue(name.contains("if (stamp !== pasteSecond) { pasteSecond = stamp; pastedInSecond = 0; }"), name);
+        assertTrue(name.contains("+ (pastedInSecond > 1 ? '-' + pastedInSecond : '')"), name);
     }
 
     @Test
@@ -217,7 +230,7 @@ class ChatPastePageTest {
     @Test
     @DisplayName("the hint under the box says it plainly: images pasted or dropped are shown to the cloud model, unfiltered; other files and 📎 stay private")
     void theHintSaysSo() {
-        assertTrue(page.contains("Images you paste or drop here -- screenshots, photos -- are shown to the cloud model as pictures "
+        assertTrue(page.contains("Images you paste or drop here — screenshots, photos (PNG, JPEG, GIF) — are shown to the cloud model as pictures "
                 + "(the privacy filter reads text, not pictures); other files, and anything you attach with 📎, stay private"),
                 page.substring(page.indexOf("<div class=\"input-hint\">"), page.indexOf("<div class=\"input-hint\">") + 500));
         assertFalse(page.contains("paste or 📎 to attach files — they stay private"), "pasted images are not private");

@@ -74,7 +74,8 @@ public class FileUploadController {
                 var stored = fileStorage.store(userId, name, type, file.getInputStream(), pastedImages, checkedBy);
                 var result = new java.util.LinkedHashMap<String, Object>();
                 result.put("id", stored.id());
-                result.put("original_name", name);
+                // As it is kept: a file sent to be shown under the page's name, never its own.
+                result.put("original_name", FileStorageService.nameKept(name, type, pastedImages));
                 result.put("size_bytes", file.getSize());
                 result.put("content_type", type);
                 if (pastedImages) {

@@ -23,9 +23,10 @@ import java.util.Map;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
- * POST /api/files/upload: with pasted=true the page claims clipboard image data it named itself,
- * and the answer says, file by file, whether the server shows it to the cloud model -- the copy's
- * size -- or keeps it private, and why. Without the claim nothing is said, and nothing is shown.
+ * POST /api/files/upload: with pasted=true the page claims images the owner pasted or dropped on
+ * the chat box, and the answer says, file by file, whether the server shows it to the cloud model --
+ * the copy's size -- or keeps it private, and why. Without the claim nothing is said, and nothing is
+ * shown. A file sent with the claim is kept under a name the page makes, never its own.
  */
 class PastedUploadTest {
 
@@ -81,5 +82,32 @@ class PastedUploadTest {
         assertEquals(0, jdbc.queryForObject("SELECT shown_to_cloud FROM file_attachments WHERE id = ?", Integer.class,
                 plain.get(0).get("id")), "private");
         // Mutation: read the flag as set when absent -> the 📎 upload is shown.
+    }
+
+    @Test
+    @DisplayName("a file sent to be shown keeps no name of its own: a dropped photo's could carry an account number")
+    @SuppressWarnings("unchecked")
+    void aShownImageIsNamedByThePage(@TempDir Path tmp) throws Exception {
+        var jdbc = MigratedDatabase.at(tmp.resolve("t.db"));
+        var config = new OwnClawConfig();
+        config.getDatabase().setPath(tmp.resolve("t.db").toString());
+        Files.createDirectories(tmp.resolve("uploads"));
+        var controller = new FileUploadController(new FileStorageService(jdbc, config));
+        byte[] png = TestImages.png(64, 48);
+
+        var shown = controller.upload(as("u1"), List.of(new Part("Vypis uctu 123456789.png", "image/png", png),
+                new Part("pasted-image-101010-2.png", "image/png", png),
+                new Part("IMG_2041.JPG", "image/jpeg; charset=binary", "not a jpeg".getBytes(StandardCharsets.UTF_8))), "true");
+        var answer = (List<Map<String, Object>>) ((Map<String, Object>) shown.getBody()).get("files");
+        assertEquals("pasted-image.png", answer.get(0).get("original_name"));
+        assertEquals("pasted-image-101010-2.png", answer.get(1).get("original_name"), "the page's own name stands");
+        assertEquals("pasted-image.jpg", answer.get(2).get("original_name"), "kept private, and named so all the same");
+        var names = jdbc.queryForList("SELECT original_name || ' ' || stored_name FROM file_attachments", String.class);
+        assertTrue(names.stream().noneMatch(n -> n.contains("123456789") || n.contains("IMG_2041")), String.valueOf(names));
+
+        var attached = controller.upload(as("u1"), List.of(new Part("Vypis uctu 123456789.png", "image/png", png)), null);
+        var plain = (List<Map<String, Object>>) ((Map<String, Object>) attached.getBody()).get("files");
+        assertEquals("Vypis uctu 123456789.png", plain.get(0).get("original_name"), "a private file keeps its name");
+        // Mutation: rename only what is shown -> the private JPEG keeps IMG_2041; drop the rename -> the first keeps its account number.
     }
 }
