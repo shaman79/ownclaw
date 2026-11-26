@@ -387,7 +387,7 @@ public class AgentLoop {
             List<AgentMemory.MemoryEntry> facts = memory.getFacts(userId);
             if (!facts.isEmpty()) {
                 // Each with where it came from, when the local model found it in a chat turn: what
-                // the owner said, or what he chose to keep of an answer (FactCapture).
+                // the owner said, or what an answer he was given said (FactCapture).
                 Map<String, com.ownclaw.agent.memory.CapturedFacts.Source> from = sourcesOf(userId, facts);
                 String factContext = facts.stream()
                         .map(f -> f.content() + FactCapture.label(from.get(

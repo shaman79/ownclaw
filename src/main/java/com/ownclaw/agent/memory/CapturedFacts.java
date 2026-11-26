@@ -17,10 +17,14 @@ import java.util.Map;
 import java.util.function.Supplier;
 
 /**
- * The facts the local model found in a chat turn ({@code FactCapture}). One the owner himself
- * stated is kept at once, as it was written and with what it replaced, so he can take it back
- * ({@link #undo}). One found only in the answer he was given is kept only when he says so
- * ({@link #keep}): an answer can quote a page or a mail, and what they say is not his to keep.
+ * The facts the local model found in a chat turn ({@code FactCapture}), each kept at once, as it
+ * was written and with what it replaced, so the owner can take it back ({@link #undo}) -- with
+ * where it came from: what he himself stated, or what the answer he was given said. Which a fact
+ * is, and whether one of the answer's is kept at all, {@code FactCapture} decides by code.
+ * <p>
+ * Until 2026-11-26 a fact found only in an answer was offered, and kept only when he pressed Keep
+ * ({@link #keep}); the owner asked for memory to be managed without him. Offers made before then
+ * can still be kept; none is made now.
  * <p>
  * A kept fact lives where every fact does ({@link AgentMemory}), under its key: a task reads it
  * as it reads one the cloud stored with memory_manage, and memory_manage lists and deletes it.
@@ -38,7 +42,7 @@ public class CapturedFacts {
 
     /**
      * Where a fact came from: what the owner stated, as the code found ({@code FactCapture}), or
-     * not shown to be his -- the answer's, or his but not plainly -- and kept only by his choice.
+     * not shown to be his -- the answer's, or his but not plainly.
      */
     public enum Source {
         OWNER, ANSWER;
@@ -51,7 +55,8 @@ public class CapturedFacts {
     /**
      * One fact found in a turn.
      *
-     * @param state    "kept", "offered" (found in an answer, waiting for the owner) or "undone"
+     * @param state    "kept", "offered" (found in an answer, waiting for the owner: made only
+     *                 before 2026-11-26) or "undone"
      * @param previous what its key held before it was kept, or null
      * @param memoryId the agent_memory row it wrote, while kept: what an undo compares with
      */
@@ -139,7 +144,8 @@ public class CapturedFacts {
     }
 
     /**
-     * Keep a new fact, or offer one found in an answer ({@code offer}): under {@code key} made plain,
+     * Keep a new fact -- or offer one ({@code offer}), as nothing has since 2026-11-26 but a test of
+     * {@link #keep} does: under {@code key} made plain,
      * or when that names a fact already -- written so, or the same made plain -- under the first of
      * key_2, key_3 ... that does not; under fact_<ref> when the key is empty. A new fact never takes
      * another's key: a key the model happened to reuse wrote "Jana's phone is an iPhone 15" over
@@ -172,33 +178,25 @@ public class CapturedFacts {
      */
     public Saved replace(String userId, String sessionId, String taskId, String key, long expectedId, String fact,
                          Row row) {
+        return replace(userId, sessionId, taskId, Source.OWNER, key, expectedId, fact, row);
+    }
+
+    /**
+     * {@link #replace(String, String, String, String, long, String, Row)}, the new fact from {@code
+     * source}: an answer's replaces only what an answer said ({@code FactCapture}).
+     */
+    public Saved replace(String userId, String sessionId, String taskId, Source source, String key, long expectedId,
+                         String fact, Row row) {
         return changing(() -> {
-            String ref = insert(userId, sessionId, taskId, Source.OWNER, "kept", key, fact);
+            String ref = insert(userId, sessionId, taskId, source, "kept", key, fact);
             afterFirstWrite.run();
             AgentMemory.MemoryEntry now = under(key, memory.getFacts(userId));
             if (now == null || id(now) != expectedId) throw new Abort();
             memory.storeFact(userId, key, fact);
             long memoryId = rowOf(userId, key);
             jdbc.update("UPDATE fact_captures SET previous = ?, memory_id = ? WHERE ref = ?", now.content(), memoryId, ref);
-            return saved(new Capture(ref, userId, sessionId, taskId, Source.OWNER, "kept", key, fact,
+            return saved(new Capture(ref, userId, sessionId, taskId, source, "kept", key, fact,
                     now.content(), memoryId), row);
-        });
-    }
-
-    /**
-     * Offer a correction the owner may make: {@code fact} in place of the fact under {@code key} --
-     * its row {@code expectedId}, which said {@code previous} -- made only when he keeps it, and
-     * only if that fact is still the one it would replace. Null when the chat's row could not be
-     * saved.
-     */
-    public Saved offerCorrection(String userId, String sessionId, String taskId, String key, long expectedId,
-                                 String previous, String fact, Row row) {
-        return changing(() -> {
-            String ref = insert(userId, sessionId, taskId, Source.ANSWER, "offered", key, fact);
-            afterFirstWrite.run();
-            jdbc.update("UPDATE fact_captures SET previous = ?, replaces_id = ? WHERE ref = ?", previous, expectedId, ref);
-            return saved(new Capture(ref, userId, sessionId, taskId, Source.ANSWER, "offered", key, fact, previous,
-                    null), row);
         });
     }
 
@@ -277,7 +275,10 @@ public class CapturedFacts {
         return found.isEmpty() ? null : found.getFirst();
     }
 
-    /** The facts on offer to {@code userId} now, not yet kept: one is not offered twice. */
+    /**
+     * The facts still on offer to {@code userId}, made before 2026-11-26 and not yet kept: one the
+     * owner can still keep is not kept a second time beside it.
+     */
     public List<String> offered(String userId) {
         return jdbc.queryForList("SELECT fact FROM fact_captures WHERE user_id = ? AND state = 'offered'",
                 String.class, userId);
