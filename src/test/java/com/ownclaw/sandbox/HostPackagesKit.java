@@ -9,6 +9,6 @@ public final class HostPackagesKit {
 
     /** Packages fetched by a fake apt into {@code store}: tesseract's set unpacks a program, libraries and English. */
     public static HostPackages faked(Path store) {
-        return new HostPackages(store, new HostPackagesTest.FakeApt());
+        return HostPackagesTest.fake(store, new HostPackagesTest.FakeApt());
     }
 }

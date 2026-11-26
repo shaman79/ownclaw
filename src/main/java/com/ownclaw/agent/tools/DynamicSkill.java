@@ -667,6 +667,11 @@ public class DynamicSkill implements Tool {
                             log.warn("Skill '{}' runs without its system packages {}: {}", name, systemPackages,
                                     packages.failure());
                         }
+                        // Stopped while its packages were being fetched: it does not run.
+                        if (stoppedOf(context).getAsBoolean()) {
+                            return ToolResult.failure("Stopped while the system packages of skill '" + name
+                                    + "' were being fetched: it did not run.");
+                        }
                         packages.applyTo(envVars);
                         readable.addAll(packages.binds());
                     }

@@ -30,7 +30,7 @@ import static org.junit.jupiter.api.Assertions.*;
 class HostPackagesTest {
 
     /** apt and dpkg, as far as HostPackages asks them: what each call was, and what it did. */
-    static final class FakeApt implements HostPackages.Commands {
+    static class FakeApt implements HostPackages.Commands {
         final List<List<String>> calls = new CopyOnWriteArrayList<>();
         final List<Path> dirs = new CopyOnWriteArrayList<>();
         final List<List<Path>> reads = new CopyOnWriteArrayList<>();
@@ -127,11 +127,19 @@ class HostPackagesTest {
 
     private static final List<String> TESSERACT = List.of("tesseract-ocr", "tesseract-ocr-eng");
 
+    /** Where nothing is: a host with no tesseract data and no libraries of its own. */
+    static final Path NOWHERE = Path.of("/nonexistent/ownclaw-test-host");
+
+    /** HostPackages over a fake apt, on a host that has none of what the fake unpacks. */
+    static HostPackages fake(Path store, FakeApt apt) {
+        return new HostPackages(store, apt, NOWHERE).withHostLibraries(NOWHERE);
+    }
+
     @Test
     @DisplayName("what the host lacks is fetched once, unpacked without setuid bits, and found by PATH, LD_LIBRARY_PATH and TESSDATA_PREFIX")
     void fetchedOnceAndFound(@TempDir Path tmp) throws Exception {
         var apt = new FakeApt();
-        var packages = new HostPackages(tmp.resolve("data/system-packages"), apt);
+        var packages = fake(tmp.resolve("data/system-packages"), apt);
         var said = new ArrayList<String>();
 
         var got = packages.provide(TESSERACT, said::add, () -> false);
@@ -173,7 +181,7 @@ class HostPackagesTest {
     void nothingToDoOrNothingToDoItWith(@TempDir Path tmp) {
         var apt = new FakeApt();
         apt.installed = Set.of("tesseract-ocr", "tesseract-ocr-eng");
-        var packages = new HostPackages(tmp.resolve("sp"), apt);
+        var packages = fake(tmp.resolve("sp"), apt);
         var got = packages.provide(TESSERACT, line -> fail("nothing to install: " + line), () -> false);
         assertNull(got.root());
         assertNull(got.failure());
@@ -182,13 +190,13 @@ class HostPackagesTest {
 
         var none = new FakeApt();
         none.has = false;
-        var without = new HostPackages(tmp.resolve("sp2"), none).provide(TESSERACT, null, () -> false);
+        var without = fake(tmp.resolve("sp2"), none).provide(TESSERACT, null, () -> false);
         assertTrue(without.failure().contains("no apt"), without.failure());
         assertTrue(none.calls.isEmpty());
 
         for (String bad : List.of("-o", "--allow-unauthenticated", "Tesseract", "a", "tess ocr", "x;rm", "../etc")) {
             var odd = new FakeApt();
-            var refused = new HostPackages(tmp.resolve("sp3"), odd).provide(List.of(bad), null, () -> false);
+            var refused = fake(tmp.resolve("sp3"), odd).provide(List.of(bad), null, () -> false);
             assertNotNull(refused.failure(), bad);
             assertTrue(odd.calls.isEmpty(), bad + ": apt is never handed it");
         }
@@ -200,31 +208,38 @@ class HostPackagesTest {
     void failuresAreSaid(@TempDir Path tmp) throws Exception {
         var unknown = new FakeApt();
         unknown.simulateExit = 100;
-        var a = new HostPackages(tmp.resolve("a"), unknown).provide(TESSERACT, null, () -> false);
+        var a = fake(tmp.resolve("a"), unknown).provide(TESSERACT, null, () -> false);
         assertTrue(a.failure().contains("Unable to locate package"), a.failure());
         assertNull(a.root());
 
         var offline = new FakeApt();
         offline.downloadExit = 100;
-        var b = new HostPackages(tmp.resolve("b"), offline).provide(TESSERACT, null, () -> false);
+        var b = fake(tmp.resolve("b"), offline).provide(TESSERACT, null, () -> false);
         assertTrue(b.failure().contains("404 Not Found"), b.failure());
         try (var left = Files.list(tmp.resolve("b"))) {
-            assertEquals(Set.of("apt", "query"), Set.copyOf(left.map(p -> p.getFileName().toString()).toList()),
-                    "no set, nor its partial");
+            var names = Set.copyOf(left.map(p -> p.getFileName().toString()).toList());
+            assertTrue(names.contains("apt") && names.contains("query"), String.valueOf(names));
+            assertEquals(3, names.size(), "no set, nor its partial -- only that it failed: " + names);
+            assertTrue(names.stream().anyMatch(n -> n.endsWith(".failed")), String.valueOf(names));
         }
-        // Made again next time, not taken for done.
+        // Made again after the hour, not taken for done.
+        try (var left = Files.list(tmp.resolve("b"))) {
+            for (Path f : left.filter(x -> x.getFileName().toString().endsWith(".failed")).toList()) {
+                Files.setLastModifiedTime(f, FileTime.from(Instant.now().minus(Duration.ofHours(2))));
+            }
+        }
         offline.downloadExit = 0;
-        assertNull(new HostPackages(tmp.resolve("b"), offline).provide(TESSERACT, null, () -> false).failure());
+        assertNull(fake(tmp.resolve("b"), offline).provide(TESSERACT, null, () -> false).failure());
 
         var odd = new FakeApt();
         odd.inst = "Inst --force-yes (1.0)\n";
-        var c = new HostPackages(tmp.resolve("c"), odd).provide(TESSERACT, null, () -> false);
+        var c = fake(tmp.resolve("c"), odd).provide(TESSERACT, null, () -> false);
         assertTrue(c.failure().contains("no package name"), c.failure());
         assertEquals(0, odd.count("download"), "never handed to apt-get download");
 
         var noLists = new FakeApt();
         noLists.updateExit = 100;
-        var d = new HostPackages(tmp.resolve("d"), noLists).provide(TESSERACT, null, () -> false);
+        var d = fake(tmp.resolve("d"), noLists).provide(TESSERACT, null, () -> false);
         assertTrue(d.failure().contains("package lists could not be fetched"), d.failure());
     }
 
@@ -232,7 +247,7 @@ class HostPackagesTest {
     @DisplayName("the lists are made fresh once a day; old ones are used when the archives are out of reach")
     void listsOncePerDay(@TempDir Path tmp) throws Exception {
         var apt = new FakeApt();
-        var packages = new HostPackages(tmp.resolve("sp"), apt);
+        var packages = fake(tmp.resolve("sp"), apt);
         assertNull(packages.provide(TESSERACT, null, () -> false).failure());
         assertNull(packages.provide(List.of("poppler-utils"), null, () -> false).failure());
         assertEquals(1, apt.count("update"), "made once for both sets");
@@ -248,7 +263,7 @@ class HostPackagesTest {
     @DisplayName("a set not used for eight days is removed, and what an unpacking left; a set in use and the lists stay")
     void unusedSetsAreSwept(@TempDir Path tmp) throws Exception {
         var apt = new FakeApt();
-        var packages = new HostPackages(tmp.resolve("sp"), apt);
+        var packages = fake(tmp.resolve("sp"), apt);
         Path used = packages.provide(TESSERACT, null, () -> false).root().getParent();
         Path old = Files.createDirectories(tmp.resolve("sp/0123456789abcdef/root"));
         Files.writeString(old.getParent().resolve("ready"), "x");
@@ -273,7 +288,7 @@ class HostPackagesTest {
     void onceForTwoAtOnce(@TempDir Path tmp) throws Exception {
         var apt = new FakeApt();
         apt.holdDownload = new CountDownLatch(1);
-        var packages = new HostPackages(tmp.resolve("sp"), apt);
+        var packages = fake(tmp.resolve("sp"), apt);
         var got = new HostPackages.Provided[2];
         Thread first = Thread.ofVirtual().start(() -> got[0] = packages.provide(TESSERACT, null, () -> false));
         Thread second = Thread.ofVirtual().start(() -> got[1] = packages.provide(TESSERACT, null, () -> false));
@@ -310,7 +325,7 @@ class HostPackagesTest {
         var apt = new FakeApt();
         apt.inst = "Inst libtiff6 [4.5.0-6] (4.5.0-6+deb12u1 Debian-Security:12 [amd64])\n"
                 + "Inst tesseract-ocr (5.3.0-2 Debian:12 [amd64])\nInst tesseract-ocr-eng (1:4.1.0-2 Debian:12 [all])\n";
-        assertNull(new HostPackages(tmp.resolve("sp"), apt).provide(TESSERACT, null, () -> false).failure());
+        assertNull(fake(tmp.resolve("sp"), apt).provide(TESSERACT, null, () -> false).failure());
         var download = apt.calls.get(indexOf(apt, "download"));
         assertFalse(download.contains("libtiff6"), String.valueOf(download));
         assertTrue(download.contains("tesseract-ocr"));
@@ -322,7 +337,7 @@ class HostPackagesTest {
     void onlyExactNames(@TempDir Path tmp) {
         var apt = new FakeApt();
         apt.inst = "Inst texlive-lang-czechslovak (2022.20230122-3 Debian:12 [all])\nInst texlive-lang-german (2022 Debian:12 [all])\n";
-        var got = new HostPackages(tmp.resolve("sp"), apt).provide(List.of("texlive-lang-.+"), null, () -> false);
+        var got = fake(tmp.resolve("sp"), apt).provide(List.of("texlive-lang-.+"), null, () -> false);
         assertNotNull(got.failure());
         assertTrue(got.failure().contains("no package named exactly \"texlive-lang-.+\""), got.failure());
         assertEquals(0, apt.count("download"));
@@ -333,7 +348,7 @@ class HostPackagesTest {
     void heldIsInstalled(@TempDir Path tmp) {
         var apt = new FakeApt();
         apt.held = Set.of("tesseract-ocr", "tesseract-ocr-eng");
-        var got = new HostPackages(tmp.resolve("sp"), apt).provide(TESSERACT, null, () -> false);
+        var got = fake(tmp.resolve("sp"), apt).provide(TESSERACT, null, () -> false);
         assertNull(got.failure(), got.failure());
         assertNull(got.root());
     }
@@ -345,14 +360,16 @@ class HostPackagesTest {
         Files.createDirectories(host.resolve("5/tessdata"));
         Files.writeString(host.resolve("5/tessdata/eng.traineddata"), "host eng");
         Files.writeString(host.resolve("5/tessdata/osd.traineddata"), "host osd");
+        Files.createDirectories(host.resolve("5/tessdata/configs"));
+        Files.writeString(host.resolve("5/tessdata/configs/tsv"), "tessedit_create_tsv 1");
         var apt = new FakeApt();
         apt.installed = Set.of("tesseract-ocr", "tesseract-ocr-eng");
-        var got = new HostPackages(tmp.resolve("sp"), apt, host)
+        var got = new HostPackages(tmp.resolve("sp"), apt, host).withHostLibraries(NOWHERE)
                 .provide(List.of("tesseract-ocr", "tesseract-ocr-ces", "tesseract-ocr-eng"), null, () -> false);
         assertNull(got.failure(), got.failure());
         Path data = Path.of(got.env().get("TESSDATA_PREFIX"));
         try (var files = Files.list(data)) {
-            assertEquals(Set.of("ces.traineddata", "eng.traineddata", "osd.traineddata"),
+            assertEquals(Set.of("ces.traineddata", "eng.traineddata", "osd.traineddata", "configs"),
                     Set.copyOf(files.map(f -> f.getFileName().toString()).toList()));
         }
         assertTrue(Files.isSymbolicLink(data.resolve("eng.traineddata")));
@@ -366,7 +383,7 @@ class HostPackagesTest {
     void aStopWhileWaiting(@TempDir Path tmp) throws Exception {
         var apt = new FakeApt();
         apt.holdDownload = new CountDownLatch(1);
-        var packages = new HostPackages(tmp.resolve("sp"), apt);
+        var packages = fake(tmp.resolve("sp"), apt);
         Thread first = Thread.ofVirtual().start(() -> packages.provide(TESSERACT, null, () -> false));
         long until = System.currentTimeMillis() + 10_000;
         while (apt.count("download") < 1 && System.currentTimeMillis() < until) Thread.sleep(10);
@@ -397,10 +414,62 @@ class HostPackagesTest {
         Path last = tmp.resolve("sp").resolve(HostPackages.key(TESSERACT, today.minusWeeks(1)));
         Files.createDirectories(last.resolve("root/usr/bin"));
         Files.writeString(last.resolve("ready"), "x");
+        Files.writeString(last.resolve("packages.txt"), "tesseract-ocr\n");
+        Files.writeString(last.resolve("wanted.txt"), "tesseract-ocr\ntesseract-ocr-eng\n");
         apt.downloadExit = 100;
-        var got = new HostPackages(tmp.resolve("sp"), apt).provide(TESSERACT, null, () -> false);
+        var got = fake(tmp.resolve("sp"), apt).provide(TESSERACT, null, () -> false);
         assertNull(got.failure(), got.failure());
         assertEquals(last.resolve("root"), got.root());
+    }
+
+    @Test
+    @DisplayName("a library the host has at the same path is taken out of the set: bubblewrap and every program load the host's")
+    void theHostsLibrariesWin(@TempDir Path tmp) throws Exception {
+        Path host = tmp.resolve("host");
+        Files.createDirectories(host.resolve("usr/lib/x86_64-linux-gnu"));
+        Files.writeString(host.resolve("usr/lib/x86_64-linux-gnu/libleptonica6.so"), "the host's");
+        var got = new HostPackages(tmp.resolve("sp"), new FakeApt(), NOWHERE).withHostLibraries(host)
+                .provide(TESSERACT, null, () -> false);
+        assertNull(got.failure(), got.failure());
+        Path libs = got.root().resolve("usr/lib/x86_64-linux-gnu");
+        assertFalse(Files.exists(libs.resolve("libleptonica6.so")), "the host's own is the one loaded");
+        assertTrue(Files.exists(libs.resolve("libtesseract5.so")), "one the host has not stays");
+    }
+
+    @Test
+    @DisplayName("a set that would replace a package of the host's is refused")
+    void noReplacement(@TempDir Path tmp) {
+        var apt = new FakeApt();
+        apt.inst = "Remv chrony [4.3-2]\nInst ntpsec (1.2.2 Debian:12 [amd64])\n";
+        var got = fake(tmp.resolve("sp"), apt).provide(List.of("ntpsec"), null, () -> false);
+        assertTrue(got.failure().contains("would replace chrony"), got.failure());
+        assertEquals(0, apt.count("download"));
+    }
+
+    @Test
+    @DisplayName("a fetch that failed is not tried again within the hour, and the newest earlier set of the same packages is used meanwhile")
+    void aFailureBacksOff(@TempDir Path tmp) throws Exception {
+        var apt = new FakeApt();
+        apt.downloadExit = 100;
+        var packages = fake(tmp.resolve("sp"), apt);
+        assertNotNull(packages.provide(TESSERACT, null, () -> false).failure());
+        assertEquals(1, apt.count("download"));
+        assertNotNull(packages.provide(TESSERACT, null, () -> false).failure());
+        assertEquals(1, apt.count("download"), "not again within the hour");
+
+        // Two weeks ago's set, still kept: used while this week's cannot be had.
+        var older = new FakeApt();
+        var store = tmp.resolve("sp2");
+        var today = java.time.LocalDate.now(java.time.ZoneOffset.UTC);
+        Path old = store.resolve(HostPackages.key(TESSERACT, today.minusWeeks(2)));
+        Files.createDirectories(old.resolve("root/usr/bin"));
+        Files.writeString(old.resolve("ready"), "x");
+        Files.writeString(old.resolve("packages.txt"), "tesseract-ocr\n");
+        Files.writeString(old.resolve("wanted.txt"), "tesseract-ocr\ntesseract-ocr-eng\n");
+        older.downloadExit = 100;
+        var got = fake(store, older).provide(TESSERACT, null, () -> false);
+        assertNull(got.failure(), got.failure());
+        assertEquals(old.resolve("root"), got.root());
     }
 
     private static int indexOf(FakeApt apt, String verb) {

@@ -64,7 +64,7 @@ class SkillRunsWithHostPackagesTest {
     @DisplayName("the run reads the packages' directory, finds their programs after its own PATH, and their libraries and data")
     void theRunFindsThem(@TempDir Path tmp) throws Exception {
         var host = new Recording();
-        var packages = new HostPackages(tmp.resolve("data/system-packages"), new HostPackagesTest.FakeApt());
+        var packages = HostPackagesTest.fake(tmp.resolve("data/system-packages"), new HostPackagesTest.FakeApt());
         var said = new ArrayList<String>();
         var context = new ToolExecutionContext("u1", "t1", null, () -> false, (line, data) -> said.add(line), List.of());
 
@@ -82,13 +82,34 @@ class SkillRunsWithHostPackagesTest {
     }
 
     @Test
+    @DisplayName("a task stopped while its packages are fetched does not run the skill")
+    void aStoppedTaskDoesNotRun(@TempDir Path tmp) throws Exception {
+        var host = new Recording();
+        var stopped = new java.util.concurrent.atomic.AtomicBoolean();
+        var apt = new HostPackagesTest.FakeApt() {
+            @Override
+            public HostPackages.Ran run(List<String> argv, Path dir, List<Path> readOnly, Map<String, String> env,
+                                        java.util.function.BooleanSupplier stop) throws java.io.IOException, InterruptedException {
+                if (argv.contains("download")) stopped.set(true);   // the owner presses Stop meanwhile
+                return super.run(argv, dir, readOnly, env, stop);
+            }
+        };
+        var packages = HostPackagesTest.fake(tmp.resolve("data/system-packages"), apt);
+        var result = skill(tmp, host, packages).execute(Map.of(),
+                new ToolExecutionContext("u1", "t1", null, stopped::get, null, List.of()));
+        assertFalse(result.success());
+        assertTrue(result.output().startsWith("Stopped while the system packages"), result.output());
+        assertTrue(host.envs.isEmpty(), "the skill did not run");
+    }
+
+    @Test
     @DisplayName("packages that cannot be had: the skill runs as before, and its failure says why")
     void withoutThemTheFailureSaysWhy(@TempDir Path tmp) throws Exception {
         var host = new Recording();
         host.stdout = "{\"success\": false, \"error\": \"tesseract is not installed or it's not in your PATH\"}";
         var apt = new HostPackagesTest.FakeApt();
         apt.simulateExit = 100;
-        var packages = new HostPackages(tmp.resolve("data/system-packages"), apt);
+        var packages = HostPackagesTest.fake(tmp.resolve("data/system-packages"), apt);
         var context = new ToolExecutionContext("u1", "t1", null, () -> false, null, List.of());
 
         var result = skill(tmp, host, packages).execute(Map.of(), context);

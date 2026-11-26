@@ -179,6 +179,12 @@ public class HostPackages {
         this.hostTesseract = hostTesseract;
     }
 
+    /** For a test: where the host's libraries are looked for, as the root of the paths a set unpacks them at. */
+    HostPackages withHostLibraries(Path root) {
+        this.hostLibraryRoot = List.of(root);
+        return this;
+    }
+
     /** A step ended because the task was stopped: no interrupt of the thread, which runs on. */
     static final class Stopped extends IOException {
         Stopped() {
@@ -224,18 +230,25 @@ public class HostPackages {
                             progress.accept("Installing system packages " + String.join(", ", missing)
                                     + " for this skill (once a week, without root)");
                         }
+                        Path failed = store.resolve(set.getFileName() + ".failed");
+                        String lastFailure = recentFailure(failed);
                         try {
+                            // A fetch that failed within the hour is not tried again on every run: the
+                            // archives out of reach, a mirror that stalls, cost each run minutes.
+                            if (lastFailure != null) throw new IOException(lastFailure + " (within the hour; tried again later)");
                             unpack(missing, set, stopped);
+                            Files.deleteIfExists(failed);
                         } catch (Stopped stop) {
                             throw stop;
                         } catch (IOException fetched) {
-                            // Last week's set, while it is kept: the archives out of reach on a Monday
-                            // do not take the skill's packages away.
-                            Path last = store.resolve(key(missing, java.time.LocalDate.now(java.time.ZoneOffset.UTC).minusWeeks(1)));
-                            if (!inUse(last)) throw fetched;
-                            log.warn("System packages {} could not be fetched again, last week's are used: {}", missing,
+                            if (lastFailure == null) Files.writeString(failed, String.valueOf(fetched.getMessage()));
+                            // The newest earlier set of the same packages, while it is kept: the archives
+                            // out of reach on a Monday do not take the skill's packages away.
+                            Path earlier = newestEarlier(missing, set);
+                            if (earlier == null || !inUse(earlier)) throw fetched;
+                            log.warn("System packages {} could not be fetched again, an earlier set is used: {}", missing,
                                     fetched.getMessage());
-                            set = last;
+                            set = earlier;
                         }
                     }
                 } finally {
@@ -253,6 +266,34 @@ public class HostPackages {
             log.warn("System packages {} could not be had: {}", wanted, e.getMessage());
             return Provided.failed(String.valueOf(e.getMessage()));
         }
+    }
+
+    /** Why the fetch of a set failed, when it failed within the hour; else null. */
+    private static String recentFailure(Path failed) throws IOException {
+        if (!Files.isRegularFile(failed, LinkOption.NOFOLLOW_LINKS)) return null;
+        if (Files.getLastModifiedTime(failed).toInstant().isBefore(Instant.now().minus(Duration.ofHours(1)))) return null;
+        return Files.readString(failed).strip();
+    }
+
+    /** The newest ready set but {@code not} unpacked for exactly {@code missing} ({@code wanted.txt}), or null. */
+    private Path newestEarlier(List<String> missing, Path not) throws IOException {
+        if (!Files.isDirectory(store)) return null;
+        String wanted = String.join("\n", new TreeSet<>(missing)) + "\n";
+        Path best = null;
+        Instant newest = Instant.MIN;
+        try (Stream<Path> sets = Files.list(store)) {
+            for (Path p : sets.toList()) {
+                if (p.equals(not) || !p.getFileName().toString().matches("[0-9a-f]{16}") || !ready(p)) continue;
+                Path w = p.resolve("wanted.txt");
+                if (!Files.isRegularFile(w, LinkOption.NOFOLLOW_LINKS) || !Files.readString(w).equals(wanted)) continue;
+                Instant made = Files.getLastModifiedTime(p.resolve("packages.txt")).toInstant();
+                if (made.isAfter(newest)) {
+                    newest = made;
+                    best = p;
+                }
+            }
+        }
+        return best;
     }
 
     /**
@@ -340,6 +381,11 @@ public class HostPackages {
             sim.addAll(missing);
             Ran simulated = commands.run(sim, work, List.of(apt), plainEnv(tmp), stopped);
             if (simulated.exit() != 0) throw new IOException("apt cannot install " + String.join(", ", missing) + ": " + tail(simulated.output()));
+            Matcher removes = Pattern.compile("(?m)^Remv (\\S+)").matcher(simulated.output());
+            if (removes.find()) {
+                throw new IOException("installing " + String.join(", ", missing) + " would replace " + removes.group(1)
+                        + " of the host's: its files are not taken");
+            }
             var names = new ArrayList<String>();
             Matcher m = INST.matcher(simulated.output());
             while (m.find()) {
@@ -373,8 +419,10 @@ public class HostPackages {
                 if (x.exit() != 0) throw new IOException("unpacking " + deb.getFileName() + " failed: " + tail(x.output()));
             }
             noSetIds(root);
+            withoutHostLibraries(root);
             withHostLanguages(root);
             Files.writeString(work.resolve("packages.txt"), String.join("\n", names) + "\n");
+            Files.writeString(work.resolve("wanted.txt"), String.join("\n", new TreeSet<>(missing)) + "\n");
             delete(dl);
             delete(tmp);
             Files.writeString(work.resolve("ready"), Instant.now() + "\n");
@@ -443,6 +491,43 @@ public class HostPackages {
         return env;
     }
 
+    /** Where the host keeps its libraries, by the paths a set unpacks them at. */
+    private List<Path> hostLibraryRoot = List.of(Path.of("/"));
+
+    /**
+     * Every library of the set whose name the host has at the same path taken out: LD_LIBRARY_PATH
+     * comes before the host's own libraries, for every program the run starts -- bubblewrap among
+     * them, which starts outside the jail with the run's environment -- so a set may add a library
+     * the host has not, never stand in for one it has. Only the library directories: usr/lib,
+     * lib, and their architecture's.
+     */
+    void withoutHostLibraries(Path root) throws IOException {
+        for (String d : List.of("usr/lib", "lib")) {
+            Path base = root.resolve(d);
+            if (!Files.isDirectory(base, LinkOption.NOFOLLOW_LINKS)) continue;
+            var dirs = new ArrayList<Path>(List.of(base));
+            try (Stream<Path> arch = Files.list(base)) {
+                arch.filter(p -> p.getFileName().toString().matches("[a-z0-9_]+-linux-gnu[a-z0-9_]*"))
+                        .filter(p -> Files.isDirectory(p, LinkOption.NOFOLLOW_LINKS)).forEach(dirs::add);
+            }
+            for (Path dir : dirs) {
+                try (Stream<Path> files = Files.list(dir)) {
+                    for (Path f : files.toList()) {
+                        if (Files.isDirectory(f, LinkOption.NOFOLLOW_LINKS) || !f.getFileName().toString().contains(".so")) continue;
+                        Path relative = root.relativize(f);
+                        for (Path host : hostLibraryRoot) {
+                            if (Files.exists(host.resolve(relative.toString()), LinkOption.NOFOLLOW_LINKS)) {
+                                Files.delete(f);
+                                log.info("A library of the host's own is not taken from the set: {}", relative);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /**
      * The host's tesseract languages, linked into the set's tessdata where it lacks them: the set's
      * TESSDATA_PREFIX is where every tesseract the run starts looks -- the host's own too, when the
@@ -458,9 +543,9 @@ public class HostPackages {
                 Path data = v.resolve("tessdata");
                 if (!Files.isDirectory(data)) continue;
                 try (Stream<Path> files = Files.list(data)) {
-                    for (Path f : files.sorted().toList()) {
-                        if (f.getFileName().toString().endsWith(".traineddata")) hostFiles.putIfAbsent(f.getFileName().toString(), f);
-                    }
+                    // Every entry: its languages, and its configs/ and tessconfigs/, which tsv, pdf and
+                    // hocr output read.
+                    for (Path f : files.sorted().toList()) hostFiles.putIfAbsent(f.getFileName().toString(), f);
                 }
             }
         }
@@ -558,6 +643,10 @@ public class HostPackages {
         try (Stream<Path> sets = Files.list(store)) {
             for (Path p : sets.toList()) {
                 String n = p.getFileName().toString();
+                if (n.endsWith(".failed") && Files.getLastModifiedTime(p, LinkOption.NOFOLLOW_LINKS).toInstant().isBefore(unused)) {
+                    Files.deleteIfExists(p);
+                    continue;
+                }
                 if (p.equals(keep) || n.equals("apt") || n.equals("query") || !Files.isDirectory(p, LinkOption.NOFOLLOW_LINKS)) continue;
                 try {
                     if (n.contains(".partial-")) {
