@@ -72,6 +72,13 @@ public class DynamicSkill implements Tool {
      */
     static final String RUN = "_run";
 
+    /**
+     * The key the runner alone sets, to this run's id, on the result it makes of an exception the
+     * skill raised: its "Skill error: ..." and traceback are then the runner's own account, not
+     * text a skill returned under that prefix -- which can be anything it read.
+     */
+    static final String RAISED = "_raised";
+
     /** An import statement of skill.py: at a line's start, or after a colon or a semicolon ("try: import ujson"). */
     private static final Pattern IMPORT = Pattern.compile("(?:^|[:;])\\s*import\\s+([^#;]+)");
     private static final Pattern FROM_IMPORT = Pattern.compile("(?:^|[:;])\\s*from\\s+([A-Za-z_]\\w*)[\\w.]*\\s+import\\b");
@@ -477,9 +484,10 @@ public class DynamicSkill implements Tool {
         "            result['success'] = True",
         "        result.pop('" + MISSING_MODULE + "', None)",
         "        result.pop('" + RUN + "', None)",
+        "        result.pop('" + RAISED + "', None)",
         "        _result(result)",
         "    except Exception as e:",
-        "        failed = {'success': False, 'output': f'Skill error: {e}\\n{traceback.format_exc()}'}",
+        "        failed = {'success': False, 'output': f'Skill error: {e}\\n{traceback.format_exc()}', '" + RAISED + "': _run_id}",
         "        if isinstance(e, ModuleNotFoundError) and isinstance(e.name, str):",
         "            failed['" + MISSING_MODULE + "'] = e.name",
         "            failed['" + RUN + "'] = _run_id",
@@ -683,7 +691,7 @@ public class DynamicSkill implements Tool {
                         context.progressCallback(), readOnlyFor(resolution, readable), context.userId());
             }
 
-            ToolResult toolResult = withoutFileNames(interpret(result), attachedFiles);
+            ToolResult toolResult = withoutFileNames(interpret(result, runId), attachedFiles);
 
             // Self-heal: ModuleNotFoundError → install missing package → retry once. What the
             // retry returns is the answer, failure included: the package is in by then, and the
@@ -706,7 +714,7 @@ public class DynamicSkill implements Tool {
                             runnerScript, skillDir, inputJson, envVars, timeoutSec, extraVolumes, readable,
                             packages, context.userId());
                     if (retry != null) {
-                        toolResult = withoutFileNames(interpret(retry), attachedFiles);
+                        toolResult = withoutFileNames(interpret(retry, runId), attachedFiles);
                         log.info("Self-heal retry of skill '{}': {}", name,
                                 toolResult.success() ? "succeeded" : "failed");
                     }
@@ -879,14 +887,14 @@ public class DynamicSkill implements Tool {
      * What a run of the skill returned: a stall with what it wrote before going quiet, a crash
      * with its stderr and whatever reached stdout, or the harness's result ({@link #parseOutput}).
      */
-    private ToolResult interpret(SandboxResult result) {
+    private ToolResult interpret(SandboxResult result, String runId) {
         if (result.timedOut()) {
             // What it wrote before it went quiet is the only evidence of where it hung.
             String stalled = "Skill '" + name + "' stalled (no output for " + timeoutSec + "s).";
             return ToolResult.failure(stalled + printed("stdout", result.stdout())
                     + printed("stderr", result.stderr()), withoutPrinted(stalled + printed("stderr", result.stderr()), result.stdout()));
         }
-        if (result.isSuccess()) return parseOutput(result.stdout(), result.stderr());
+        if (result.isSuccess()) return parseOutput(result.stdout(), result.stderr(), runId);
         // A crash can leave stdout as well as stderr: a subprocess writes to it directly.
         String crashed = result.stderr().isBlank() ? "Exit code: " + result.exitCode() : result.stderr();
         return ToolResult.failure(crashed + printed("stdout", result.stdout()), withoutPrinted(crashed, result.stdout()));
@@ -924,7 +932,7 @@ public class DynamicSkill implements Tool {
      * @param stdout the script's standard output
      * @param stderr the script's standard error
      */
-    private ToolResult parseOutput(String stdout, String stderr) {
+    private ToolResult parseOutput(String stdout, String stderr, String runId) {
         if (stdout == null || stdout.isBlank()) {
             String detail = (stderr != null && !stderr.isBlank())
                     ? "stderr: " + stderr.strip()
@@ -957,6 +965,9 @@ public class DynamicSkill implements Tool {
         if (asksForInput(parsed)) return said(NEED_INPUT_UNSUPPORTED);
         // The runner's own word to the self-heal (toHeal), no part of what the skill returned.
         parsed.remove(MISSING_MODULE);
+        // Whether the runner made this result of an exception the skill raised: its own key, this run's id.
+        boolean raised = runId != null && parsed.has(RAISED) && runId.equals(parsed.get(RAISED).asText(""));
+        parsed.remove(RAISED);
         parsed.remove(RUN);
         boolean success = BooleanNode.TRUE.equals(parsed.get("success"));
         JsonNode returned = parsed.get("output");
@@ -1004,11 +1015,12 @@ public class DynamicSkill implements Tool {
         // account of an exception it raised ("Skill error: ..." and the traceback); and its stderr.
         JsonNode error = parsed.get("error");
         String saidBack = returned != null && returned.isTextual() ? returned.asText() : null;
-        String own = error != null && error.isTextual() ? firstLine(error.asText())
-                : saidBack != null && saidBack.startsWith("Skill error:") ? saidBack
+        String own = raised && saidBack != null ? saidBack
+                : error != null && error.isTextual() ? firstLine(error.asText())
                 : saidBack != null && saidBack.startsWith("ERROR:") ? firstLine(saidBack) : null;
         String streamed = stderr == null || stderr.isBlank() ? "" : printed("stderr", stderr);
-        return ToolResult.failure(output, withoutPrinted((own == null ? "" : own.strip()) + streamed, stdout));
+        // What it printed before its result line -- never the runner's own line.
+        return ToolResult.failure(output, withoutPrinted((own == null ? "" : own.strip()) + streamed, before));
     }
 
     private static String firstLine(String text) {
@@ -1019,16 +1031,21 @@ public class DynamicSkill implements Tool {
 
     /**
      * {@code error} with every line of what the process printed to stdout -- eight characters or
-     * more -- taken out where it stands in it: the data a skill reads is what it prints, and a
-     * message built from it repeats it.
+     * more, the longest first -- taken out where it stands in it: the data a skill reads is what it
+     * prints, and a message built from it repeats it. An error the skill also printed -- print(e),
+     * then return it -- is taken out with it: it cannot be told from data that is also the error.
      */
     static String withoutPrinted(String error, String stdout) {
         if (error == null || error.isBlank() || stdout == null || stdout.isBlank()) return error;
-        String out = error;
+        var lines = new ArrayList<String>();
         for (String line : stdout.split("\\R")) {
             String l = line.strip();
-            if (l.length() >= 8 && !l.startsWith("{")) out = out.replace(l, "[printed output]");
+            if (l.length() >= 8) lines.add(l);
         }
+        // The longest first: a shorter line inside a longer one would leave the rest of it.
+        lines.sort((a, b) -> b.length() - a.length());
+        String out = error;
+        for (String l : lines) out = out.replace(l, "[printed output]");
         return out;
     }
 
@@ -1104,9 +1121,13 @@ public class DynamicSkill implements Tool {
             String uploaded = f.get("name");
             if (uploaded != null && uploaded.strip().length() >= 3) {
                 forms.add(uploaded.strip());
-                // Its stem: code reads Path(p).stem as often as the name.
+                // Its stem: code reads Path(p).stem as often as the name -- when it is no everyday
+                // word ("image" of image.png would take "cannot identify image file" apart).
                 int dot = uploaded.strip().lastIndexOf('.');
-                if (dot >= 3) forms.add(uploaded.strip().substring(0, dot));
+                String stem = dot >= 3 ? uploaded.strip().substring(0, dot) : "";
+                if (stem.length() >= 6 && stem.chars().anyMatch(c -> Character.isDigit(c) || c == ' ' || c == '_' || c == '-' || c > 127)) {
+                    forms.add(stem);
+                }
             }
         }
         var names = new ArrayList<String>();

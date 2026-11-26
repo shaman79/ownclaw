@@ -227,12 +227,14 @@ public record Artifact(int n, String tool, Map<String, Object> written,
      * Its error, not its output, last, on lines of its own as a result's text is shown: the skill
      * failed in a task holding a private file, and without the error the cloud cannot repair it --
      * it asked the local model which kind of error it was instead, three steps of guessing
-     * (2026-11-25). The owner's decision. Nothing of the descriptor stands beside it on its lines:
-     * a local answer that quotes the error after a colon -- "failed with: tesseract is not ..." --
-     * is matched against the error alone, and the error is what the cloud was shown.
+     * (2026-11-25). The owner's decision. Between two lines of its own that no text quoting it
+     * holds: a local answer that quotes the error -- "failed with: tesseract is not ... So I" --
+     * shares with the descriptor the error alone, its blanks at either end, which the canary strips,
+     * and the error is what the cloud was shown.
      */
     private String shownErrorBlock() {
-        return isPrivate() && shownError != null ? "\n[its error, shown; its output is not]\n" + shownError : "";
+        return isPrivate() && shownError != null
+                ? "\n[its error, shown; its output is not]\n" + shownError + "\n[end of its error]" : "";
     }
 
     /** The descriptor, its fields named as {@code shape} names them. */

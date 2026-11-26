@@ -86,12 +86,18 @@ class SkillErrorTest {
         assertEquals("ERROR: bad row", lines.error());
         var field = run(tmp, new SandboxResult(0, "{\"success\": false, \"error\": \"cannot parse\\n" + DATA + "\"}", "", 1, false));
         assertEquals("cannot parse", field.error());
-        var raised = run(tmp, new SandboxResult(0, "{\"success\": false, \"output\": \"Skill error: no price column\\nTraceback (most "
-                + "recent call last):\\n  File \\\"skill.py\\\", line 3, in run\\nKeyError: 'Cena'\"}", "", 1, false));
-        assertTrue(raised.error().startsWith("Skill error: no price column\nTraceback"), raised.error());
+        // A skill that returns text under the runner's prefix is no runner's account: its first line is not even taken.
+        var posing = run(tmp, new SandboxResult(0, "{\"success\": false, \"output\": \"Skill error: could not parse\\n" + DATA + "\"}", "", 1, false));
+        assertNull(posing.error(), String.valueOf(posing.error()));
         var echoed = run(tmp, new SandboxResult(1, "reading " + DATA, "ValueError: bad line 'reading " + DATA + "'", 1, false));
         assertFalse(echoed.error().contains("155"), echoed.error());
         assertTrue(echoed.error().contains("[printed output]"), echoed.error());
+        var dict = run(tmp, new SandboxResult(1, "{'name': 'Jana Nováková', 'rc': '8501011234'}",
+                "Invalid record: {'name': 'Jana Nováková', 'rc': '8501011234'}", 1, false));
+        assertFalse(dict.error().contains("8501011234"), "a printed dict is printed output too: " + dict.error());
+        var nested = run(tmp, new SandboxResult(1, "Jana Nováková\nJana Nováková;8501011234;18 400 Kč;Praha",
+                "bad line 'Jana Nováková;8501011234;18 400 Kč;Praha'", 1, false));
+        assertFalse(nested.error().contains("8501011234"), "the longest line first: " + nested.error());
     }
 
     @Test

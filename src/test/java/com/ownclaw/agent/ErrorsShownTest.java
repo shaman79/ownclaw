@@ -47,7 +47,7 @@ class ErrorsShownTest {
         assertEquals(ERROR, d.shownError());
         var a = record(ctx, "ocr_image_to_text", output, d);
         String described = a.describe();
-        assertTrue(described.endsWith("\n[its error, shown; its output is not]\n" + ERROR), described);
+        assertTrue(described.endsWith("\n[its error, shown; its output is not]\n" + ERROR + "\n[end of its error]"), described);
         assertFalse(described.contains("155"), "nothing of its output: " + described);
         assertTrue(described.contains("given the file {{1}}"), described);
         // Mutation: return the file branch's decision without the error -> not shown.
@@ -157,6 +157,29 @@ class ErrorsShownTest {
         assertNull(ctx.firstLeakIn("Step 2:\n" + failed.describe() + "\nStep 3: the local model answered."));
         // Mutation: put the error inline after a colon, and excuse only the stretch as found -> a hit
         // on ": tesseract is not installed or ", and every later request is refused.
+    }
+
+    @Test
+    @DisplayName("private text beside a shown error, in an answer that quotes it, is still caught: no slack at the ends")
+    void privateTextBesideTheErrorIsCaught() {
+        var ctx = withFile("Položka;Cena\nObědové menu;155 Kč\n");
+        var failed = record(ctx, "ocr_image_to_text", "ERROR: " + ERROR, ctx.decide(List.of(), List.of(), false, "ERROR: " + ERROR, ERROR));
+        var answer = record(ctx, "local_answer", "Jana Nováková 8501011234: " + ERROR + " Na Příkopě 12, Praha 1.",
+                new Artifact.Decision(Label.PRIVATE, List.of(Artifact.quotes(failed.n())), true));
+        assertNotNull(ctx.firstLeakIn("The answer was: " + answer.output()), "the name and the number around it are private");
+        assertNull(ctx.firstLeakIn(failed.describe()), "the descriptor itself shares the error alone");
+        // Mutation: excuse a stretch the error holds but for up to a window at either end -> null.
+    }
+
+    @Test
+    @DisplayName("a shown error recorded after the hit excuses nothing of it")
+    void aLaterErrorExcusesNothing() {
+        var ctx = withFile("Položka;Cena\nObědové menu;155 Kč\n");
+        var answer = record(ctx, "local_answer", "Written before: " + ERROR,
+                new Artifact.Decision(Label.PRIVATE, List.of("quotes {{1}}"), true));
+        record(ctx, "ocr_image_to_text", "ERROR: " + ERROR, ctx.decide(List.of(), List.of(), false, "ERROR: " + ERROR, ERROR));
+        assertFalse(excused(ctx, answer.n(), PrivateIndex.normalise(ERROR).substring(0, 40)));
+        // Mutation: excuse shown errors whatever their order -> true.
     }
 
     @Test
