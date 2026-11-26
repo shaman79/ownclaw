@@ -1569,8 +1569,8 @@ public class AgentContext {
         /** {@code stretch} without what is no letter and no digit at its ends. */
         private static String core(String stretch) {
             int a = 0, b = stretch.length();
-            while (a < b && !Character.isLetterOrDigit(stretch.charAt(a))) a++;
-            while (b > a && !Character.isLetterOrDigit(stretch.charAt(b - 1))) b--;
+            while (a < b && !Character.isLetterOrDigit(stretch.codePointAt(a))) a += Character.charCount(stretch.codePointAt(a));
+            while (b > a && !Character.isLetterOrDigit(stretch.codePointBefore(b))) b -= Character.charCount(stretch.codePointBefore(b));
             return stretch.substring(a, b);
         }
 
