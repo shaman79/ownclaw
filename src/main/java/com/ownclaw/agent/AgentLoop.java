@@ -2467,7 +2467,7 @@ public class AgentLoop {
             Artifact shared = context.sharedFile(file);
             if (shared == null) {
                 var handles = context.sharedFiles().stream().map(Artifact::handle).toList();
-                return "ERROR: " + ArtifactRef.handle(file.intValue()) + " is no file the user lets you read in this "
+                return "ERROR: {{" + file + "}} is no file the user lets you read in this "
                         + "task" + (handles.isEmpty() ? "; there is none." : "; those are " + String.join(", ", handles) + ".");
             }
             if (shared.output().isEmpty()) {

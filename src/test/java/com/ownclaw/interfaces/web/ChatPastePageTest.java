@@ -160,7 +160,7 @@ class ChatPastePageTest {
         assertTrue(mark.contains("var sw = node('button', 'file-chip-switch'); sw.type = 'button'; "
                 + "sw.addEventListener('click', function() { switchCloud(chip); });"), mark);
         String sw = between("function switchCloud(chip) {", "function chatRunsFree() {");
-        assertTrue(sw.contains("if (!chip.dataset.fileId || chip.classList.contains('uploading')) return;"), "one choice at a time, once uploaded: " + sw);
+        assertTrue(sw.contains("if (!chip.dataset.fileId || chip.classList.contains('uploading') || chip.dataset.refused === '1') return;"), "one choice at a time, once uploaded: " + sw);
         assertTrue(sw.contains("var visible = chip.classList.contains('undecided') ? chip.dataset.wanted === '1' "
                 + ": !(chip.dataset.shown === '1' || chip.dataset.cloudVisible === '1');"), "unconfirmed, the same choice again: " + sw);
         assertTrue(sw.contains("chip.classList.add('uploading'); if (sw) sw.disabled = true;"),
@@ -173,8 +173,10 @@ class ChatPastePageTest {
         // A lost answer: who sees the file is not known, and the chip says so instead of what it said before.
         assertTrue(sw.contains(".catch(function(err) { settled(); if (!chip.isConnected || authToken !== token) return;"), sw);
         assertTrue(sw.contains("chip.classList.add('undecided'); chip.dataset.wanted = visible ? '1' : '0'; "
-                + "chip.dataset.failed = String(err && err.message || 'no answer'); seenLine(chip);"), sw);
+                + "chip.dataset.failed = String(err && err.message || 'no answer');"), sw);
         assertFalse(sw.contains("addMsg("), "said on the chip, not in the chat: " + sw);
+        assertTrue(sw.contains("if (r.status === 404 || r.status === 409) {"), "a refusal is an answer: " + sw);
+        assertTrue(sw.contains("chip.dataset.refused = err && err.refused ? '1' : ''; if (sw) sw.disabled = chip.dataset.refused === '1';"), sw);
         String line = between("function seenLine(chip) {", "function refreshSeen()");
         assertTrue(line.contains("sw.textContent = undecided ? (chip.dataset.wanted === '1' ? '↻ let the cloud see it' : '↻ keep private') "
                 + ": open ? '🔒 keep private' : '☁️ let the cloud see it';"), line);

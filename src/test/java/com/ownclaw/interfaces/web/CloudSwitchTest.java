@@ -141,6 +141,14 @@ class CloudSwitchTest {
         rig.jdbc.update("INSERT INTO message_attachments (message_id, file_id) VALUES ('m1', ?)", mine);
         assertEquals(409, rig.status("u1", mine, true), "it went with a message: fixed");
         assertFalse(FileStorageService.cloudVisible(rig.files.getFileInfo(mine)));
+        // Made visible, then sent: not made private after it went -- the update's own condition, no
+        // check before it, answers both.
+        String sent = rig.files.store("u1", "b.csv", "text/csv", new java.io.ByteArrayInputStream("a;b\n".getBytes()));
+        rig.cloud("u1", sent, true);
+        rig.jdbc.update("INSERT INTO message_attachments (message_id, file_id) VALUES ('m1', ?)", sent);
+        assertEquals(409, rig.status("u1", sent, false));
+        assertTrue(FileStorageService.cloudVisible(rig.files.getFileInfo(sent)), "what the message went with stays");
+        // Mutation: drop the unsent condition from the updates -> both switches go through.
     }
     @Test
     @DisplayName("a row edited to name a file outside the uploads directory: its copy is not deleted, its stored file not read")

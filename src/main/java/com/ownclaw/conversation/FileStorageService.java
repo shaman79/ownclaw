@@ -105,7 +105,6 @@ public class FileStorageService implements CloudImages {
         List<Map<String, Object>> rows = jdbc.queryForList(
                 "SELECT * FROM file_attachments WHERE id = ? AND user_id = ?", fileId, userId);
         if (rows.isEmpty()) return null;
-        if (sent(fileId)) throw new AlreadySent();
         Map<String, Object> row = rows.getFirst();
         if (!visible) {
             // The copy's path checked as every reader checks a stored name: a row edited to name
@@ -121,6 +120,8 @@ public class FileStorageService implements CloudImages {
             log.info("File {} is private, as its owner chose", fileId);
             return new Stored(fileId, false, "you chose to keep it private", null, false);
         }
+        // The image paths make no update under the unsent condition: checked first.
+        if (sent(fileId)) throw new AlreadySent();
         PastedImage already = pastedImage(row);
         if (already != null) {
             // Shown already: answered as it was shown, what its file carries beside the picture too.

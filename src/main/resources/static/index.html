@@ -7593,7 +7593,7 @@
      * chip's upload: signed out meanwhile, the answer is not drawn.
      */
     function switchCloud(chip) {
-        if (!chip.dataset.fileId || chip.classList.contains('uploading')) return;
+        if (!chip.dataset.fileId || chip.classList.contains('uploading') || chip.dataset.refused === '1') return;
         // Not confirmed, the choice asked for again: the server may have made it, or not.
         var visible = chip.classList.contains('undecided') ? chip.dataset.wanted === '1'
                 : !(chip.dataset.shown === '1' || chip.dataset.cloudVisible === '1');
@@ -7610,7 +7610,18 @@
             headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
             body: JSON.stringify({ visible: visible })
         })
-        .then(okJson)
+        .then(function(r) {
+            // A refusal is an answer: the file went with a message (409) or is gone (404), and asking
+            // again changes nothing.
+            if (r.status === 404 || r.status === 409) {
+                return r.json().catch(function() { return {}; }).then(function(b) {
+                    var refused = new Error(b && b.error || 'HTTP ' + r.status);
+                    refused.refused = true;
+                    throw refused;
+                });
+            }
+            return okJson(r);
+        })
         .then(function(said) {
             settled();
             if (!chip.isConnected || authToken !== token) return;
@@ -7630,6 +7641,8 @@
             chip.classList.add('undecided');
             chip.dataset.wanted = visible ? '1' : '0';
             chip.dataset.failed = String(err && err.message || 'no answer');
+            chip.dataset.refused = err && err.refused ? '1' : '';
+            if (sw) sw.disabled = chip.dataset.refused === '1';
             seenLine(chip);
         });
     }
@@ -7683,7 +7696,11 @@
             sw.setAttribute('aria-pressed', !undecided && open ? 'true' : 'false');
         }
         var line, full;
-        if (undecided) {
+        if (undecided && chip.dataset.refused === '1') {
+            line = '⚠️ not changed — remove it and attach it again';
+            full = 'OwnClaw refused to change who sees this file (' + chip.dataset.failed + '). Remove the file and '
+                    + 'attach it again to choose. A message is not sent with it meanwhile.';
+        } else if (undecided) {
             line = '⚠️ not confirmed — tap to try again';
             full = 'OwnClaw did not confirm ' + (chip.dataset.wanted === '1' ? 'letting the cloud model see this file'
                     : 'keeping this file private') + ' (' + chip.dataset.failed + '), so who sees it is not known. Tap "'
