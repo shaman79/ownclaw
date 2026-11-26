@@ -193,10 +193,11 @@ final class FactCapture {
         }
         var known = new HashSet<String>();
         for (var e : kept) known.add(same(e.content()));
+        Set<String> said = secretsSaid(turn);
         int done = 0;
         for (Note note : notes(reply.content())) {
             try {
-                if (keep(turn, note, secrets, known)) done++;
+                if (keep(turn, note, secrets, said, known)) done++;
             } catch (StackOverflowError tooDeep) {
                 // A note so long and so dotted that a pattern recursed past the stack: in doubt,
                 // not kept -- and the turn's other notes are still read.
@@ -210,7 +211,7 @@ final class FactCapture {
     }
 
     /** {@code note} kept, and shown; whether it was. */
-    private boolean keep(Turn turn, Note note, Map<String, String> secrets, Set<String> known) {
+    private boolean keep(Turn turn, Note note, Map<String, String> secrets, Set<String> said, Set<String> known) {
         String fact = note.fact();
         if (structured(fact)) {
             log.info("A fact of a chat turn of {} was refused: it is not one line of plain text.", turn.userId());
@@ -221,7 +222,7 @@ final class FactCapture {
             log.info("A fact of a chat turn of {} was refused: it holds a secret or a personal number.", turn.userId());
             return false;
         }
-        if (holdsASecret(fact, secretsSaid(turn))) {
+        if (holdsASecret(fact, said)) {
             log.info("A fact of a chat turn of {} was refused: a value of it is called a secret where it was said.",
                     turn.userId());
             return false;
@@ -763,22 +764,40 @@ final class FactCapture {
     /** How far past a word saying a secret its value may stand: "the password for the guest network is X". */
     static final int AFTER_A_SECRET_WORD = 60;
 
-    /** Words that say what follows is the value: "is", "je", "zní" -- and a colon or an equals sign after a word. */
+    /** Words that say what follows is the value: "is", "je", "zní". */
     private static final Set<String> COPULAS = Set.of("is", "are", "was", "were", "be", "je", "jsou", "byl", "bylo",
             "byla", "zní", "bude", "equals");
 
     /** Words between a secret word and its value that are neither: "below", "the", "for", "k". */
     private static final Set<String> FILLERS = Set.of("below", "níže", "dole", "now", "set", "to", "the", "new", "for",
-            "pro", "k", "ke", "of", "od", "na", "nastaveno", "still", "stále", "here", "zde", "tady");
+            "pro", "k", "ke", "of", "od", "na", "nastaveno", "still", "stále", "here", "zde", "tady", "my", "our", "your",
+            "its", "můj", "moje", "naše", "a", "an");
+
+    /** A word before a secret word that makes it no secret's: "error code", "status code", "GPIO pin", "exit code". */
+    private static final Set<String> NOT_A_SECRET = Set.of("error", "status", "fault", "exit", "return", "response", "http",
+            "zip", "postal", "post", "area", "country", "source", "qr", "bar", "colour", "color", "chybový", "chybovým",
+            "stavový", "gpio", "foreign", "primary", "sort", "api", "hot", "shortcut", "music", "room", "piano");
 
     /**
-     * The values the owner's messages and the answer call secrets, as written there: after a word
-     * that says a secret follows, within {@link #AFTER_A_SECRET_WORD} characters, the first word
-     * that is like one ({@link #secretLike}) -- "the guest password is below:" and sunflower77 on
-     * the next line, "heslo k routeru je Kocour2024", "PIN: 4711". And where a secret word stands in a comment
-     * after values on its line ("guest: sunflower77   # guest password"), those values. A note
-     * holding one, as a word of its own, is not kept ({@link #holdsASecret}): a note leaves the
-     * secret word out as easily as it keeps it, and kept, it is in every prompt. One pass per text.
+     * The values the owner's messages and the answer call secrets, as written there -- read once a
+     * turn, in one pass over each text:
+     * <ul>
+     *   <li>after a word that says a secret follows, within {@link #AFTER_A_SECRET_WORD}
+     *       characters and with nothing but "is", "je", "the", "below", a colon between, the word
+     *       there when it is like one ({@link #secretLike}): "PIN is 4711", "password: sunflower77";
+     *       and when the line ends there -- "the guest password is below:" -- the first word of the
+     *       next line;</li>
+     *   <li>every word shaped like a credential in a sentence that holds such a word: "Use
+     *       sunflower77 as the guest Wi-Fi password", "The Wi-Fi password for SSID Home5G is
+     *       Kocour2024";</li>
+     *   <li>values before a comment that holds such a word: "guest: sunflower77   # guest
+     *       password".</li>
+     * </ul>
+     * A word saying a secret after "error", "status", "GPIO" ... is none: "error code F28", "GPIO
+     * pin 21". A note holding one of the values, as a word of its own, is not kept
+     * ({@link #holdsASecret}): a note leaves the secret word out as easily as it keeps it, and kept,
+     * it is in every prompt. What is left: a password of letters alone, or one written further
+     * from the word than this reads.
      */
     static Set<String> secretsSaid(Turn turn) {
         var texts = new ArrayList<String>(turn.said());
@@ -786,27 +805,64 @@ final class FactCapture {
         var out = new HashSet<String>();
         for (String text : texts) {
             Matcher w = SECRET_WORD.matcher(text);
+            int sentenceDone = 0;
             while (w.find()) {
+                if (NOT_A_SECRET.contains(wordBefore(text, w.start()))) continue;
+                // After it: the value -- right after it, or after "is", "je", a colon -- with only
+                // fillers between; words before a copula ("for the guest network", "k routeru") are
+                // passed over, the first content word after one is the value or there is none.
                 int i = w.end();
                 int limit = Math.min(text.length(), w.end() + AFTER_A_SECRET_WORD);
+                boolean lineEnded = false, copula = false, first = true;
                 while (i < limit) {
-                    while (i < limit && Character.isWhitespace(text.charAt(i))) i++;
+                    while (i < limit && Character.isWhitespace(text.charAt(i))) {
+                        if (text.charAt(i) == '\n') lineEnded = true;
+                        i++;
+                    }
+                    if (lineEnded) break;
                     int start = i;
-                    while (i < text.length() && !Character.isWhitespace(text.charAt(i))) i++;
+                    while (i < limit && !Character.isWhitespace(text.charAt(i))) i++;
                     if (start >= i) break;
                     String raw = text.substring(start, i);
                     String token = raw.replaceAll("^[\\p{Punct}„“”‘’«»]+|[\\p{Punct}„“”‘’«»]+$", "");
-                    boolean quoted = raw.matches("^[\"'„“‘«`].*");
                     String lower = token.toLowerCase(Locale.ROOT);
-                    if (!token.isEmpty() && !COPULAS.contains(lower) && !FILLERS.contains(lower) && secretLike(token, quoted)) {
+                    boolean quoted = raw.matches("^[\"'„“‘«`].*");
+                    if (raw.startsWith(":") || raw.startsWith("=")) copula = true;
+                    if (token.isEmpty() || COPULAS.contains(lower) || FILLERS.contains(lower)) {
+                        if (COPULAS.contains(lower) || raw.endsWith(":") || raw.endsWith("=")) copula = true;
+                        continue;
+                    }
+                    if ((copula || first) && secretLike(token, quoted) && !lower.startsWith("gpio")) {
                         out.add(lower);
                         break;
                     }
+                    if (copula) break;
+                    first = false;
+                    if (raw.endsWith(":") || raw.endsWith("=")) copula = true;
+                }
+                if (lineEnded && copula && i < text.length()) {
+                    int start = i;
+                    int end = start;
+                    while (end < text.length() && end < start + AFTER_A_SECRET_WORD && !Character.isWhitespace(text.charAt(end))) end++;
+                    String token = text.substring(start, end).replaceAll("^[\\p{Punct}„“”‘’«»]+|[\\p{Punct}„“”‘’«»]+$", "");
+                    if (secretLike(token, false)) out.add(token.toLowerCase(Locale.ROOT));
+                }
+                // Its sentence: every word in it shaped like a credential. Each sentence once -- a
+                // match inside a sentence already read is not looked back from.
+                if (w.start() >= sentenceDone) {
+                    int from = sentenceStart(text, w.start(), sentenceDone), to = sentenceEnd(text, w.end());
+                    for (String t0 : text.substring(from, to).split("\\s+")) {
+                        String t = t0.replaceAll("^[\\p{Punct}„“”‘’«»]+|[\\p{Punct}„“”‘’«»]+$", "");
+                        if (credentialShaped(t) && !t.contains("://")) out.add(t.toLowerCase(Locale.ROOT));
+                    }
+                    sentenceDone = Math.max(to, w.end());
                 }
                 // A secret word in a comment: what stands before the comment on its line is its value.
-                int lineStart = text.lastIndexOf('\n', w.start()) + 1;
-                String before = text.substring(lineStart, w.start());
-                int comment = Math.max(before.lastIndexOf('#'), before.lastIndexOf("//"));
+                int lineStart = w.start();
+                while (lineStart > 0 && lineStart > w.start() - 200 && text.charAt(lineStart - 1) != '\n') lineStart--;
+                int back = lineStart;
+                String before = text.substring(back, w.start());
+                int comment = commentAt(before);
                 if (comment >= 0) {
                     for (String t0 : before.substring(0, comment).split("[\\s:=,;]+")) {
                         String t = t0.replaceAll("^[\\p{Punct}„“”‘’«»]+|[\\p{Punct}„“”‘’«»]+$", "");
@@ -818,18 +874,61 @@ final class FactCapture {
         return out;
     }
 
+    /** The word before {@code at}, lowercased, or "". */
+    private static String wordBefore(String text, int at) {
+        int end = at;
+        while (end > 0 && Character.isWhitespace(text.charAt(end - 1))) end--;
+        int start = end;
+        while (start > 0 && Character.isLetterOrDigit(text.charAt(start - 1))) start--;
+        return text.substring(start, end).toLowerCase(Locale.ROOT);
+    }
+
+    /** Where the sentence holding {@code at} begins: after the last stop, ";" or line break before it, or {@code floor}. */
+    private static int sentenceStart(String text, int at, int floor) {
+        for (int k = at - 1; k >= Math.max(0, floor); k--) {
+            char c = text.charAt(k);
+            if (c == '\n' || c == ';' || (c == '.' || c == '!' || c == '?') && (k + 1 >= text.length() || Character.isWhitespace(text.charAt(k + 1)))) {
+                return k + 1;
+            }
+        }
+        return Math.max(0, floor);
+    }
+
+    /** Where the sentence holding {@code at} ends: at the next stop, ";" or line break, or the end. */
+    private static int sentenceEnd(String text, int at) {
+        for (int k = at; k < text.length(); k++) {
+            char c = text.charAt(k);
+            if (c == '\n' || c == ';' || (c == '.' || c == '!' || c == '?') && (k + 1 >= text.length() || Character.isWhitespace(text.charAt(k + 1)))) {
+                return k;
+            }
+        }
+        return text.length();
+    }
+
+    /** Where a comment begins in {@code line}: a "#" or "//" at its start or after a blank; -1 for none. */
+    private static int commentAt(String line) {
+        int found = -1;
+        for (int k = 0; k < line.length(); k++) {
+            boolean blankBefore = k == 0 || Character.isWhitespace(line.charAt(k - 1));
+            if (blankBefore && (line.charAt(k) == '#' || line.startsWith("//", k))) found = k;
+        }
+        return found;
+    }
+
     /**
-     * Whether a word near a secret word is the secret: quoted, shaped like a credential, or three
-     * characters or more with a digit in them -- 4711, E04, Kocour2024 -- but no address, no URL,
-     * no number with a dot in it (a price, a version): "the login page is at 192.168.1.20" names
-     * no secret. A password of letters alone -- "correcthorsebattery" -- reads as a word: what is
-     * left of the rule.
+     * Whether a word near a secret word is the secret: quoted, shaped like a credential, three
+     * digits or more, or four characters or more with a digit -- 471, 4711, Kocour2024, not F28 --
+     * but no address, no URL, no number with a dot in it (a price, a version): "the login page is
+     * at 192.168.1.20" names no secret. A password of letters alone -- "correcthorsebattery" --
+     * reads as a word: what is left of the rule.
      */
     private static boolean secretLike(String token, boolean quoted) {
-        if (token.codePointCount(0, token.length()) < 3) return false;
+        int length = token.codePointCount(0, token.length());
+        if (length < 3) return false;
         if (quoted || credentialShaped(token)) return true;
-        return token.chars().anyMatch(Character::isDigit) && token.indexOf('.') < 0 && !token.contains("://")
-                && !ADDRESS.matcher(token).matches();
+        if (token.indexOf('.') >= 0 || token.contains("://") || ADDRESS.matcher(token).matches()) return false;
+        boolean digits = token.chars().allMatch(Character::isDigit);
+        return digits || length >= 4 && token.chars().anyMatch(Character::isDigit);
     }
 
     /** Whether {@code fact} holds one of {@code secrets} as a word of its own. */
@@ -855,7 +954,7 @@ final class FactCapture {
             "button", "calendar", "camera", "climate", "conversation", "counter", "cover", "date", "datetime",
             "device_tracker", "event", "fan", "group", "humidifier", "image", "input_boolean", "input_button",
             "input_datetime", "input_number", "input_select", "input_text", "lawn_mower", "light", "lock", "media_player",
-            "notify", "number", "person", "plant", "remote", "scene", "schedule", "script", "select", "sensor", "siren",
+            "notify", "number", "person", "plant", "remote", "scene", "assist_satellite", "ai_task", "stt", "wake_word", "schedule", "script", "select", "sensor", "siren",
             "sun", "switch", "text", "time", "timer", "todo", "tts", "update", "vacuum", "valve", "water_heater",
             "weather", "zone");
 
@@ -900,65 +999,163 @@ final class FactCapture {
         return sb.toString();
     }
 
-    /** What a label of a host is made of here: letters, digits, "-" and "_" -- an underscore too, which browsers take. */
-    private static boolean labelChar(int c) {
-        return Character.isLetterOrDigit(c) || c == '-' || c == '_';
+    /**
+     * Whether code point {@code c} ends a word of a note, as {@link #unknownPlaces} reads one:
+     * whitespace, brackets, quotes, dashes but "-", commas, semicolons, asterisks, "=", "+", "|"
+     * and every other mathematical symbol, backticks -- and no character a host, a URL, a path or
+     * a mail address is written with: letters, digits, marks, symbols such as emoji, ".", ":",
+     * "/", "\", "@", "%", "#", "?", "&", "_", "-".
+     */
+    private static boolean endsWord(int c) {
+        if (Character.isWhitespace(c) || Character.isSpaceChar(c)) return true;
+        if (c == '.' || c == ':' || c == '/' || c == '\\' || c == '@' || c == '%' || c == '#' || c == '?' || c == '&'
+                || c == '_' || c == '-') return false;
+        return switch (Character.getType(c)) {
+            case Character.START_PUNCTUATION, Character.END_PUNCTUATION, Character.INITIAL_QUOTE_PUNCTUATION,
+                    Character.FINAL_QUOTE_PUNCTUATION, Character.DASH_PUNCTUATION, Character.OTHER_PUNCTUATION,
+                    Character.CONNECTOR_PUNCTUATION, Character.MATH_SYMBOL, Character.MODIFIER_SYMBOL,
+                    Character.CONTROL -> true;
+            default -> false;
+        };
     }
+
+    /** What is said of a word that may name a place: nothing (it names none, or one of his), or what it names. */
+    private static final String DOUBT = "?";
 
     /**
      * The places outside the owner's own network that {@code fact} names and that no kept fact
-     * names too ({@link #sameHostIn}), read as a browser or a resolver reaches them
-     * ({@link #asReached}). Found wherever they stand, whatever stands around them -- a dash, an
-     * asterisk, "UPDATE_URL=", "backup@", ":path" -- in one pass over the note: every run of
-     * labels joined by dots (a name, an IPv4 address), every run of hex groups joined by colons
-     * (an IPv6 address), and the host after every "://", read as a URL's. A name is outside when
-     * its last label is an internet domain -- "nas.attacker.example.com", "Forecast.Solar", and a
-     * file such as skill.py too, for .py is Paraguay's; an address when it is public, an IPv4 one
-     * inside an IPv6 one too; a URL's host of digits whenever it is not a plain address of his
-     * network (134744072, 0x08080808 and 8.8.2056 reach 8.8.8.8). An address of his network -- 10/8,
-     * 172.16/12, 192.168/16, a loopback, a link, a test net, fc00::/7 -- a name under no internet
-     * domain or a home network's ({@link #HOME_SUFFIXES}) and a Home Assistant entity are no such
-     * places.
+     * names too -- and the words that could name one but are no form this reads: in doubt, a
+     * word is a place. Read as a browser or a resolver reaches it ({@link #asReached}).
      * <p>
-     * Known only from a kept fact -- one of his kept earlier in the same turn too -- never from
-     * what he wrote in the turn: "summarise evil.example.com" names a page to read, and a note
-     * that the NAS backs up there is the page's. What is left: a number that reaches a host written
-     * bare, outside a URL -- "the NAS is at 134744072" -- and a four-part version, 1.2.3.4, read as
-     * a public address.
+     * A word -- what stands between whitespace and punctuation that no host is written with
+     * ({@link #endsWord}) -- that holds a ".", ":", "/", "\", "@" or "%" may name a place, and is
+     * one but in the forms that name none of his outside: a URL whose host is of his network
+     * (http://192.168.1.20:5000/, http://nas.lan/backups/config.zip, http://supervisor/api); a
+     * path of this machine (/usr/local/bin/backup.sh, ~/skills/menu.py); a login at a host of his
+     * network (admin@192.168.1.20, pi@raspberrypi.local); an address of his network, a MAC, a
+     * time, a decimal, a version (192.168.1.50:8080, fe80::1, 00:00:5e:00:53:01, 03:00:00, 2.949,
+     * 4.12.16); a Home Assistant entity (switch.garden, media_player.car_radio); a name under no
+     * internet domain or a home network's (nas01.lan, sensors.yaml, nas.fritz.box, Qwen3.6-35B).
+     * A host the words hold -- a URL's, a login's, a name, an address -- that is outside: an
+     * internet domain's name ("nas.attacker.example.com", "Forecast.Solar", a file such as
+     * skill.py too, for .py is Paraguay's), a public address, one of digits in a URL (134744072),
+     * a dotted quad with a leading zero -- is a place unless a kept fact names it as the same host
+     * ({@link #sameHostIn}): one of his kept earlier in the same turn too, never what he wrote in
+     * the turn ("summarise evil.example.com" names a page to read). Anything else that holds one
+     * of those characters -- "dns_8.8.8.8", "url:https://..." -- is a doubt, and the note is not
+     * kept.
+     * <p>
+     * What is left: a number that reaches a host written bare -- "the NAS is at 134744072" -- and a
+     * four-part version, 1.2.3.4, read as a public address.
      */
     static List<String> unknownPlaces(String fact, List<AgentMemory.MemoryEntry> kept) {
-        String text = asReached(fact).toLowerCase(Locale.ROOT);
-        var places = new ArrayList<String>();
-        int n = text.length();
-        // Runs of labels joined by single dots.
-        for (int i = 0; i < n; ) {
-            if (!labelChar(text.charAt(i))) { i++; continue; }
-            int start = i;
-            while (i < n && (labelChar(text.charAt(i)) || text.charAt(i) == '.' && i + 1 < n && labelChar(text.charAt(i + 1))
-                    && i > start && text.charAt(i - 1) != '.')) i++;
-            String run = trimmed(text.substring(start, i));
-            if (run.indexOf('.') > 0 && outside(run, false)) places.add(run);
-        }
-        // Runs of hex groups joined by colons, an IPv4 address at the end of one.
-        for (int i = 0; i < n; ) {
-            if (!hexOrColon(text.charAt(i))) { i++; continue; }
-            int start = i;
-            while (i < n && (hexOrColon(text.charAt(i)) || text.charAt(i) == '.' && i + 1 < n
-                    && Character.isDigit(text.charAt(i + 1)))) i++;
-            String run = text.substring(start, i).replaceAll("^:(?!:)|(?<!:):$", "");
-            if (run.chars().filter(c -> c == ':').count() >= 2 && outsideV6(run)) places.add(run);
-        }
-        // The host after every "://".
-        for (int at = text.indexOf("://"); at >= 0; at = text.indexOf("://", at + 1)) {
-            String host = urlHost(text.substring(at + 3));
-            if (host != null && outside(host, true)) places.add(host);
-        }
-        if (places.isEmpty()) return places;
         var his = new StringBuilder();
         for (var e : kept) his.append(asReached(e.content()).toLowerCase(Locale.ROOT)).append('\n');
         String known = his.toString();
-        places.removeIf(place -> sameHostIn(place, known));
+        var places = new ArrayList<String>();
+        String text = asReached(fact);
+        int n = text.length();
+        for (int i = 0; i < n; ) {
+            int cp = text.codePointAt(i);
+            if (endsWord(cp)) { i += Character.charCount(cp); continue; }
+            int start = i;
+            while (i < n && !endsWord(text.codePointAt(i))) i += Character.charCount(text.codePointAt(i));
+            String word = text.substring(start, i);
+            String place = placeIn(word, known);
+            if (place != null) places.add(place);
+        }
         return places;
+    }
+
+    /** The place {@code word} names that is outside and not known, or {@link #DOUBT} for a form this does not read, or null. */
+    static String placeIn(String word, String known) {
+        String w = word.toLowerCase(Locale.ROOT);
+        // Sentence punctuation at the ends: "... backup.example.com." / "(see nas.lan:)".
+        int a = 0, b = w.length();
+        while (a < b && ".:?#&%".indexOf(w.charAt(a)) >= 0) a++;
+        while (b > a && ".:?#&%/".indexOf(w.charAt(b - 1)) >= 0) b--;
+        w = w.substring(a, b);
+        if (w.indexOf('%') >= 0) w = asReached(percentDecoded(w)).toLowerCase(Locale.ROOT);
+        if (!mayName(w)) return null;
+        int scheme = w.indexOf("://");
+        if (scheme >= 0) {
+            if (scheme == 0 || !w.substring(0, scheme).matches("[a-z][a-z0-9+.-]*") || w.indexOf("://", scheme + 3) >= 0) {
+                return DOUBT;
+            }
+            if (w.startsWith("file://")) return null;   // a file of this machine
+            return hostPlace(urlHost(w.substring(scheme + 3)), true, known);
+        }
+        if (w.startsWith("//") || w.startsWith("\\\\")) return hostPlace(urlHost(w.substring(2)), true, known);
+        if (w.startsWith("/") || w.startsWith("~/") || w.startsWith("./") || w.startsWith("../")
+                || w.matches("[a-z]:\\\\.*")) {
+            return null;   // a path of this machine
+        }
+        int at = w.lastIndexOf('@');
+        if (at >= 0) {
+            String rest = w.substring(at + 1);
+            int end = rest.length();
+            for (int k = 0; k < rest.length(); k++) {
+                char c = rest.charAt(k);
+                if (c == ':' || c == '/') { end = k; break; }
+            }
+            String place = hostPlace(rest.substring(0, end), false, known);
+            if (place != null) return place;
+            return end < rest.length() ? placeIn(rest.substring(end + 1), known) : null;
+        }
+        // An IPv6 address's zone -- %eth0 -- is no part of where it is.
+        String v6 = w.indexOf('%') > 0 && w.indexOf(':') >= 0 ? w.substring(0, w.indexOf('%')) : w;
+        if (v6.matches("[0-9a-f:]*:[0-9a-f:]*:[0-9a-f:.]*")) {
+            if (ipv6Groups(v6) != null) return outsideV6(v6) && !sameHostIn(v6, known) ? v6 : null;
+            if (!v6.equals(w)) return DOUBT;
+            if (w.matches("[0-9a-f]{2}(?::[0-9a-f]{2}){5}") || w.matches("\\d{1,2}(?::\\d{2}){1,2}")) return null;
+            return DOUBT;
+        }
+        if (w.matches("\\d+(?:[.,:]\\d+)*")) {
+            Matcher v4 = Pattern.compile("(\\d+\\.\\d+\\.\\d+\\.\\d+)(?::\\d+)?").matcher(w);
+            if (!v4.matches()) return null;   // a decimal, a time, a version
+            String ip = v4.group(1);
+            if (!PLAIN_IPV4.matcher(ip).matches()) return DOUBT;   // a leading zero: octal to some readers
+            return outside(ip, false) && !sameHostIn(ip, known) ? ip : null;
+        }
+        if (w.indexOf(':') >= 0) {
+            // host:path, key:value -- each part read as a word of its own.
+            for (String part : w.split(":")) {
+                if (part.isEmpty()) continue;
+                String place = placeIn(part, known);
+                if (place != null) return place;
+            }
+            return null;
+        }
+        if (w.indexOf('/') >= 0 || w.indexOf('\\') >= 0) {
+            // host/path: the host is its first part.
+            int cut = w.length();
+            for (int k = 0; k < w.length(); k++) {
+                if (w.charAt(k) == '/' || w.charAt(k) == '\\') { cut = k; break; }
+            }
+            return placeIn(w.substring(0, cut), known);
+        }
+        Matcher entity = Pattern.compile("([a-z_]+)\\.([\\p{L}\\p{N}_]+)").matcher(w);
+        if (entity.matches() && ENTITY_DOMAINS.contains(entity.group(1))) return null;
+        String name = trimmed(w);
+        String[] labels = name.split("\\.", -1);
+        for (String label : labels) if (label.isEmpty()) return DOUBT;
+        if (labels[labels.length - 1].chars().allMatch(Character::isDigit)) return DOUBT;   // dns_8.8.8.8
+        return hostPlace(name, false, known);
+    }
+
+    /** Whether a word holds a character a place is written with. */
+    private static boolean mayName(String w) {
+        for (int k = 0; k < w.length(); k++) {
+            char c = w.charAt(k);
+            if (c == '.' || c == ':' || c == '/' || c == '\\' || c == '@' || c == '%') return true;
+        }
+        return false;
+    }
+
+    /** {@code host} when it is outside his network and no kept fact names it; {@link #DOUBT} when there is none to read; else null. */
+    private static String hostPlace(String host, boolean inUrl, String known) {
+        if (host == null || host.isEmpty()) return inUrl ? DOUBT : null;
+        return outside(host, inUrl) && !sameHostIn(host, known) ? host : null;
     }
 
     /**
@@ -976,10 +1173,6 @@ final class FactCapture {
             out.append(label, a, b);
         }
         return out.toString();
-    }
-
-    private static boolean hexOrColon(char c) {
-        return c == ':' || c >= '0' && c <= '9' || c >= 'a' && c <= 'f';
     }
 
     /**
@@ -1005,9 +1198,8 @@ final class FactCapture {
             int zone = host.indexOf('%');
             if (zone >= 0) host = host.substring(0, zone);
         } else {
-            int i = 0;
-            while (i < authority.length() && (labelChar(authority.charAt(i)) || authority.charAt(i) == '.')) i++;
-            host = authority.substring(0, i);
+            int colon = authority.indexOf(':');
+            host = colon >= 0 ? authority.substring(0, colon) : authority;
         }
         host = host.replaceAll("\\.+$", "");
         return host.isEmpty() ? null : host;
@@ -1068,10 +1260,9 @@ final class FactCapture {
         if (h.indexOf('.') == dot && ENTITY_DOMAINS.contains(h.substring(0, dot))) return false;
         for (String home : HOME_SUFFIXES) if (h.equals(home) || h.endsWith("." + home)) return false;
         String last = h.substring(dot + 1);
-        if (!last.codePoints().allMatch(Character::isLetter) && !last.startsWith("xn--")) return false;
         if (TOP_LEVEL_DOMAINS.contains(last)) return true;
         try {
-            return TOP_LEVEL_DOMAINS.contains(java.net.IDN.toASCII(last).toLowerCase(Locale.ROOT));
+            return TOP_LEVEL_DOMAINS.contains(java.net.IDN.toASCII(last, java.net.IDN.ALLOW_UNASSIGNED).toLowerCase(Locale.ROOT));
         } catch (IllegalArgumentException notADomain) {
             return false;
         }
