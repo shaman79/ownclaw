@@ -137,20 +137,27 @@ public class FileStorageService implements CloudImages {
 
     /** A name the page makes for an image it shows: pasted-image-HHMMSS, a count within the second, an extension. */
     private static final java.util.regex.Pattern PASTED_NAME =
-            java.util.regex.Pattern.compile("pasted-image-[0-9]+(?:-[0-9]+)?(?:\\.[A-Za-z0-9]+)?");
+            java.util.regex.Pattern.compile("pasted-image-[0-9]{6}(?:-[0-9]{1,4})?(?:\\.[A-Za-z][A-Za-z0-9]{0,4})?");
+
+    /** A short plain extension -- .png, .heic, .psd -- which a name may keep. */
+    private static final java.util.regex.Pattern PLAIN_EXTENSION = java.util.regex.Pattern.compile("\\.([A-Za-z][A-Za-z0-9]{0,4})$");
 
     /**
      * What a file uploaded to be shown is called: the name the page made for it, or else
-     * pasted-image and the extension of its type. Never its own: a photo dropped on the box keeps
-     * its name in a file manager -- "Vypis uctu 123456789.png" -- and skills are handed the file
-     * by its name, and what a skill reads of a file that holds the picture alone goes to the cloud.
+     * pasted-image and its extension -- its own when that is a short plain one, which a skill may
+     * go by, else its type's. Never its own name: a photo dropped on the box keeps its name in a
+     * file manager -- "Vypis uctu 123456789.png" -- and skills are handed the file by its name,
+     * and what a skill reads of a file that holds the picture alone goes to the cloud.
      */
     static String shownName(String safeName, String contentType) {
         if (PASTED_NAME.matcher(safeName).matches()) return safeName;
-        String sub = contentType == null || contentType.indexOf('/') < 0 ? ""
+        var own = PLAIN_EXTENSION.matcher(safeName);
+        String ext = own.find() ? own.group(1).toLowerCase(java.util.Locale.ROOT)
+                : contentType == null || contentType.indexOf('/') < 0 ? ""
                 : contentType.substring(contentType.indexOf('/') + 1).replaceAll("[;+].*$", "").replace("jpeg", "jpg")
                         .replaceAll("[^A-Za-z0-9]", "");
-        return "pasted-image" + (sub.isEmpty() ? "" : "." + sub);
+        if (!ext.matches("[A-Za-z][A-Za-z0-9]{0,4}")) ext = "";
+        return "pasted-image" + (ext.isEmpty() ? "" : "." + ext);
     }
 
     /**

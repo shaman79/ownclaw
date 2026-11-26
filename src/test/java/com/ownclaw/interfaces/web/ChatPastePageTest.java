@@ -78,6 +78,10 @@ class ChatPastePageTest {
         assertEquals(3, page.split("uploadGiven\\(", -1).length - 1, "its definition, the drop and the paste");
         assertEquals(1, page.split("addEventListener\\('paste'", -1).length - 1, "one paste listener");
         assertEquals(1, page.split("addEventListener\\('drop'", -1).length - 1, "one drop listener");
+        // The claim made nowhere else: one FormData, one 'pasted' field, and that in uploadFiles.
+        assertEquals(1, page.split("new FormData\\(", -1).length - 1, "one upload body");
+        assertEquals(1, page.split("append\\('pasted'", -1).length - 1, "one claim");
+        assertEquals(1, page.split("pasted=true", -1).length - 1 + page.split("'pasted', 'true'", -1).length - 1, "said once");
         String f = between("function pastedFiles(data) {", "function uploadFiles(");
         for (String gone : new String[]{"clipboardImages", "onDisk", "madeNow", "entryForAnyFile", "holdsDiskFile"}) {
             assertFalse(page.contains(gone), "where a file came from decides nothing now: " + gone);
@@ -99,7 +103,12 @@ class ChatPastePageTest {
     void theDateNamesNoMore() {
         String given = between("function uploadGiven(files) {", "var PASTED_NAME");
         assertTrue(given.contains("PASTED_NAME.test(f.name || '') ? f : renamed(f)"), "a shown image's own name could carry an account number");
-        assertTrue(page.contains("var PASTED_NAME = /^pasted-image-\\d{6}(?:-\\d+)?(?:\\.[A-Za-z0-9]+)?$/;"));
+        assertTrue(page.contains("var PASTED_NAME = /^pasted-image-\\d{6}(?:-\\d{1,4})?(?:\\.[A-Za-z][A-Za-z0-9]{0,4})?$/;"));
+        String renamed = between("function renamed(f) {", "/** The second the last pasted file");
+        assertTrue(renamed.contains("try { return new File([f], pastedName(f), { type: f.type }); } catch (err) { return f;"), renamed);
+        String name = between("function pastedName(f) {", "/** * Whether the paste itself made");
+        assertTrue(name.contains("var own = /\\.([A-Za-z][A-Za-z0-9]{0,4})$/.exec(f.name || '');"), name);
+        assertTrue(name.contains("if (!/^[a-z][a-z0-9]{0,4}$/i.test(ext)) ext = '';"), name);
         String made = between("function madeByThePaste(f) {", "function pastedFiles(data) {");
         assertTrue(made.contains("return Math.abs(Date.now() - f.lastModified) < 1000; }"), made);
         String f = between("function pastedFiles(data) {", "function uploadFiles(");

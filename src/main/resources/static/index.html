@@ -7255,7 +7255,7 @@
     }
 
     /** A name pastedName made: pasted-image-HHMMSS, a count within the second, an extension. */
-    var PASTED_NAME = /^pasted-image-\d{6}(?:-\d+)?(?:\.[A-Za-z0-9]+)?$/;
+    var PASTED_NAME = /^pasted-image-\d{6}(?:-\d{1,4})?(?:\.[A-Za-z][A-Za-z0-9]{0,4})?$/;
 
     /** {@code f} under the next name pastedName makes; {@code f} itself where no File can be made. */
     function renamed(f) {
@@ -7272,7 +7272,8 @@
     /**
      * The next name of a pasted or dropped file: pasted-image- or pasted-file-, the time of day --
      * short enough to show whole in a chip, and the message has its date -- a count when more are
-     * named within the second, and the extension of its type.
+     * named within the second, and its extension: its own when that is a short plain one (.heic,
+     * .psd), which a skill may go by, else its type's (image/png is .png).
      */
     function pastedName(f) {
         var d = new Date();
@@ -7280,7 +7281,10 @@
         var stamp = two(d.getHours()) + two(d.getMinutes()) + two(d.getSeconds());
         if (stamp !== pasteSecond) { pasteSecond = stamp; pastedInSecond = 0; }
         pastedInSecond++;
-        var ext = ((f.type || '').split('/')[1] || '').replace(/\+.*$/, '').replace('jpeg', 'jpg').replace(/[^A-Za-z0-9]/g, '');
+        var own = /\.([A-Za-z][A-Za-z0-9]{0,4})$/.exec(f.name || '');
+        var ext = own ? own[1].toLowerCase()
+            : ((f.type || '').split('/')[1] || '').replace(/[+;].*$/, '').replace('jpeg', 'jpg').replace(/[^A-Za-z0-9]/g, '');
+        if (!/^[a-z][a-z0-9]{0,4}$/i.test(ext)) ext = '';
         return 'pasted-' + (isImage(f) ? 'image-' : 'file-') + stamp
             + (pastedInSecond > 1 ? '-' + pastedInSecond : '') + (ext ? '.' + ext : '');
     }
@@ -7297,8 +7301,8 @@
     /**
      * The files on a clipboard. One the browser named itself -- "image.png", or its word for it in
      * another language ("obrazek.png" in a Czech Firefox), which the paste made just now -- is named
-     * for when it was pasted (pastedName), so two screenshots are two names; a file copied in a file
-     * manager keeps its own here -- an image's is replaced as it is uploaded (uploadGiven). A copied folder is left out: reading it fails the whole upload. It has no type,
+     * for when it was pasted (pastedName), so two screenshots are two names; a file copied in a
+     * file manager keeps its own here -- an image's is replaced as it is uploaded (uploadGiven). A copied folder is left out: reading it fails the whole upload. It has no type,
      * but neither has a README or a Makefile, so the file system entry says which is which where
      * there is one, and the type only where there is not.
      */

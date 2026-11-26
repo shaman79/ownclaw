@@ -97,17 +97,27 @@ class PastedUploadTest {
 
         var shown = controller.upload(as("u1"), List.of(new Part("Vypis uctu 123456789.png", "image/png", png),
                 new Part("pasted-image-101010-2.png", "image/png", png),
-                new Part("IMG_2041.JPG", "image/jpeg; charset=binary", "not a jpeg".getBytes(StandardCharsets.UTF_8))), "true");
+                new Part("IMG_2041.JPG", "image/jpeg; charset=binary", "not a jpeg".getBytes(StandardCharsets.UTF_8)),
+                new Part("pasted-image-123456789.png", "image/png", png),
+                new Part("pasted-image-123456-4155550123.png", "image/png", png),
+                new Part("scan", "image/vnd.adobe.photoshop", "not a psd".getBytes(StandardCharsets.UTF_8)),
+                new Part("photo.4155550123", "image/heic", "not a heic".getBytes(StandardCharsets.UTF_8))), "true");
         var answer = (List<Map<String, Object>>) ((Map<String, Object>) shown.getBody()).get("files");
         assertEquals("pasted-image.png", answer.get(0).get("original_name"));
         assertEquals("pasted-image-101010-2.png", answer.get(1).get("original_name"), "the page's own name stands");
         assertEquals("pasted-image.jpg", answer.get(2).get("original_name"), "kept private, and named so all the same");
+        assertEquals("pasted-image.png", answer.get(3).get("original_name"), "shaped like the page's, but not its: digits of its own");
+        assertEquals("pasted-image.png", answer.get(4).get("original_name"), "a count no page makes");
+        assertEquals("pasted-image", answer.get(5).get("original_name"), "a type of no plain extension: none");
+        assertEquals("pasted-image.heic", answer.get(6).get("original_name"), "digits are no extension: the type's");
         var names = jdbc.queryForList("SELECT original_name || ' ' || stored_name FROM file_attachments", String.class);
-        assertTrue(names.stream().noneMatch(n -> n.contains("123456789") || n.contains("IMG_2041")), String.valueOf(names));
+        assertTrue(names.stream().noneMatch(n -> n.contains("123456789") || n.contains("IMG_2041") || n.contains("4155550123")),
+                String.valueOf(names));
 
         var attached = controller.upload(as("u1"), List.of(new Part("Vypis uctu 123456789.png", "image/png", png)), null);
         var plain = (List<Map<String, Object>>) ((Map<String, Object>) attached.getBody()).get("files");
         assertEquals("Vypis uctu 123456789.png", plain.get(0).get("original_name"), "a private file keeps its name");
-        // Mutation: rename only what is shown -> the private JPEG keeps IMG_2041; drop the rename -> the first keeps its account number.
+        // Mutation: rename only what is shown -> the private JPEG keeps IMG_2041; drop the rename -> the first keeps its account
+        // number; widen the page's pattern to pasted-image.* -> the fourth and the fifth keep their digits.
     }
 }

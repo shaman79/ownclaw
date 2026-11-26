@@ -287,7 +287,7 @@ class PastedImageTaskTest {
     static List<String> pasteMany(LoopRig rig, int n) throws Exception {
         var ids = new java.util.ArrayList<String>();
         for (int i = 0; i < n; i++) {
-            var stored = rig.files.store("u1", "pasted-image-" + i + ".png", "image/png",
+            var stored = rig.files.store("u1", String.format("pasted-image-%06d.png", i), "image/png",
                     new ByteArrayInputStream(TestImages.png(40 + i, 30 + i % 7)), true);
             assertTrue(stored.shownToCloud(), stored.privateBecause());
             ids.add(stored.id());
