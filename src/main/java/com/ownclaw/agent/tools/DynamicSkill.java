@@ -496,7 +496,7 @@ public class DynamicSkill implements Tool {
         if (!SkillLocks.take(running, stoppedOf(context), () -> {
             if (progress != null) progress.onProgress("Waiting: skill '" + name + "' is being changed by another task", null);
         })) {
-            return ToolResult.failure("Stopped while skill '" + name + "' was being changed: it did not run.");
+            return said("Stopped while skill '" + name + "' was being changed: it did not run.");
         }
         try {
             return run(params, context);
@@ -523,12 +523,12 @@ public class DynamicSkill implements Tool {
     private ToolResult run(Map<String, Object> params, ToolExecutionContext context) {
         Path scriptPath = skillDir.resolve("skill.py");
         if (!Files.exists(scriptPath)) {
-            return ToolResult.failure("Skill script not found: " + scriptPath);
+            return ToolResult.failure("Skill script not found: " + scriptPath, "Skill script not found: skill.py");
         }
         // Here, before the container is chosen: a run in docker or podman never passes the jail,
         // so while it refuses every launch it would be the one way around it.
         Optional<String> refused = sandbox == null ? Optional.empty() : sandbox.unavailable();
-        if (refused.isPresent()) return ToolResult.failure(refused.get());
+        if (refused.isPresent()) return said(refused.get());
 
         Path runnerScript = null;
         inFlight.incrementAndGet();
@@ -602,7 +602,7 @@ public class DynamicSkill implements Tool {
                 }
                 if (missing != null) {
                     log.warn("Skill '{}' missing credentials: {}", name, fromVault.missing());
-                    return ToolResult.failure(missing);
+                    return said(missing);
                 }
                 Map<String, String> found = fromVault.values();
                 log.info("Skill '{}': vault returned {} credentials, keys={}",
@@ -683,7 +683,7 @@ public class DynamicSkill implements Tool {
                         context.progressCallback(), readOnlyFor(resolution, readable), context.userId());
             }
 
-            ToolResult toolResult = interpret(result);
+            ToolResult toolResult = withoutFileNames(interpret(result), attachedFiles);
 
             // Self-heal: ModuleNotFoundError → install missing package → retry once. What the
             // retry returns is the answer, failure included: the package is in by then, and the
@@ -706,7 +706,7 @@ public class DynamicSkill implements Tool {
                             runnerScript, skillDir, inputJson, envVars, timeoutSec, extraVolumes, readable,
                             packages, context.userId());
                     if (retry != null) {
-                        toolResult = interpret(retry);
+                        toolResult = withoutFileNames(interpret(retry), attachedFiles);
                         log.info("Self-heal retry of skill '{}': {}", name,
                                 toolResult.success() ? "succeeded" : "failed");
                     }
@@ -882,15 +882,14 @@ public class DynamicSkill implements Tool {
     private ToolResult interpret(SandboxResult result) {
         if (result.timedOut()) {
             // What it wrote before it went quiet is the only evidence of where it hung.
-            return ToolResult.failure("Skill '" + name + "' stalled (no output for "
-                    + timeoutSec + "s)." + printed("stdout", result.stdout())
-                    + printed("stderr", result.stderr()));
+            String stalled = "Skill '" + name + "' stalled (no output for " + timeoutSec + "s).";
+            return ToolResult.failure(stalled + printed("stdout", result.stdout())
+                    + printed("stderr", result.stderr()), stalled + printed("stderr", result.stderr()));
         }
         if (result.isSuccess()) return parseOutput(result.stdout(), result.stderr());
         // A crash can leave stdout as well as stderr: a subprocess writes to it directly.
-        return ToolResult.failure((result.stderr().isBlank()
-                ? "Exit code: " + result.exitCode()
-                : result.stderr()) + printed("stdout", result.stdout()));
+        String crashed = result.stderr().isBlank() ? "Exit code: " + result.exitCode() : result.stderr();
+        return ToolResult.failure(crashed + printed("stdout", result.stdout()), crashed);
     }
 
     /**
@@ -930,7 +929,7 @@ public class DynamicSkill implements Tool {
             String detail = (stderr != null && !stderr.isBlank())
                     ? "stderr: " + stderr.strip()
                     : "The skill's run() function may not be returning/printing output.";
-            return ToolResult.failure("Tool produced no output. " + detail
+            return said("Tool produced no output. " + detail
                     + " Use skill_create with the SAME name '" + name + "' to fix it.");
         }
 
@@ -947,13 +946,15 @@ public class DynamicSkill implements Tool {
             // Treat as failure so the agent gets a signal to investigate.
             String detail = (stderr != null && !stderr.isBlank())
                     ? " stderr: " + stderr.strip() : "";
+            String fix = " Use skill_create with the SAME name '" + name + "' to fix.";
             return ToolResult.failure(
                     "Tool produced non-JSON output (possible runner error): "
-                    + text + detail
-                    + " Use skill_create with the SAME name '" + name + "' to fix.");
+                    + text + detail + fix,
+                    "Tool produced non-JSON output (possible runner error), not shown: it is what the skill printed."
+                            + detail + fix);
         }
 
-        if (asksForInput(parsed)) return ToolResult.failure(NEED_INPUT_UNSUPPORTED);
+        if (asksForInput(parsed)) return said(NEED_INPUT_UNSUPPORTED);
         // The runner's own word to the self-heal (toHeal), no part of what the skill returned.
         parsed.remove(MISSING_MODULE);
         parsed.remove(RUN);
@@ -990,14 +991,26 @@ public class DynamicSkill implements Tool {
             String hint = (stderr != null && !stderr.isBlank())
                     ? " stderr: " + stderr.strip()
                     : "";
-            return ToolResult.failure(
+            return said(
                     "Tool returned success but with empty output — this usually means the skill " +
                     "code has a bug (e.g. missing return, wrong variable, unhandled error)." + hint
                     + " Use skill_create with the SAME name '" + name + "' to fix it.");
         }
 
         output = withStream(output, "stderr", stderr);
-        return success ? ToolResult.success(output) : ToolResult.failure(output);
+        if (success) return ToolResult.success(output);
+        // Its error as it said it: the "error" it returned, or its own "ERROR: ..." -- never the
+        // data beside them -- and its stderr.
+        JsonNode error = parsed.get("error");
+        String own = error != null && error.isTextual() ? error.asText()
+                : said != null && said.startsWith("ERROR:") ? said : null;
+        String streamed = stderr == null || stderr.isBlank() ? "" : printed("stderr", stderr);
+        return ToolResult.failure(output, (own == null ? "" : own.strip()) + streamed);
+    }
+
+    /** A failure in the service's own words: all of it is the error, and none of it the skill's data. */
+    private static ToolResult said(String message) {
+        return ToolResult.failure(message, message);
     }
 
     /** A value with nothing in it: null, "", {} or []. */
@@ -1032,7 +1045,34 @@ public class DynamicSkill implements Tool {
      */
     private static ToolResult failedWith(ToolResult result, String label, String text) {
         return result.success() || text == null || text.isBlank() ? result
-                : ToolResult.failure(withStream(result.output(), label, text));
+                : ToolResult.failure(withStream(result.output(), label, text),
+                        (result.error() == null ? "" : result.error()) + printed(label, text));
+    }
+
+    /**
+     * {@code result} with every name of the files it was handed taken out of its error, each
+     * where it stands -- its path, its name on disk, the name it was uploaded under -- for
+     * "[an attached file]": a traceback names the file it failed on, and a statement's name
+     * carries its account number. The output is not touched: it is private wherever a file is.
+     */
+    static ToolResult withoutFileNames(ToolResult result, List<Map<String, String>> attached) {
+        if (result.error() == null || attached.isEmpty()) return result;
+        String error = result.error();
+        var names = new ArrayList<String>();
+        for (var f : attached) {
+            String path = f.get("path");
+            if (path != null && !path.isBlank()) {
+                names.add(path);
+                Path file = Path.of(path).getFileName();
+                if (file != null) names.add(file.toString());
+            }
+            if (f.get("container_path") != null) names.add(f.get("container_path"));
+            String uploaded = f.get("name");
+            if (uploaded != null && uploaded.strip().length() >= 3) names.add(uploaded.strip());
+        }
+        names.sort((a, b) -> b.length() - a.length());   // the longest first: a path holds its name
+        for (String n : names) error = error.replace(n, "[an attached file]");
+        return new ToolResult(result.success(), result.output(), error);
     }
 
     /** {@code text} labelled as what the process wrote to {@code stream}; nothing when blank. */

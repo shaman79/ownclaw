@@ -14,8 +14,17 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
  *
  * @param success whether the tool completed successfully
  * @param output  what it produced, whole (included in agent context)
+ * @param error   of a failure, what went wrong as the tool said it -- a skill's own error message
+ *                and what it wrote to stderr, the names of the files it was handed taken out --
+ *                never what it printed as output, the data it read; null when it said nothing of
+ *                its own, or did not fail. The cloud is shown it where the output is private
+ *                because of a file the task holds ({@code AgentContext#decide}).
  */
-public record ToolResult(boolean success, String output) {
+public record ToolResult(boolean success, String output, String error) {
+
+    public ToolResult(boolean success, String output) {
+        this(success, output, null);
+    }
 
     /** One JSON value, and nothing but whitespace after it. */
     private static final ObjectReader ONE_VALUE = new ObjectMapper().reader()
@@ -27,6 +36,11 @@ public record ToolResult(boolean success, String output) {
 
     public static ToolResult failure(String output) {
         return new ToolResult(false, output);
+    }
+
+    /** A failure whose error, as {@code error} says it, is not all of its output. */
+    public static ToolResult failure(String output, String error) {
+        return new ToolResult(false, output, error == null || error.isBlank() ? null : error);
     }
 
     /**

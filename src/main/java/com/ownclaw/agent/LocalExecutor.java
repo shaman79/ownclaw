@@ -1445,8 +1445,11 @@ public class LocalExecutor {
         // echoes its input -- or a file written and then read back -- hands that straight
         // into the output. AgentContext.decide makes such a result PRIVATE and unindexed.
         boolean wroteAfterPrivate = parentContext.localTierReadPrivate();
+        // Its error, of a call that failed: shown to the cloud where only a file the task holds makes
+        // the result private (AgentContext#decide).
+        String failedWith = Artifact.succeeded(target.name(), toolOk, result.output()) ? null : result.error();
         Artifact.Decision decision = parentContext.decide(target.requiredCredentials(), refs.used(),
-                wroteAfterPrivate, toolResult);
+                wroteAfterPrivate, toolResult, failedWith);
         Artifact artifact = parentContext.addArtifact(target.name(), action.params, params,
                 toolResult, toolOk, decision);
         mine.add(artifact);
@@ -2499,7 +2502,7 @@ public class LocalExecutor {
         if (quoted != null) {
             return context.addArtifact("local_answer", Map.of(), Map.of(), text, true,
                     new Artifact.Decision(com.ownclaw.privacy.Label.PRIVATE,
-                            List.of("quotes {{" + quoted.handle() + "}}"), fileTask));
+                            List.of(Artifact.quotes(quoted.handle())), fileTask));
         }
         return fileTask ? context.addArtifact("local_answer", Map.of(), Map.of(), text, true,
                 new Artifact.Decision(com.ownclaw.privacy.Label.PUBLIC, List.of(), false)) : null;

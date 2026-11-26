@@ -2224,7 +2224,7 @@ public class AgentLoop {
         // private bytes -- but a call that pulled in an unindexed result stays unindexed, and
         // one whose output repeats a private result is private.
         Artifact.Decision decision = context.decide(tool.requiredCredentials(), refs.used(), false,
-                result.output());
+                result.output(), Artifact.succeeded(tool.name(), result.success(), result.output()) ? null : result.error());
         Artifact artifact = context.addArtifact(tool.name(), action.params(), resolved,
                 result.output(), result.success(), decision);
         // The cloud is shown a description of it, and its words beside the next call cannot say

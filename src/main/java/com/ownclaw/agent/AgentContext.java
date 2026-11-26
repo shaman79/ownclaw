@@ -959,7 +959,7 @@ public class AgentContext {
                                              Map<String, Object> resolved, String output,
                                              boolean success, Artifact.Decision decision) {
         Artifact a = new Artifact(artifacts.size() + 1, tool, written, resolved, output, success,
-                decision.label(), decision.why(), decision.indexed());
+                decision.label(), decision.why(), decision.indexed(), decision.shownError());
         artifacts.add(a);
         if (a.isPrivate() && a.indexed()) privateIndex.addPrivate(a.n(), a.output());
         return a;
@@ -998,6 +998,25 @@ public class AgentContext {
      */
     public Artifact.Decision decide(List<String> requiredCredentials, List<Artifact> used,
                                     boolean tainted, String output) {
+        return decide(requiredCredentials, used, tainted, output, null);
+    }
+
+    /**
+     * {@link #decide(List, List, boolean, String)} of a call that failed with {@code error}
+     * ({@code ToolResult#error}): null for one that did not fail, or said nothing of its own.
+     * <p>
+     * A result that is PRIVATE only because the task holds a private file -- not a personal
+     * source's, not one that pulled in a private result, not one written after the local model
+     * read private data -- and that failed, is shown to the cloud with its error beside its
+     * descriptor ({@code Artifact#shownError}): the owner's decision of 2026-11-26, after a task's
+     * cloud spent three steps asking the local model which kind of error a skill had hit, unable
+     * to repair it. Never its output, which is what the skill read; never an error that repeats a
+     * run of a private result of the task -- the text of a file the owner sent, what a skill read
+     * out of a PDF ({@link #firstRunOf}): then it is withheld, and the descriptor says the error
+     * repeats it.
+     */
+    public Artifact.Decision decide(List<String> requiredCredentials, List<Artifact> used,
+                                    boolean tainted, String output, String error) {
         boolean personal = readsPersonalSource(requiredCredentials);
         Artifact.Decision own = Artifact.labelFor(personal, used);
         if (own.label() == com.ownclaw.privacy.Label.PUBLIC) {
@@ -1010,8 +1029,20 @@ public class AgentContext {
             // so what it returns is the file's as far as anyone can tell.
             List<Artifact> files = files();
             if (!files.isEmpty()) {
-                return new Artifact.Decision(com.ownclaw.privacy.Label.PRIVATE,
-                        List.of(givenTheFiles(files)), false);
+                if (error == null || error.isBlank()) {
+                    return new Artifact.Decision(com.ownclaw.privacy.Label.PRIVATE,
+                            List.of(givenTheFiles(files)), false);
+                }
+                List<Artifact> held;
+                synchronized (this) {
+                    held = List.copyOf(artifacts);
+                }
+                com.ownclaw.privacy.PrivateIndex.Hit repeats = firstRunOf(held, error);
+                return repeats == null
+                        ? new Artifact.Decision(com.ownclaw.privacy.Label.PRIVATE, List.of(givenTheFiles(files)), false,
+                                error.strip())
+                        : new Artifact.Decision(com.ownclaw.privacy.Label.PRIVATE,
+                                List.of(givenTheFiles(files), "its error repeats {{" + repeats.handle() + "}}"), false);
             }
             com.ownclaw.privacy.PrivateIndex.Hit repeated = firstLeakIn(output);
             if (repeated != null) {
@@ -1500,6 +1531,9 @@ public class AgentContext {
                 for (Artifact a : artifacts) {
                     if (a.n() >= hitHandle) break;
                     if (!a.isPrivate() && holds(a.output(), stretch)) return true;
+                    // An error the cloud was shown, as it was shown: released as a PUBLIC result's
+                    // bytes are, and so excused as they are -- before the hit only.
+                    if (a.shownError() != null && holds(a.shownError(), stretch)) return true;
                 }
                 for (var turn : trajectory.turns()) {
                     var action = turn.action();
@@ -1511,11 +1545,26 @@ public class AgentContext {
                 }
                 Artifact hit = hitHandle >= 1 && hitHandle <= artifacts.size()
                         ? artifacts.get(hitHandle - 1) : null;
-                return hit != null && skillSources.computeIfAbsent(hit.tool(), tool -> {
-                    String source = skillSource.apply(tool);
-                    return source == null ? "" : com.ownclaw.privacy.PrivateIndex.normalise(source);
-                }).contains(stretch);
+                if (hit == null) return false;
+                if (inSource(hit.tool(), stretch)) return true;
+                // What the hit quotes, when it is the local model's answer quoting a result: the
+                // source of the skill that made that result. Its error quotes the skill's own code
+                // -- "tesseract is not installed" is a literal of skill.py -- and the repair request
+                // carries that code: the answer that said why the skill failed refused its repair
+                // twice (2026-11-25).
+                for (int quoted : hit.quoted()) {
+                    if (quoted >= 1 && quoted < hitHandle && inSource(artifacts.get(quoted - 1).tool(), stretch)) return true;
+                }
+                return false;
             }
+        }
+
+        /** Whether the source of skill {@code tool} holds {@code stretch}, normalised. */
+        private boolean inSource(String tool, String stretch) {
+            return skillSources.computeIfAbsent(tool, t -> {
+                String source = skillSource.apply(t);
+                return source == null ? "" : com.ownclaw.privacy.PrivateIndex.normalise(source);
+            }).contains(stretch);
         }
     }
 

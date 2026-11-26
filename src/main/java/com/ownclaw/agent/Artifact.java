@@ -37,6 +37,10 @@ import java.util.Map;
  * @param success  whether the tool reported success
  * @param label    whether the bytes may leave this machine
  * @param why      which facts made it PRIVATE, for the descriptor and the ledger
+ * @param shownError of a PRIVATE result that failed in a task holding a private file, the error the
+ *                 cloud is shown beside its descriptor ({@code ToolResult#error}, as
+ *                 {@code AgentContext#decide} let it through): the owner's decision of 2026-11-26,
+ *                 so a failed skill can be repaired from its error; null for any other
  * @param indexed  whether a PRIVATE result's bytes are in the canary's index. False for one that
  *                 is PRIVATE only because of when it was made (after a delegation read private
  *                 data) or because it was derived from such a result: withheld all the same, but
@@ -45,7 +49,7 @@ import java.util.Map;
  */
 public record Artifact(int n, String tool, Map<String, Object> written,
                        Map<String, Object> resolved, String output, boolean success,
-                       Label label, List<String> why, boolean indexed) {
+                       Label label, List<String> why, boolean indexed, String shownError) {
 
     public Artifact {
         // Not Map.copyOf: it rejects a null VALUE, and a tool call carrying one is ordinary —
@@ -73,6 +77,29 @@ public record Artifact(int n, String tool, Map<String, Object> written,
                     String output, boolean success, Label label, List<String> why) {
         this(n, tool, written, resolved, output, success, label, why, true);
     }
+
+    /** An artifact the cloud is shown no error of: every one but a failure in a task holding a file. */
+    public Artifact(int n, String tool, Map<String, Object> written, Map<String, Object> resolved,
+                    String output, boolean success, Label label, List<String> why, boolean indexed) {
+        this(n, tool, written, resolved, output, success, label, why, indexed, null);
+    }
+
+    /** What a why of a local answer says when it repeats a run of {@code handle}: "quotes {{3}}" ({@link #quoted}). */
+    public static String quotes(int handle) {
+        return "quotes " + ArtifactRef.handle(handle);
+    }
+
+    /** The handles this result's why says it quotes ({@link #quotes}), in order. */
+    public List<Integer> quoted() {
+        var out = new ArrayList<Integer>();
+        for (String w : why) {
+            java.util.regex.Matcher m = QUOTED.matcher(w);
+            if (m.matches()) out.add(Integer.parseInt(m.group(1)));
+        }
+        return out;
+    }
+
+    private static final java.util.regex.Pattern QUOTED = java.util.regex.Pattern.compile("quotes \\{\\{(\\d{1,9})}}");
 
     /** A PUBLIC artifact with no handle yet — the shape a test or a legacy caller builds. */
     public Artifact(String tool, Map<String, Object> params, String output, boolean success) {
@@ -136,9 +163,13 @@ public record Artifact(int n, String tool, Map<String, Object> written,
      * from the cloud like any other PRIVATE one; but indexing it is what made the cloud's own later
      * fetch of the same public page trip the canary and end a run whose email had already gone.
      */
-    public record Decision(Label label, List<String> why, boolean indexed) {
+    public record Decision(Label label, List<String> why, boolean indexed, String shownError) {
         public Decision(Label label, List<String> why) {
             this(label, why, true);
+        }
+
+        public Decision(Label label, List<String> why, boolean indexed) {
+            this(label, why, indexed, null);
         }
     }
 
@@ -151,6 +182,11 @@ public record Artifact(int n, String tool, Map<String, Object> written,
      * the "never twice" guard then refused the retry that would have delivered it.
      */
     public boolean succeeded() {
+        return succeeded(tool, success, output);
+    }
+
+    /** {@link #succeeded()} of a result not recorded yet: {@code tool}'s, flagged {@code success}, its bytes {@code output}. */
+    public static boolean succeeded(String tool, boolean success, String output) {
         if (!success) return false;
         // Evidence a self-repair is handed is data whose flag is what its call reported: an argument
         // value that is a JSON field with "ok": false in it is no failed result, and a re-run that names
@@ -194,6 +230,12 @@ public record Artifact(int n, String tool, Map<String, Object> written,
         if (!why.isEmpty()) sb.append(" (").append(String.join("; ", why)).append(')');
         sb.append(" · ").append(shape.kind()).append(" · ")
           .append(String.format("%,d", output.length())).append(" chars");
+        if (isPrivate() && shownError != null) {
+            // Its error, not its output: the skill failed in a task holding a private file, and
+            // without the error the cloud cannot repair it -- it asked the local model which kind of
+            // error it was instead, three steps of guessing (2026-11-25). The owner's decision.
+            sb.append(" · error (shown; its output is not): ").append(shownError);
+        }
         if (isPrivate() && !indexed) {
             // A result hidden because of WHEN it was made came from a tool fed by what the model
             // typed after reading private data. Its key names and booleans are not a skill's
