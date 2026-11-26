@@ -197,6 +197,26 @@ class ChatPastePageTest {
     }
 
     @Test
+    @DisplayName("an upload OwnClaw does not answer -- a restart's 502, 503, 504, or no answer at all -- is sent again for a while; a refusal is not")
+    void anUploadDuringARestartIsSentAgain() {
+        String u = between("function uploadFiles(files, pasted) {", "function createFileChip(");
+        assertTrue(u.contains("postUpload(formData, chips, Date.now(), 1) .then(function(data) {"), u);
+        String post = between("function postUpload(formData, chips, startedAt, attempt) {", "function createFileChip(");
+        assertTrue(post.contains("if (notAnswering(r.status)) return again('HTTP ' + r.status);"), post);
+        assertTrue(post.contains("}, function(err) { return again(err && err.message ? err.message : 'no answer'); });"), post);
+        assertTrue(post.contains("if (!chips.some(function(c) { return c.isConnected; })) return Promise.resolve({ files: [] });"),
+                "stopped when every chip is removed: " + post);
+        assertTrue(post.contains("if (Date.now() - startedAt >= UPLOAD_RETRY_MS) {"), post);
+        assertTrue(post.contains("setTimeout(resolve, Math.min(1000 * attempt, 5000))"), post);
+        assertTrue(page.contains("function notAnswering(status) { return status === 502 || status === 503 || status === 504; }"));
+        assertTrue(page.contains("var UPLOAD_RETRY_MS = 90000;"));
+        assertTrue(page.contains("if (!picked && fileChips.querySelector('.file-chip.uploading')) {"),
+                "the message waits for chips still uploading, retried ones too");
+        // Mutation: retry every status -> a refused file (413, 400) is sent for 90 seconds; drop the
+        // chip check -> a removed paste is uploaded anyway.
+    }
+
+    @Test
     @DisplayName("a chip removed while it uploads is not sent with the next message, and its file is deleted")
     void aRemovedChipIsDropped() {
         String u = between("function uploadFiles(files, pasted) {", "function createFileChip(");

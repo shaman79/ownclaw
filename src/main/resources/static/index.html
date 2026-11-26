@@ -7349,12 +7349,7 @@
             chips.push(chip);
         }
         if (!chips.length) return;
-        fetch('/api/files/upload', {
-            method: 'POST',
-            headers: { 'Authorization': 'Bearer ' + authToken },
-            body: formData
-        })
-        .then(okJson)
+        postUpload(formData, chips, Date.now(), 1)
         .then(function(data) {
             if (data.error) {
                 chips.forEach(function(c) { c.remove(); });
@@ -7381,6 +7376,51 @@
         .catch(function(err) {
             chips.forEach(function(c) { c.remove(); });
             addMsg('system', 'Upload failed: ' + mdLiteral(err.message));
+        });
+    }
+
+    /**
+     * How long an upload is tried again while OwnClaw does not answer: a restart onto an update
+     * takes a quarter of a minute, and an image pasted then got the proxy's 502 and was gone
+     * (2026-11-26). A timeout, not a bound on what is sent.
+     */
+    var UPLOAD_RETRY_MS = 90000;
+
+    /** Whether an answer says OwnClaw is not answering right now -- the proxy's 502, 503, 504 -- not that it refused. */
+    function notAnswering(status) {
+        return status === 502 || status === 503 || status === 504;
+    }
+
+    /**
+     * The upload sent, and sent again while OwnClaw does not answer -- the proxy answers 502, 503
+     * or 504 in its place, or nothing answers at all -- for {@link UPLOAD_RETRY_MS}, a little
+     * longer between tries each time; its chips keep uploading meanwhile, and say why, and the
+     * message waits for them (send). Stopped when every chip is removed. Any other answer is the
+     * answer: a refusal is not tried again.
+     */
+    function postUpload(formData, chips, startedAt, attempt) {
+        function again(why) {
+            if (!chips.some(function(c) { return c.isConnected; })) return Promise.resolve({ files: [] });
+            if (Date.now() - startedAt >= UPLOAD_RETRY_MS) {
+                throw new Error('OwnClaw did not answer for ' + Math.round(UPLOAD_RETRY_MS / 1000) + ' seconds (' + why
+                        + ') -- paste or attach the file again');
+            }
+            chips.forEach(function(c) {
+                c.title = 'OwnClaw is not answering (' + why + ') -- it is likely restarting onto an update. Trying again...';
+            });
+            return new Promise(function(resolve) { setTimeout(resolve, Math.min(1000 * attempt, 5000)); })
+                .then(function() { return postUpload(formData, chips, startedAt, attempt + 1); });
+        }
+        return fetch('/api/files/upload', {
+            method: 'POST',
+            headers: { 'Authorization': 'Bearer ' + authToken },
+            body: formData
+        }).then(function(r) {
+            if (notAnswering(r.status)) return again('HTTP ' + r.status);
+            chips.forEach(function(c) { c.title = ''; });
+            return okJson(r);
+        }, function(err) {
+            return again(err && err.message ? err.message : 'no answer');
         });
     }
 
