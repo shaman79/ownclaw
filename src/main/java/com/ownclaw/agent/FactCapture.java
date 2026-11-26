@@ -1040,9 +1040,7 @@ final class FactCapture {
         var sb = new StringBuilder(n.length());
         n.codePoints().forEach(c -> {
             if (c == 0x3002 || c == 0xFF0E || c == 0xFF61) sb.append('.');
-            // A tab or a carriage return inside a URL is taken out by browsers and by Python's
-            // urlsplit, so https://evil.c<TAB>om is evil.com: taken out here too.
-            else if (c != '\t' && c != '\r' && Character.getType(c) != Character.FORMAT) sb.appendCodePoint(c);
+            else if (Character.getType(c) != Character.FORMAT) sb.appendCodePoint(c);
         });
         return sb.toString();
     }
@@ -1494,12 +1492,13 @@ final class FactCapture {
     // ── What is never kept ──
 
     /**
-     * A line break of any kind, Markdown that makes a block -- a heading, a list, a quote, a fence --
+     * A line break of any kind or a tab -- which browsers take out of a URL, so it joins what it
+     * splits, "evil.c<TAB>om", or splits what it joins, "evil.com<TAB>nightly" --, Markdown that makes a block -- a heading, a list, a quote, a fence --
      * or a link written so: "[your OwnClaw](https://evil.example/login)" is a link in every chat row
      * and Telegram message the fact is shown in, to wherever it says.
      */
     private static final Pattern STRUCTURE = Pattern.compile(
-            "[\\n\\r\\u000B\\u000C\\u0085\\u2028\\u2029]|^\\s*(?:#|>|[-*+](?:\\s|$)|\\d+[.)](?:\\s|$))|```|~~~"
+            "[\\t\\n\\r\\u000B\\u000C\\u0085\\u2028\\u2029]|^\\s*(?:#|>|[-*+](?:\\s|$)|\\d+[.)](?:\\s|$))|```|~~~"
                     + "|\\[[^\\]]*\\]\\s*[(\\[]|!\\[|<(?:https?|ftp|mailto):");
 
     /**
