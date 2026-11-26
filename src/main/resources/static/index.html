@@ -2850,7 +2850,7 @@
             </select>
         </label>
     </div>
-    <div class="input-hint"><span id="hint-keys">Enter to send &nbsp;&middot;&nbsp; Shift+Enter for new line</span> &nbsp;&middot;&nbsp; <span id="hint-images">Screenshots and pictures pasted from the clipboard are shown to the cloud model as pictures (the privacy filter reads text, not pictures); files you attach, drop or paste from a file manager stay private</span> &nbsp;&middot;&nbsp; <strong>/help</strong> for commands</div>
+    <div class="input-hint"><span id="hint-keys">Enter to send &nbsp;&middot;&nbsp; Shift+Enter for new line</span> &nbsp;&middot;&nbsp; <span id="hint-images">Images you paste or drop here -- screenshots, photos -- are shown to the cloud model as pictures (the privacy filter reads text, not pictures); other files, and anything you attach with 📎, stay private</span> &nbsp;&middot;&nbsp; <strong>/help</strong> for commands</div>
 </div>
 
     </div><!-- end #chat-main -->
@@ -7204,21 +7204,24 @@
         fileInput.value = '';
     });
 
-    // Drag & drop
+    // Drag & drop: an image dropped on the box is shown to the cloud model, as a pasted one is;
+    // every other file is attached as one picked with 📎 is, and stays private.
     var inputWrap = document.querySelector('.input-wrap');
     inputWrap.addEventListener('dragover', function(e) { e.preventDefault(); inputWrap.classList.add('dragover'); });
     inputWrap.addEventListener('dragleave', function() { inputWrap.classList.remove('dragover'); });
     inputWrap.addEventListener('drop', function(e) {
         e.preventDefault();
         inputWrap.classList.remove('dragover');
-        if (e.dataTransfer.files.length) uploadFiles(e.dataTransfer.files);
+        if (e.dataTransfer.files.length) uploadGiven(Array.prototype.slice.call(e.dataTransfer.files));
     });
 
-    // Paste: files on the clipboard -- a screenshot, "Copy image" in a browser, files copied in a
-    // file manager -- are attached as files picked with 📎 are. An image the clipboard holds as
-    // image data, which this page names itself, is shown to the cloud model (the owner's decision of
-    // 2026-11-11): it is uploaded with the claim, and the server shows it only when its bytes decode
-    // as an image. A file copied in a file manager is a file, and stays private like every other.
+    // Paste: files on the clipboard -- a screenshot, "Copy image" in a browser, a photo or any file
+    // copied in a file manager -- are attached. An image among them is shown to the cloud model,
+    // wherever it came from (the owner's decisions of 2026-11-11 and 2026-11-26: "paste photo and
+    // get response with content, or a dashboard from homeassistant so the model sees what is
+    // visually wrong"): it is uploaded with the claim, and the server shows it only when its bytes
+    // decode as an image. Every other file stays private, as one picked with 📎 does -- and so does
+    // an image picked with 📎: that button is the way to give a picture privately.
     // Text pastes as it always did: a copy from a spreadsheet or a document carries its text and
     // a picture of it too, and the text is what was meant. (Chrome hides the text of a file
     // manager's copy -- the files' paths -- so there the files are what is attached.)
@@ -7227,95 +7230,60 @@
         if (!files.length) return;
         if ((e.clipboardData.getData('text/plain') || '').trim()) return;
         e.preventDefault();
-        var images = files.filter(function(f) { return clipboardImages.has(f); });
-        var others = files.filter(function(f) { return !clipboardImages.has(f); });
-        if (images.length) uploadFiles(images, true);
-        if (others.length) uploadFiles(others, false);
+        uploadGiven(files);
     });
 
-    /**
-     * The files pastedFiles made of image data on a clipboard -- a screenshot, a copied picture:
-     * those the page names itself, with no file of the file system behind them. Only these are
-     * uploaded as pasted images.
-     */
-    var clipboardImages = new WeakSet();
+    /** Whether {@code f} is an image by its type, which the server checks by its bytes before it shows one. */
+    function isImage(f) {
+        return /^image\//.test(f.type || '');
+    }
 
-    /** The second the last pasted image was named in, and how many were named in it. */
+    /**
+     * Files pasted or dropped on the box: the images among them uploaded as pictures to show the
+     * cloud model, the rest as files, private.
+     */
+    function uploadGiven(files) {
+        var images = files.filter(isImage);
+        var others = files.filter(function(f) { return !isImage(f); });
+        if (images.length) uploadFiles(images, true);
+        if (others.length) uploadFiles(others, false);
+    }
+
+    /** The second the last pasted file was named in, and how many were named in it. */
     var pasteSecond = '', pastedInSecond = 0;
 
     /**
-     * Whether a file system entry says nothing in this browser: whether it is Firefox, which gives
-     * one to a file no file system holds. Chromium gives none to image data on the clipboard, so
-     * there an entry means a file manager's copy. Firefox wraps every file of a paste in one, the
-     * clipboard's image data too -- as "/image.png" where it speaks English -- and read as a file
-     * manager's, that made every screenshot pasted in Firefox a private file, which the cloud model
-     * was never shown (Firefox 158, 2026-11-25). Asked once, of a file this page makes in memory.
-     * <p>
-     * Of Firefox alone. WebKit gives such a file an entry too, but no paste was run in it, and it
-     * dates a file of a file system now when it cannot read the file's date (WebKit 26.6): there
-     * an entry is believed, as it was.
-     */
-    var entryForAnyFile = (function() {
-        try {
-            // Gecko's own: a number in Firefox, undefined in Chromium and in WebKit.
-            if (typeof window.mozInnerScreenX !== 'number') return false;
-            var probe = new DataTransfer();
-            probe.items.add(new File(['x'], 'probe.png', { type: 'image/png' }));
-            return typeof probe.items[0].webkitGetAsEntry === 'function' && !!probe.items[0].webkitGetAsEntry();
-        } catch (err) {
-            return false;   // cannot be asked: an entry is believed, as it was
-        }
-    })();
-
-    /**
-     * Whether the paste itself made {@code f}. Image data on the clipboard becomes a file when it is
-     * pasted and is dated then -- in Firefox the paste's own millisecond, in every paste measured --
-     * where a file of a file system keeps the date it was last written, which Firefox reports to
-     * the millisecond. So in Firefox an image file written to a disk within this second, copied in
-     * a file manager and pasted, is taken for the clipboard's image data: what is left of not
-     * being told.
+     * Whether the paste itself made {@code f}: image data on the clipboard becomes a file when it is
+     * pasted and is dated then, where a file of a file system keeps the date it was last written.
+     * Only what the file is called rests on it -- who sees it does not.
      */
     function madeByThePaste(f) {
         return Math.abs(Date.now() - f.lastModified) < 1000;
     }
 
     /**
-     * The files on a clipboard. One the browser named itself -- "image.png" or its word for it in
-     * another language, for every image it holds -- is named for when it was pasted, so two
-     * screenshots are two names; a file copied in a file manager keeps its own. A copied folder is
-     * left out: reading it fails the whole upload. It has no type, but neither has a README or a
-     * Makefile, so the file system entry says which is which where there is one, and the type only
-     * where there is not.
+     * The files on a clipboard. One the browser named itself -- "image.png", or its word for it in
+     * another language ("obrazek.png" in a Czech Firefox), which the paste made just now -- is named
+     * for when it was pasted, so two screenshots are two names; a file copied in a file manager
+     * keeps its own. A copied folder is left out: reading it fails the whole upload. It has no type,
+     * but neither has a README or a Makefile, so the file system entry says which is which where
+     * there is one, and the type only where there is not.
      */
     function pastedFiles(data) {
         if (!data) return [];
         var found = [];
-        var onDisk = [];   // whether a file system holds each: a file manager's copy, not image data
-        var madeNow = [];  // whether the paste itself made each, where only its date says so
         var items = data.items || [];
-        // A clipboard of image data lists "Files" alone in Firefox (measured). One that holds a file
-        // of a file system is expected to list this type beside it -- not run here: a headless
-        // clipboard takes no such file -- and where it is listed, a file is a file.
-        var holdsDiskFile = Array.prototype.indexOf.call(data.types || [], 'application/x-moz-file') >= 0;
         for (var i = 0; i < items.length; i++) {
             if (items[i].kind !== 'file') continue;
-            // A browser that cannot say whether a file system holds a file: it may be a file manager's.
-            var canTell = typeof items[i].webkitGetAsEntry === 'function';
-            var entry = canTell ? items[i].webkitGetAsEntry() : null;
+            var entry = typeof items[i].webkitGetAsEntry === 'function' ? items[i].webkitGetAsEntry() : null;
             if (entry ? entry.isDirectory : !items[i].type) continue;
             var f = items[i].getAsFile();
-            if (!f) continue;
-            // An entry is a file system's where the browser gives one to its files only; where it
-            // gives one to every file, an image the paste itself made is the clipboard's image data.
-            var made = !!entry && entryForAnyFile && !holdsDiskFile && /^image\//.test(f.type) && madeByThePaste(f);
-            // Of no known origin: a file, as one from a file manager is -- never a pasted picture.
-            found.push(f); onDisk.push(!canTell || (!!entry && !made)); madeNow.push(made);
+            if (f) found.push(f);
         }
         // A browser that lists the clipboard's files but not its items.
         if (!found.length && data.files) {
             for (var j = 0; j < data.files.length; j++) {
-                // Of no known origin: a file, as one from a file manager is -- never a pasted picture.
-                if (data.files[j].type) { found.push(data.files[j]); onDisk.push(true); madeNow.push(false); }
+                if (data.files[j].type) found.push(data.files[j]);
             }
         }
         // The time of day: short enough to show whole in a chip, and the message has its date.
@@ -7323,32 +7291,24 @@
         function two(n) { return (n < 10 ? '0' : '') + n; }
         var stamp = two(d.getHours()) + two(d.getMinutes()) + two(d.getSeconds());
         if (stamp !== pasteSecond) { pasteSecond = stamp; pastedInSecond = 0; }
-        return found.map(function(f, k) {
-            // A name of its own is a file manager's file -- but not where the paste made the file:
-            // Firefox names the clipboard's image data in its own language ("image.png" in English,
-            // "obrazek.png" in Czech, "grafik.png" in German), and that is the browser's name too.
-            if (f.name && !/^image\.\w+$/i.test(f.name) && !madeNow[k]) return f;
+        return found.map(function(f) {
+            if (f.name && !/^image\.\w+$/i.test(f.name) && !(isImage(f) && madeByThePaste(f))) return f;
             var ext = (f.type.split('/')[1] || '').replace(/\+.*$/, '').replace('jpeg', 'jpg').replace(/[^A-Za-z0-9]/g, '');
             pastedInSecond++;
-            var name = 'pasted-' + (/^image\//.test(f.type) ? 'image-' : 'file-') + stamp
+            var name = 'pasted-' + (isImage(f) ? 'image-' : 'file-') + stamp
                 + (pastedInSecond > 1 ? '-' + pastedInSecond : '') + (ext ? '.' + ext : '');
-            // Image data the clipboard holds, not a file of the file system: a pasted image.
-            var image = /^image\//.test(f.type) && !onDisk[k];
-            var named;
             try {
-                named = new File([f], name, { type: f.type });
+                return new File([f], name, { type: f.type });
             } catch (err) {
-                named = f;   // no File constructor: the clipboard's own name
+                return f;   // no File constructor: the clipboard's own name
             }
-            if (image) clipboardImages.add(named);
-            return named;
         });
     }
 
     /**
-     * Upload files and put their chips above the box. {@code pasted}: they are image data from the
-     * clipboard this page named itself (pastedFiles), which the server shows the cloud model if
-     * their bytes decode as an image -- each chip then says who sees it (seenLine).
+     * Upload files and put their chips above the box. {@code pasted}: they are images pasted or
+     * dropped on the box (uploadGiven), which the server shows the cloud model if their bytes decode
+     * as an image -- each chip then says who sees it (seenLine).
      */
     function uploadFiles(files, pasted) {
         var formData = new FormData();
@@ -7486,9 +7446,9 @@
     var pictureQueue = Promise.resolve();
 
     /**
-     * A chip, once the server has said what its file is: a file -- attached, dropped, pasted from a
-     * file manager -- private; or an image pasted from the clipboard, shown to the cloud model when its
-     * bytes decoded as one, else kept private, and why. Its line says who sees it (seenLine); a tap on
+     * A chip, once the server has said what its file is: a file -- picked with 📎, or pasted or
+     * dropped and no image -- private; or an image pasted or dropped, shown to the cloud model when
+     * its bytes decoded as one, else kept private, and why. Its line says who sees it (seenLine); a tap on
      * the line opens what it means, which a touch screen cannot hover for.
      */
     function markSeen(chip, uploaded, pasted) {
@@ -7526,10 +7486,10 @@
         cloudSeesImages = cloud.seesImages !== false;
         var hint = document.getElementById('hint-images');
         if (hint) hint.textContent = cloudSeesImages
-                ? 'Screenshots and pictures pasted from the clipboard are shown to the cloud model as pictures (the privacy '
-                    + 'filter reads text, not pictures); files you attach, drop or paste from a file manager stay private'
-                : 'This chat\'s cloud model is sent no images: screenshots and pictures you paste are not shown to it, and '
-                    + 'skills are given them as files; files you attach, drop or paste from a file manager stay private';
+                ? 'Images you paste or drop here -- screenshots, photos -- are shown to the cloud model as pictures (the '
+                    + 'privacy filter reads text, not pictures); other files, and anything you attach with 📎, stay private'
+                : 'This chat\'s cloud model is sent no images: images you paste or drop are not shown to it, and skills '
+                    + 'are given them as files; other files, and anything you attach with 📎, stay private';
         refreshSeen();
     }
 
@@ -7546,7 +7506,7 @@
         var line, full;
         if (chip.classList.contains('attached')) {
             line = '🔒 private';
-            full = 'A file you attach, drop or paste from a file manager stays private: only your local model reads it. '
+            full = 'A file you attach with 📎, or paste or drop that is no image, stays private: only your local model reads it. '
                     + 'The cloud model is told only that a file came, with its type and size.';
         } else if (chip.dataset.shown !== '1') {
             line = '🔒 private';

@@ -39,11 +39,12 @@ public class FileUploadController {
      * Upload one or more files.
      * POST /api/files/upload (multipart/form-data, field name "files")
      * <p>
-     * With {@code pasted=true}: the page says these are images on the clipboard that it named
-     * itself -- a screenshot pasted into the chat box -- and each that decodes as an image is shown
-     * to the cloud model ({@link FileStorageService#store(String, String, String, java.io.InputStream,
-     * boolean)}). Every other file, and one sent so that is no image, stays private. The page sends a
-     * file copied in a file manager and pasted without it: that is a file, and private.
+     * With {@code pasted=true}: the page says these are images the owner pasted or dropped on the
+     * chat box -- a screenshot, a copied picture, a photo copied in a file manager -- and each that
+     * decodes as an image is shown to the cloud model ({@link FileStorageService#store(String, String,
+     * String, java.io.InputStream, boolean)}). Every other file, and one sent so that is no image,
+     * stays private. The page sends without it every file that is no image, and every file picked
+     * with 📎, the private way to give one.
      *
      * @return list of uploaded file metadata (id, original_name, size_bytes, content_type) -- and,
      *         for a pasted one, whether it is shown to the cloud model: the copy's pixel size, or why

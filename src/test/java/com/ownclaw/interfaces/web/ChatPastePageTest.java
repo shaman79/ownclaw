@@ -9,17 +9,19 @@ import java.nio.charset.StandardCharsets;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
- * Pasting an image into the chat box attaches it, as a file picked with 📎 is -- and an image the
- * clipboard holds as image data, which the page names itself, is uploaded as a pasted image, which
- * the server shows the cloud model when its bytes decode as one; its chip says who sees it. There
- * is no JS engine in the suite, so the lines that decide are pinned as text, whitespace collapsed.
+ * Pasting or dropping files on the chat box attaches them, as files picked with 📎 are -- and an
+ * image among them, whatever it came from (a screenshot, a copied picture, a photo copied in a file
+ * manager), is uploaded as a picture to show, which the server shows the cloud model when its
+ * bytes decode as one; its chip says who sees it. Every other file stays private, and so does
+ * anything picked with 📎. There is no JS engine in the suite, so the lines that decide are pinned
+ * as text, whitespace collapsed.
  * <p>
- * Pinned text says the lines are there, not that a browser reads them as meant: checked in
- * Chromium alone when it was written, the rule took every screenshot pasted in Firefox for a file
- * manager's file -- Firefox gives a file system entry to the clipboard's image data too -- and
- * kept it private, so the cloud model was never shown one there (2026-11-25). A change to
- * pastedFiles is run in Chromium and in Firefox, with a real clipboard paste in each, before it
- * is merged. No paste has been run in WebKit, so there the rule is as it was: an entry is believed.
+ * Pinned text says the lines are there, not that a browser reads them as meant. Who sees an image
+ * once rested on whether a file system held it, which each browser answers its own way: checked in
+ * Chromium alone, the rule took every screenshot pasted in Firefox for a file manager's file and
+ * kept it private (2026-11-25). The owner then asked for every image he pastes to be seen
+ * (2026-11-26), so that rests on the file's type alone now. A change to pastedFiles is still run
+ * in Chromium and in Firefox, with a real clipboard paste in each, before it is merged.
  */
 class ChatPastePageTest {
 
@@ -35,7 +37,7 @@ class ChatPastePageTest {
 
     /** The paste handler, from its listener to the end of its body: up to the set it reads. */
     private static String handler() {
-        return between("inputEl.addEventListener('paste', function(e) {", "var clipboardImages = new WeakSet();");
+        return between("inputEl.addEventListener('paste', function(e) {", "function isImage(f) {");
     }
 
     private static String between(String from, String to) {
@@ -48,71 +50,51 @@ class ChatPastePageTest {
     void filesAreAttached() {
         String h = handler();
         assertTrue(h.contains("var files = pastedFiles(e.clipboardData); if (!files.length) return;"), h);
-        assertTrue(h.contains("e.preventDefault(); var images = files.filter(function(f) { return clipboardImages.has(f); }); "
-                + "var others = files.filter(function(f) { return !clipboardImages.has(f); }); "
-                + "if (images.length) uploadFiles(images, true); if (others.length) uploadFiles(others, false);"), h);
+        assertTrue(h.contains("e.preventDefault(); uploadGiven(files); });"), h);
         // Mutation: cancel before looking -> every text paste into the box would do nothing.
         assertTrue(h.indexOf("if (!files.length) return;") < h.indexOf("e.preventDefault();"), h);
     }
 
     @Test
-    @DisplayName("only image data the page named itself goes up as a pasted image: a file copied in a file manager is a file")
-    void onlyClipboardImageDataIsPasted() {
+    @DisplayName("every image pasted or dropped goes up as a picture to show, by its type alone; every other file, and all picked with 📎, as a file")
+    void imagesAreShownWhereverTheyCameFrom() {
+        String given = between("function uploadGiven(files) {", "var pasteSecond");
+        assertTrue(given.contains("var images = files.filter(isImage); var others = files.filter(function(f) { return !isImage(f); }); "
+                + "if (images.length) uploadFiles(images, true); if (others.length) uploadFiles(others, false);"), given);
+        String is = between("function isImage(f) {", "function uploadGiven(files) {");
+        assertTrue(is.contains("return /^image\\//.test(f.type || '');"), is);
+        // Dropped files are given as pasted ones are; 📎 uploads them as files, never with the claim.
+        String drop = between("inputWrap.addEventListener('drop', function(e) {", "inputEl.addEventListener('paste'");
+        assertTrue(drop.contains("if (e.dataTransfer.files.length) uploadGiven(Array.prototype.slice.call(e.dataTransfer.files));"), drop);
+        assertTrue(page.contains("fileInput.addEventListener('change', function() { if (fileInput.files.length) uploadFiles(fileInput.files);"),
+                "📎 is the private way to give a picture: no claim");
+        assertEquals(1, page.split("uploadFiles\\(images, true\\)", -1).length - 1, "one place makes the claim");
+        assertEquals(3, page.split("uploadGiven\\(", -1).length - 1, "its definition, the drop and the paste");
         String f = between("function pastedFiles(data) {", "function uploadFiles(");
-        assertTrue(f.contains("var canTell = typeof items[i].webkitGetAsEntry === 'function';"), f);
-        assertTrue(f.contains("found.push(f); onDisk.push(!canTell || (!!entry && !made)); madeNow.push(made);"),
-                "a file system entry is remembered, and a browser that cannot tell makes it a file: " + f);
-        assertTrue(f.contains("var image = /^image\\//.test(f.type) && !onDisk[k];"), f);
-        assertTrue(f.contains("if (image) clipboardImages.add(named); return named;"), f);
-        // A file that keeps its own name -- a file manager's -- is returned before it can be marked.
-        int ownName = f.indexOf("if (f.name && !/^image\\.\\w+$/i.test(f.name) && !madeNow[k]) return f;");
-        assertTrue(ownName >= 0 && ownName < f.indexOf("clipboardImages.add("), f);
-        assertTrue(page.contains("var clipboardImages = new WeakSet();"));
+        for (String gone : new String[]{"clipboardImages", "onDisk", "madeNow", "entryForAnyFile", "holdsDiskFile"}) {
+            assertFalse(page.contains(gone), "where a file came from decides nothing now: " + gone);
+        }
+        // A clipboard that lists its files but not its items: each typed one, an image shown as any is.
+        assertTrue(f.contains("if (data.files[j].type) found.push(data.files[j]);"), f);
         String u = between("function uploadFiles(files, pasted) {", "function createFileChip(");
         assertTrue(u.contains("if (pasted) formData.append('pasted', 'true');"), "the claim, for the server to check: " + u);
         assertTrue(u.indexOf("if (!chips[i].isConnected)") < u.indexOf("markSeen(chips[i], uploaded[i], pasted);"), u);
-        // A clipboard that lists its files but not its items says nothing of where they came from: a file.
-        assertTrue(f.contains("if (data.files[j].type) { found.push(data.files[j]); onDisk.push(true); madeNow.push(false); }"), f);
-        // Mutation: mark every pasted file -> a statement copied in a file manager goes up as an image;
-        // onDisk false in the fallback, or where the browser has no webkitGetAsEntry -> a file
-        // manager's image.png goes up as a pasted picture.
+        // Mutation: uploadGiven(files) -> uploadFiles(files, true) -> a pasted PDF goes up with the
+        // claim (the server keeps it private, but the chip's line is the image's); the drop back to
+        // uploadFiles(e.dataTransfer.files) -> a dropped photo is private; 📎 through uploadGiven ->
+        // there is no private way to give a picture.
     }
 
     @Test
-    @DisplayName("where the browser gives an entry to every file, Firefox, only an image the paste itself made is the clipboard's image data, whatever Firefox names it")
-    void anEntryThatSaysNothingIsNotBelieved() {
-        String probe = between("var entryForAnyFile = (function() {", "function madeByThePaste(f) {");
-        assertTrue(probe.contains("if (typeof window.mozInnerScreenX !== 'number') return false; var probe = new DataTransfer();"),
-                "of Firefox alone -- WebKit gives such an entry too, and dates a file it cannot read now: " + probe);
-        assertTrue(probe.contains("var probe = new DataTransfer(); probe.items.add(new File(['x'], 'probe.png', { type: 'image/png' })); "
-                + "return typeof probe.items[0].webkitGetAsEntry === 'function' && !!probe.items[0].webkitGetAsEntry();"),
-                "asked of a file the page made in memory, which no file system holds: " + probe);
-        assertTrue(probe.contains("} catch (err) { return false;"),
-                "a browser that cannot be asked believes an entry, as before: " + probe);
+    @DisplayName("only what a file is called rests on when the paste made it: the browser's own name, in any language, is replaced")
+    void theDateNamesNoMore() {
         String made = between("function madeByThePaste(f) {", "function pastedFiles(data) {");
-        assertTrue(made.contains("return Math.abs(Date.now() - f.lastModified) < 1000; }"),
-                "dated by the paste, to the millisecond in every paste measured; a file of a file system keeps "
-                        + "the date it was written: " + made);
+        assertTrue(made.contains("return Math.abs(Date.now() - f.lastModified) < 1000; }"), made);
         String f = between("function pastedFiles(data) {", "function uploadFiles(");
-        // Behind an entry, where an entry says nothing, of an image, and not where the clipboard's own
-        // types say it holds a file of a file system: Chromium's rule is as it was.
-        assertTrue(f.contains("var made = !!entry && entryForAnyFile && !holdsDiskFile && /^image\\//.test(f.type) && madeByThePaste(f);"), f);
-        assertTrue(f.contains("var holdsDiskFile = Array.prototype.indexOf.call(data.types || [], 'application/x-moz-file') >= 0;"), f);
         assertEquals(1, f.split("madeByThePaste\\(", -1).length - 1, f);
-        assertEquals(1, f.split("entryForAnyFile", -1).length - 1, f);
-        // Firefox names the clipboard's image data in its own language -- "obrazek.png" in Czech --
-        // so where the paste made the file its name is the browser's, and it is named by the page
-        // and marked; every other file that keeps a name of its own is returned as it is, first.
-        assertTrue(f.indexOf("if (f.name && !/^image\\.\\w+$/i.test(f.name) && !madeNow[k]) return f;") < f.indexOf("var image = "), f);
-        assertEquals(3, f.split("madeNow\\.push\\(", -1).length - 1 + f.split("var madeNow = \\[\\];", -1).length - 1,
-                "one for every file found, beside onDisk: " + f);
-        // Mutation: believe the date in every browser, or without an entry asked -> Chromium's
-        // disk file named image.png, written a moment ago, goes up as a pasted picture; drop
-        // entryForAnyFile from the line -> the same; drop madeByThePaste -> Firefox's screenshots
-        // are private files again; drop the type -> a text file written this second loses its name;
-        // drop !madeNow[k] -> a Czech Firefox's "obrazek.png" stays a private file; 1000 back to
-        // 3000 -> a disk image written two seconds ago is taken for a screenshot; drop the Gecko
-        // line -> in WebKit a disk file whose date cannot be read goes up as a pasted picture.
+        assertTrue(f.contains("if (f.name && !/^image\\.\\w+$/i.test(f.name) && !(isImage(f) && madeByThePaste(f))) return f;"), f);
+        // Mutation: drop madeByThePaste from the name -> two screenshots pasted in a Czech Firefox are
+        // both "obrazek.png"; drop isImage -> a text file written this second loses its own name.
     }
 
     @Test
@@ -160,10 +142,10 @@ class ChatPastePageTest {
         assertTrue(note.contains("cloudSeesImages = cloud.seesImages !== false;"), note);
         assertTrue(page.contains("noteCloud({ seesImages: provider === 'anthropic' });"), "the settings page's provider too");
         assertTrue(note.contains("var hint = document.getElementById('hint-images'); if (hint) hint.textContent = cloudSeesImages "
-                + "? 'Screenshots and pictures pasted from the clipboard are shown to the cloud model"), "and the hint under the box: " + note);
-        assertTrue(page.contains("<span id=\"hint-images\">Screenshots and pictures pasted"), "the hint's words are that span");
-        assertTrue(note.contains("'This chat\\'s cloud model is sent no images: screenshots and pictures you paste are not "
-                + "shown to it, and ' + 'skills are given them as files;"), note);
+                + "? 'Images you paste or drop here -- screenshots, photos -- are shown to the cloud model"), "and the hint under the box: " + note);
+        assertTrue(page.contains("<span id=\"hint-images\">Images you paste or drop here"), "the hint's words are that span");
+        assertTrue(note.contains("'This chat\\'s cloud model is sent no images: images you paste or drop are not shown to it, "
+                + "and skills ' + 'are given them as files;"), note);
         // Mutation: refresh in nameDefaults only -> the chip keeps the last chat's wording (the review's Free-to-Cheaper send).
     }
 
@@ -183,13 +165,13 @@ class ChatPastePageTest {
     @DisplayName("every typed file is taken, a folder's empty type is not; only the browser's own 'image.png' is renamed, distinct within a second")
     void pastedFilesAreNamed() {
         String f = between("function pastedFiles(data) {", "function uploadFiles(");
-        assertTrue(f.contains("var entry = canTell ? items[i].webkitGetAsEntry() : null; "
+        assertTrue(f.contains("var entry = typeof items[i].webkitGetAsEntry === 'function' ? items[i].webkitGetAsEntry() : null; "
                 + "if (entry ? entry.isDirectory : !items[i].type) continue;"), "a folder out, a README in: " + f);
-        assertTrue(f.contains("if (f.name && !/^image\\.\\w+$/i.test(f.name) && !madeNow[k]) return f;"),
+        assertTrue(f.contains("if (f.name && !/^image\\.\\w+$/i.test(f.name) && !(isImage(f) && madeByThePaste(f))) return f;"),
                 "a file copied in a file manager keeps its name: " + f);
         assertTrue(f.contains("if (stamp !== pasteSecond) { pasteSecond = stamp; pastedInSecond = 0; }"), f);
         assertTrue(f.contains("+ (pastedInSecond > 1 ? '-' + pastedInSecond : '')"), f);
-        assertTrue(f.contains("named = new File([f], name, { type: f.type });"), f);
+        assertTrue(f.contains("return new File([f], name, { type: f.type });"), f);
     }
 
     @Test
@@ -233,10 +215,10 @@ class ChatPastePageTest {
     }
 
     @Test
-    @DisplayName("the hint under the box says it plainly: files stay private, pasted images are shown to the cloud model, unfiltered")
+    @DisplayName("the hint under the box says it plainly: images pasted or dropped are shown to the cloud model, unfiltered; other files and 📎 stay private")
     void theHintSaysSo() {
-        assertTrue(page.contains("Screenshots and pictures pasted from the clipboard are shown to the cloud model as pictures "
-                + "(the privacy filter reads text, not pictures); files you attach, drop or paste from a file manager stay private"),
+        assertTrue(page.contains("Images you paste or drop here -- screenshots, photos -- are shown to the cloud model as pictures "
+                + "(the privacy filter reads text, not pictures); other files, and anything you attach with 📎, stay private"),
                 page.substring(page.indexOf("<div class=\"input-hint\">"), page.indexOf("<div class=\"input-hint\">") + 500));
         assertFalse(page.contains("paste or 📎 to attach files — they stay private"), "pasted images are not private");
     }
