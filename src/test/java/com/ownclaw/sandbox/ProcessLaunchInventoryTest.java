@@ -46,7 +46,10 @@ class ProcessLaunchInventoryTest {
     //  - SetupWizardService: `<python> --version`, to find an interpreter; it runs nothing else.
     //  - ContainerSandbox: the container runtime (docker/podman), only through its one factory,
     //    which gives it the allow-listed environment; what it runs is in the container.
+    //  - HostPackages: apt-get and dpkg, which fetch and unpack a skill's system packages -- only
+    //    the argv SkillJail.prepare returned, as for pip.
     private static final Map<String, List<String>> ALLOWED = Map.of(
+            "com/ownclaw/sandbox/HostPackages.java", List.of("launch.argv()"),
             "com/ownclaw/sandbox/ProcessSandbox.java", List.of("launch.argv()"),
             "com/ownclaw/skills/PythonEnvironmentService.java", List.of("launch.argv()"),
             "com/ownclaw/sandbox/SkillJail.java", List.of("bwrap.toString(), \"--version\"", "argv", "bare"),

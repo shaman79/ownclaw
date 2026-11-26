@@ -52,6 +52,15 @@ public class DynamicSkillRegistry {
 
     private final Map<String, DynamicSkill> dynamicSkills = new ConcurrentHashMap<>();
 
+    /** What gives a skill's runs on the host its system packages; set once the container is up. */
+    private volatile com.ownclaw.sandbox.HostPackages hostPackages;
+
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    public void setHostPackages(com.ownclaw.sandbox.HostPackages hostPackages) {
+        this.hostPackages = hostPackages;
+        for (DynamicSkill s : dynamicSkills.values()) s.setHostPackages(hostPackages);
+    }
+
     public DynamicSkillRegistry(OwnClawConfig config, @Lazy ToolRegistry toolRegistry,
                                 SandboxManager sandbox, ContainerSandbox containerSandbox,
                                 PythonEnvironmentService pythonEnv,
@@ -465,10 +474,12 @@ public class DynamicSkillRegistry {
         List<String> systemPackages = parseStringList(yaml, "system_packages");
         String containerImage = getString(yaml, "container_image");
 
-        return new DynamicSkill(name, description, parameters, declared.whole(), skillDir,
+        var skill = new DynamicSkill(name, description, parameters, declared.whole(), skillDir,
                 requiresNetwork, hasSideEffects, timeout, sandbox, pythonEnv,
                 credentials, credentialVault, systemPackages, containerImage, containerSandbox,
                 fileStorage);
+        skill.setHostPackages(hostPackages);
+        return skill;
     }
 
     /**

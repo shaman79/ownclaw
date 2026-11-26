@@ -112,6 +112,8 @@ public class DynamicSkill implements Tool {
     private final String containerImage;
     private final ContainerSandbox containerSandbox;
     private final com.ownclaw.conversation.FileStorageService fileStorage;
+    /** What gives a run on the host the system packages the skill declares; null where nothing does. */
+    private volatile com.ownclaw.sandbox.HostPackages hostPackages;
 
     /**
      * How many invocations of this skill are running right now.
@@ -257,6 +259,12 @@ public class DynamicSkill implements Tool {
 
     /** System packages required by this skill (e.g. nmap, net-tools). */
     public List<String> systemPackages() { return systemPackages; }
+
+    /**
+     * What gives this skill's runs on the host -- with no docker or podman to build an image in --
+     * the system packages it declares, without root ({@link com.ownclaw.sandbox.HostPackages}).
+     */
+    public void setHostPackages(com.ownclaw.sandbox.HostPackages hostPackages) { this.hostPackages = hostPackages; }
 
     /** Preferred container base image (e.g. "python:3.11-slim"), or null for system default. */
     public String containerImage() { return containerImage; }
@@ -625,6 +633,10 @@ public class DynamicSkill implements Tool {
             // container runtime is available.
             SandboxResult result;
             boolean usedContainer = false;
+            // The declared system packages of a run on the host, and what it reads: the files it
+            // was handed, and those packages.
+            com.ownclaw.sandbox.HostPackages.Provided packages = null;
+            var readable = new ArrayList<Path>(handed);
             String containerImageTag = null;
             // The files this task was given, each on its own, read-only -- for the first run and
             // for a self-healed retry alike, or the retry cannot see the file it was fixed to read.
@@ -640,16 +652,30 @@ public class DynamicSkill implements Tool {
                         inputJson, timeoutSec,
                         context.progressCallback(), extraVolumes);
             } else {
+                // No container runtime: what the host lacks of the declared packages, unpacked
+                // without root into a directory of the service's, which the run reads -- or, when
+                // they cannot be had, the run as before, and its result says why.
                 if (!systemPackages.isEmpty()) {
-                    log.warn("Skill '{}' needs system packages {} but no container runtime available — "
-                            + "running directly (may fail if packages not installed on host)",
-                            name, systemPackages);
+                    if (hostPackages == null) {
+                        log.warn("Skill '{}' needs system packages {} but nothing here can give them -- running "
+                                + "without them", name, systemPackages);
+                    } else {
+                        var progress = context.progressCallback();
+                        packages = hostPackages.provide(systemPackages,
+                                line -> { if (progress != null) progress.onProgress(line, null); }, stoppedOf(context));
+                        if (packages.failure() != null) {
+                            log.warn("Skill '{}' runs without its system packages {}: {}", name, systemPackages,
+                                    packages.failure());
+                        }
+                        packages.applyTo(envVars);
+                        readable.addAll(packages.binds());
+                    }
                 }
                 // Direct process execution (original path)
                 result = sandbox.execute(
                         resolution.python(), runnerScript, skillDir,
                         inputJson, envVars, timeoutSec,
-                        context.progressCallback(), readOnlyFor(resolution, handed), context.userId());
+                        context.progressCallback(), readOnlyFor(resolution, readable), context.userId());
             }
 
             ToolResult toolResult = interpret(result);
@@ -672,8 +698,8 @@ public class DynamicSkill implements Tool {
                 try {
                     pythonEnv.installPackages(skillDir, name, List.of(pkg), stoppedOf(context), settingUp(context));
                     SandboxResult retry = retrySelfHeal(stoppedOf(context), usedContainer, containerImageTag,
-                            runnerScript, skillDir, inputJson, envVars, timeoutSec, extraVolumes, handed,
-                            context.userId());
+                            runnerScript, skillDir, inputJson, envVars, timeoutSec, extraVolumes, readable,
+                            packages, context.userId());
                     if (retry != null) {
                         toolResult = interpret(retry);
                         log.info("Self-heal retry of skill '{}': {}", name,
@@ -688,6 +714,9 @@ public class DynamicSkill implements Tool {
             // went on without them, and its error names only the module it then missed -- a
             // wrong package name, a wheel that needs a system library and an index out of reach
             // all read "No module named" there, and only pip says which.
+            // Why its system packages are not there, when they are not: its error then names
+            // only the program or the library it missed.
+            if (packages != null) toolResult = failedWith(toolResult, "system packages not installed", packages.failure());
             return failedWith(toolResult, "requirements not installed", resolution.installError());
         } catch (Exception e) {
             String message = String.valueOf(e.getMessage());
@@ -784,7 +813,7 @@ public class DynamicSkill implements Tool {
                                          Path runnerScript, Path skillDir, String inputJson,
                                          Map<String, String> envVars, int timeoutSec,
                                          Map<String, String> extraVolumes, List<Path> handed,
-                                         String tmpOwner) {
+                                         com.ownclaw.sandbox.HostPackages.Provided packages, String tmpOwner) {
         try {
             // Asked again: the jail may have started refusing since the first run, and a run in
             // docker or podman never passes it.
@@ -812,6 +841,13 @@ public class DynamicSkill implements Tool {
                         .filter(e -> !healedEnv.containsKey(e.getKey()))
                         .collect(java.util.stream.Collectors.toMap(
                                 Map.Entry::getKey, Map.Entry::getValue)));
+                // The environment read again sets its own PATH: the packages are found after it again.
+                if (packages != null) {
+                    for (String k : List.of("PATH", "LD_LIBRARY_PATH")) {
+                        if (!healedResolution.extraEnv().containsKey(k)) healedEnv.remove(k);
+                    }
+                    packages.applyTo(healedEnv);
+                }
                 return sandbox.execute(
                         healedResolution.python(), runnerScript, skillDir,
                         inputJson, healedEnv, timeoutSec, null, readOnlyFor(healedResolution, handed),
