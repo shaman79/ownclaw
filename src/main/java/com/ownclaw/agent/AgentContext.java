@@ -104,10 +104,16 @@ public class AgentContext {
      * A file sent with this message, as registered: its artifact, and -- for an image the owner
      * pasted, shown to the cloud model -- the image; null for a private file.
      */
-    public record Attachment(Artifact artifact, com.ownclaw.conversation.FileStorageService.PastedImage image, boolean shared) {
+    public record Attachment(Artifact artifact, com.ownclaw.conversation.FileStorageService.PastedImage image,
+                             boolean shared, String name) {
         public Attachment(Artifact artifact, com.ownclaw.conversation.FileStorageService.PastedImage image) {
-            this(artifact, image, false);
+            this(artifact, image, false, null);
         }
+    }
+
+    /** {@code text} on one line: each run of control characters -- line breaks among them -- a space. */
+    public static String oneLine(String text) {
+        return text == null ? "" : text.replaceAll("\\p{Cntrl}+", " ").strip();
     }
 
     // ── the task's results, and what may be said about them ──
@@ -908,17 +914,40 @@ public class AgentContext {
         return attachments.stream().filter(Attachment::shared).map(Attachment::artifact).toList();
     }
 
+    /** The name of the {@code index}th of {@link #sharedFiles}, from 0, on one line. */
+    public synchronized String sharedFileName(int index) {
+        return oneLine(attachments.stream().filter(Attachment::shared).toList().get(index).name());
+    }
+
+    /** The file of this task the owner lets the cloud model read whose handle is {{handle}}; null for any other. */
+    public synchronized Artifact sharedFile(long handle) {
+        return sharedFiles().stream().filter(f -> f.n() == handle).findFirst().orElse(null);
+    }
+
     /**
      * Register a file the owner lets the cloud model read (his choice of 2026-11-26, file by file):
      * a PUBLIC artifact, its text whole when it is text, which no result of the task is made private
-     * by. Every skill is handed it, as any file.
+     * by. Every skill is handed it, as any file. Its name is kept beside it, not in the why: the why
+     * is in the task's events, which the ops page shows.
      */
-    public synchronized Artifact addSharedFile(String fileId, String text, List<String> why) {
+    public synchronized Artifact addSharedFile(String fileId, String text, List<String> why, String name) {
         Artifact a = addArtifact("attachment", Map.of("fileId", fileId), Map.of("fileId", fileId),
                 text == null ? "" : text, true, new Artifact.Decision(com.ownclaw.privacy.Label.PUBLIC, why));
-        attachments.add(new Attachment(a, null, true));
+        attachments.add(new Attachment(a, null, true, name));
         return a;
     }
+
+    /**
+     * The {@code index}th of {@link #sharedFiles}' text, from 0, as the prompts show it: folded, once
+     * it has been ({@link #fit}), and otherwise whole.
+     */
+    public synchronized String sharedFileShown(int index) {
+        String f = filesFolded.get(index);
+        return f != null ? f : sharedFiles().get(index).output();
+    }
+
+    /** Each shared file's text the task folded to fit a model's window, as it is shown now, by its index in sharedFiles. */
+    private final Map<Integer, String> filesFolded = new HashMap<>();
 
     /** The images pasted with this message, shown to the cloud model, in order. */
     public synchronized List<Attachment> pasted() {
@@ -1280,8 +1309,9 @@ public class AgentContext {
     public synchronized ContextFit.Folded fit(Integer window) {
         // A chat message's images count towards it, as the model reads them; a message folded to a
         // line shows them no longer (conversationImagesShown).
-        var plan = ContextFit.plan(trajectory.turns(), folded, conversation, chatFolded, lastRequestChars,
-                window, fitRounds, this::readable,
+        var plan = ContextFit.plan(trajectory.turns(), folded, conversation, chatFolded,
+                sharedFiles().stream().map(f -> new ContextFit.FileText(f.n(), f.output())).toList(), filesFolded,
+                lastRequestChars, window, fitRounds, this::readable,
                 i -> !lastRequestImages ? 0L : (long) Math.ceil(conversationImagesShown(i).stream()
                         .mapToLong(im -> com.ownclaw.llm.LlmMessage.Image.tokens(im.width(), im.height())).sum()
                         * ContextFit.CHARS_PER_TOKEN),
@@ -1293,6 +1323,7 @@ public class AgentContext {
         fitRounds++;
         for (int i : plan.steps()) folded.put(i, plan.stepFolds().get(i));
         chatFolded.putAll(plan.chat());
+        filesFolded.putAll(plan.files());
         return plan;
     }
 
@@ -1548,6 +1579,13 @@ public class AgentContext {
                 }
                 for (String given : fromTheOwner) {
                     if (holds(given, stretch)) return true;
+                }
+                // A file the owner lets the cloud read, whatever its place among the task's files:
+                // its text is read from the file he chose to share, never made by a skill, and the
+                // cloud is given it whole. A private CSV and a shared one with the same header made
+                // the shared one's own section unsendable when the private one came first.
+                for (Attachment p : attachments) {
+                    if (p.shared() && holds(p.artifact().output(), stretch)) return true;
                 }
                 for (Artifact a : artifacts) {
                     if (a.n() > hitHandle) break;

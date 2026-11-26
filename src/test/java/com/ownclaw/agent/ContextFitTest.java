@@ -148,10 +148,10 @@ class ContextFitTest {
     void readResultArguments() {
         var ctx = new AgentContext("u1", "t1", "go");
         ctx.trajectory().record(new AgentAction("ping", Map.of(), ""), AgentObservation.success("ping", "pong", Map.of(), 1));
-        assertTrue(AgentLoop.readResult(Map.of(), ctx).startsWith("ERROR: 'step' or 'message' is required"));
+        assertTrue(AgentLoop.readResult(Map.of(), ctx).startsWith("ERROR: 'step', 'message' or 'file' is required"));
         assertEquals("ERROR: this task has no step 2; its steps so far are 1 to 1.", AgentLoop.readResult(Map.of("step", 2), ctx));
-        assertTrue(AgentLoop.readResult(Map.of("step", "one"), ctx).startsWith("ERROR: step, message, from and length are whole numbers"));
-        assertTrue(AgentLoop.readResult(Map.of("step", 1.5), ctx).startsWith("ERROR: step, message, from and length are whole numbers"));
+        assertTrue(AgentLoop.readResult(Map.of("step", "one"), ctx).startsWith("ERROR: step, message, file, from and length are whole numbers"));
+        assertTrue(AgentLoop.readResult(Map.of("step", 1.5), ctx).startsWith("ERROR: step, message, file, from and length are whole numbers"));
         assertEquals("Step 1's result, characters 1-3 of 4:\non\n[… characters 3-4 follow: read_result step=1 from=3]",
                 AgentLoop.readResult(Map.of("step", 1.0, "from", " 1 ", "length", "2"), ctx));
         ctx.trajectory().record(new AgentAction("uci_show", Map.of(), ""),
@@ -160,7 +160,7 @@ class ContextFitTest {
         assertFalse(read.contains("hunter2") || read.contains("abc99"), read);
         assertTrue(AgentLoop.readResult(Map.of("step", 2), ctx).contains("password=" + Redactor.SECRET_REMOVED));
         // Mutation: readResult cuts the output as it is -> from 19 reads hunter2abc99.
-        assertTrue(AgentLoop.readResult(Map.of("step", 1, "message", 1), ctx).startsWith("ERROR: give step or message, not both"));
+        assertTrue(AgentLoop.readResult(Map.of("step", 1, "message", 1), ctx).startsWith("ERROR: give one of step, message and file"));
         assertEquals(60_000L, AgentLoop.wholeNumber("60,000"));
         assertNull(AgentLoop.wholeNumber(" "));
     }

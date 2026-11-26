@@ -109,6 +109,7 @@ class CloudSwitchTest {
         String section = AgentLoopAccess.filesSection(ctx);
         assertTrue(section.contains("## Files the user lets you read"), section);
         assertTrue(section.contains("named \"cenik.csv\""), section);
+        assertFalse(String.valueOf(shared.why()).contains("cenik.csv"), "the why, which the ops page shows, does not name it");
         assertTrue(section.contains("Obědové menu;155 Kč"), "its text, given whole: " + section);
         assertFalse(section.contains("## Files sent with this message\n"), "no private file listed: " + section);
 
@@ -140,5 +141,39 @@ class CloudSwitchTest {
         rig.jdbc.update("INSERT INTO message_attachments (message_id, file_id) VALUES ('m1', ?)", mine);
         assertEquals(409, rig.status("u1", mine, true), "it went with a message: fixed");
         assertFalse(FileStorageService.cloudVisible(rig.files.getFileInfo(mine)));
+    }
+    @Test
+    @DisplayName("a row edited to name a file outside the uploads directory: its copy is not deleted, its stored file not read")
+    void editedRows(@TempDir Path tmp) throws Exception {
+        var rig = Rig.in(tmp);
+        String id = rig.files.store("u1", "photo.png", "image/png", new java.io.ByteArrayInputStream(TestImages.png(64, 48)));
+        rig.cloud("u1", id, true);
+        Path db = tmp.resolve("t.db");
+        assertTrue(Files.exists(db));
+        rig.jdbc.update("UPDATE file_attachments SET cloud_copy = '../t.db' WHERE id = ?", id);
+        assertEquals(false, rig.cloud("u1", id, false).get("shown_to_cloud"));
+        assertTrue(Files.exists(db), "../t.db is no copy in the uploads directory");
+
+        // Its stored name a link to a file outside: not read as the picture.
+        Path outside = Files.write(tmp.resolve("outside.png"), TestImages.png(32, 32));
+        String linked = rig.files.store("u1", "b.png", "image/png", new java.io.ByteArrayInputStream(TestImages.png(16, 16)));
+        Path stored = rig.uploads.resolve(String.valueOf(rig.files.getFileInfo(linked).get("stored_name")));
+        Files.delete(stored);
+        Files.createSymbolicLink(stored, outside);
+        assertEquals(500, rig.status("u1", linked, true));
+        assertNull(FileStorageService.pastedImage(rig.files.getFileInfo(linked)));
+        // Mutation: resolve the stored name directly -> the linked file is read and its copy shown.
+    }
+
+    @Test
+    @DisplayName("shown already: answered as it is shown, what its file carries beside the picture too")
+    void shownAlready(@TempDir Path tmp) throws Exception {
+        var rig = Rig.in(tmp);
+        String id = rig.files.store("u1", "photo.png", "image/png", new java.io.ByteArrayInputStream(TestImages.png(64, 48)));
+        var first = rig.cloud("u1", id, true);
+        var again = rig.cloud("u1", id, true);
+        assertEquals(true, again.get("shown_to_cloud"));
+        assertEquals(first.get("cloud_width"), again.get("cloud_width"));
+        assertEquals(first.get("results_private"), again.get("results_private"), first + " / " + again);
     }
 }

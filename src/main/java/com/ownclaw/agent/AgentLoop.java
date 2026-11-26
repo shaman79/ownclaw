@@ -677,12 +677,11 @@ public class AgentLoop {
                     // A file the owner lets the cloud model read (his choice, before he sent it): no
                     // private file -- its text, when it has one, and what skills read from it go to
                     // the cloud, through the gateway's filter like everything else. Its name too: he
-                    // shared the file.
+                    // shared the file. Not in the why, which the event below and the ops page show.
                     String text = fileStorage.isTextContent(ct) ? fileStorage.readAsText(id) : null;
                     var why = List.of("shared file", ct + ", " + size + " bytes"
-                                    + (text == null ? ", no text read (not text, or not UTF-8)" : ""),
-                            String.valueOf(info.get("original_name")));
-                    a = context.addSharedFile(id, text, why);
+                            + (text == null ? ", no text read (not text, or not UTF-8)" : ""));
+                    a = context.addSharedFile(id, text, why, String.valueOf(info.get("original_name")));
                 } else {
                     String text = fileStorage.isTextContent(ct) ? fileStorage.readAsText(id) : null;
                     // The type and the size, never the name: a statement's file name carries its
@@ -695,7 +694,7 @@ public class AgentLoop {
                 // this nothing recorded that a task had one -- the task page could not show the
                 // file, its label, or whether it was withheld -- nor which kind it was.
                 eventLog.log(context.userId(), context.taskId(), "attachment", "info",
-                        "attachment " + a.label() + (image != null ? " pasted image" : ""),
+                        "attachment " + a.label() + (image != null ? " pasted image" : shared(a) ? " shared file" : ""),
                         JSON.writeValueAsString(attachmentDetails(a, image)), 0);
             } catch (Exception e) {
                 log.debug("Could not register attachment {}: {}", id, e.getMessage());
@@ -773,6 +772,16 @@ public class AgentLoop {
                         sb.append("[An image was pasted with this message: ").append(ct).append(", ")
                           .append(image.originalWidth()).append('x').append(image.originalHeight())
                           .append(" px.]\n");
+                        continue;
+                    }
+                    if (FileStorageService.cloudVisible(att)) {
+                        // One the owner let the cloud model read: named, as it was then. Not inlined
+                        // -- its text went to that turn, and on every later turn it would go again --
+                        // and, as any file, handed to skills only on the turn it was sent.
+                        sb.append("[A file the user let you read was attached here: \"")
+                          .append(AgentContext.oneLine(String.valueOf(att.get("original_name")))).append("\" (")
+                          .append(ct).append(", ").append(att.get("size_bytes")).append(" bytes). It is not ")
+                          .append("attached to this task; the user can attach it again.]\n");
                         continue;
                     }
                     // Never inlined, and not named. A file is PRIVATE: inlined, its bytes
@@ -2429,25 +2438,44 @@ public class AgentLoop {
      * ({@link ContextFit#read}). What the model reads is that step's result as it was recorded
      * -- for a PRIVATE result, the description it was recorded as -- with its secrets removed
      * before it is cut ({@link AgentContext#readable}), so it is told nothing it was not shown
-     * before the result was folded, and no cut can split a secret the gateway would remove.
+     * before the result was folded, and no cut can split a secret the gateway would remove. With
+     * file, a file the owner lets the cloud model read ({@link AgentContext#sharedFile}), never a
+     * private one.
      */
     static String readResult(Map<String, Object> params, AgentContext context) {
         Long step;
         Long message;
+        Long file;
         Long from;
         Long length;
         try {
             step = wholeNumber(params.get("step"));
             message = wholeNumber(params.get("message"));
+            file = wholeNumber(params.get("file"));
             from = wholeNumber(params.get("from"));
             length = wholeNumber(params.get("length"));
         } catch (NumberFormatException notANumber) {
-            return "ERROR: step, message, from and length are whole numbers: " + notANumber.getMessage();
+            return "ERROR: step, message, file, from and length are whole numbers: " + notANumber.getMessage();
         }
         Object find = params.get("find");
-        if (message != null && step != null) {
-            return "ERROR: give step or message, not both: step reads a step's result, message a message of "
-                    + "this chat.";
+        if ((message != null ? 1 : 0) + (step != null ? 1 : 0) + (file != null ? 1 : 0) > 1) {
+            return "ERROR: give one of step, message and file: step reads a step's result, message a message of "
+                    + "this chat, file a file the user lets you read.";
+        }
+        if (file != null) {
+            // Only a file the owner lets the cloud read: a private file's handle names nothing here.
+            Artifact shared = context.sharedFile(file);
+            if (shared == null) {
+                var handles = context.sharedFiles().stream().map(Artifact::handle).toList();
+                return "ERROR: " + ArtifactRef.handle(file.intValue()) + " is no file the user lets you read in this "
+                        + "task" + (handles.isEmpty() ? "; there is none." : "; those are " + String.join(", ", handles) + ".");
+            }
+            if (shared.output().isEmpty()) {
+                return "File " + shared.handle() + " has no text to read: it is not text, or not UTF-8.";
+            }
+            return ContextFit.read(new ContextFit.Named("file " + shared.handle(), "file=" + shared.n()),
+                    context.readable(shared.output()), from, length,
+                    find == null ? null : String.valueOf(find), context.readChunk());
         }
         if (message != null) {
             // A message of the chat, as Prior Context writes it, whole: its record and files too.
@@ -2463,8 +2491,8 @@ public class AgentLoop {
         }
         var turns = context.trajectory().turns();
         if (step == null) {
-            return "ERROR: 'step' or 'message' is required: the number of the step whose result to read, or of "
-                    + "the chat's message, as the folded text names it.";
+            return "ERROR: 'step', 'message' or 'file' is required: the number of the step whose result to read, "
+                    + "of the chat's message, or of the file, as the folded text names it.";
         }
         if (step < 1 || step > turns.size()) {
             return "ERROR: this task has no step " + step + (turns.isEmpty() ? " yet." : "; its steps so far are 1 to "
@@ -4565,10 +4593,15 @@ public class AgentLoop {
     }
 
     /**
-     * An attachment's row: which file, its label and why -- and its kind: a private file, or an
-     * image the owner pasted that the cloud model is shown, with the pixel sizes it was pasted at
-     * and is shown at.
+     * An attachment's row: which file, its label and why -- and its kind: a private file, a file
+     * the owner lets the cloud model read, or an image the owner pasted that the cloud model is
+     * shown, with the pixel sizes it was pasted at and is shown at.
      */
+    /** Whether an attachment is a file the owner lets the cloud model read ({@link AgentContext#addSharedFile}). */
+    static boolean shared(Artifact a) {
+        return !a.isPrivate() && !a.why().isEmpty() && "shared file".equals(a.why().getFirst());
+    }
+
     static Map<String, Object> attachmentDetails(Artifact a, FileStorageService.PastedImage image) {
         var d = new LinkedHashMap<String, Object>();
         d.put("artifact", a.handle());
@@ -4577,7 +4610,7 @@ public class AgentLoop {
         d.put("label", a.label().name());
         d.put("chars", a.output().length());
         d.put("indexed", a.indexed());
-        d.put("kind", image != null ? "pasted image" : "private file");
+        d.put("kind", image != null ? "pasted image" : shared(a) ? "shared file" : "private file");
         if (image != null) {
             d.put("shownToCloud", true);
             d.put("contentType", image.contentType());

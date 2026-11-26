@@ -161,16 +161,29 @@ class ChatPastePageTest {
                 + "sw.addEventListener('click', function() { switchCloud(chip); });"), mark);
         String sw = between("function switchCloud(chip) {", "function chatRunsFree() {");
         assertTrue(sw.contains("if (!chip.dataset.fileId || chip.classList.contains('uploading')) return;"), "one choice at a time, once uploaded: " + sw);
-        assertTrue(sw.contains("var visible = !(chip.dataset.shown === '1' || chip.dataset.cloudVisible === '1');"), sw);
-        assertTrue(sw.contains("chip.classList.add('uploading');"), "a message waits for the choice (send): " + sw);
+        assertTrue(sw.contains("var visible = chip.classList.contains('undecided') ? chip.dataset.wanted === '1' "
+                + ": !(chip.dataset.shown === '1' || chip.dataset.cloudVisible === '1');"), "unconfirmed, the same choice again: " + sw);
+        assertTrue(sw.contains("chip.classList.add('uploading'); if (sw) sw.disabled = true;"),
+                "a message waits for the choice (send): " + sw);
         assertTrue(sw.contains("fetch('/api/files/' + encodeURIComponent(chip.dataset.fileId) + '/cloud', { method: 'POST', "
                 + "headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' }, body: JSON.stringify({ visible: visible }) })"), sw);
-        assertTrue(sw.contains("if (!chip.isConnected || authToken !== token) return; seenFrom(chip, said); chip.dataset.chosen = '1'; seenLine(chip);"),
+        assertTrue(sw.contains("settled(); if (!chip.isConnected || authToken !== token) return; chip.classList.remove('undecided'); "
+                + "delete chip.dataset.wanted; delete chip.dataset.failed; seenFrom(chip, said); chip.dataset.chosen = '1'; seenLine(chip);"),
                 "the server's word, not the click's: " + sw);
+        // A lost answer: who sees the file is not known, and the chip says so instead of what it said before.
+        assertTrue(sw.contains(".catch(function(err) { settled(); if (!chip.isConnected || authToken !== token) return;"), sw);
+        assertTrue(sw.contains("chip.classList.add('undecided'); chip.dataset.wanted = visible ? '1' : '0'; "
+                + "chip.dataset.failed = String(err && err.message || 'no answer'); seenLine(chip);"), sw);
+        assertFalse(sw.contains("addMsg("), "said on the chip, not in the chat: " + sw);
         String line = between("function seenLine(chip) {", "function refreshSeen()");
-        assertTrue(line.contains("sw.textContent = open ? '🔒 keep private' : '☁️ let the cloud see it';"), line);
+        assertTrue(line.contains("sw.textContent = undecided ? (chip.dataset.wanted === '1' ? '↻ let the cloud see it' : '↻ keep private') "
+                + ": open ? '🔒 keep private' : '☁️ let the cloud see it';"), line);
+        assertTrue(line.contains("sw.setAttribute('aria-pressed', !undecided && open ? 'true' : 'false');"), line);
+        assertTrue(line.contains("if (undecided) { line = '⚠️ not confirmed — tap to try again';"), line);
         assertTrue(page.contains("if (!picked && fileChips.querySelector('.file-chip.uploading')) {"), "Send waits for a switch under way");
+        assertTrue(page.contains("if (!picked && fileChips.querySelector('.file-chip.undecided')) {"), "and for one not confirmed");
         // Mutation: set the line from the click instead of the answer -> a refused switch says the file is shown.
+        // Mutation: leave the chip as it was on a lost answer -> Send goes with a choice the chip does not say.
     }
 
     @Test

@@ -108,11 +108,21 @@ final class ContextFit {
      *                  "12 messages of this chat (40,210 characters)"
      */
     record Folded(List<Integer> steps, Map<Integer, Fold> stepFolds, Map<Integer, ChatFold> chat,
-                  List<String> labels) {
+                  Map<Integer, String> files, List<String> labels) {
+        Folded(List<Integer> steps, Map<Integer, Fold> stepFolds, Map<Integer, ChatFold> chat, List<String> labels) {
+            this(steps, stepFolds, chat, Map.of(), labels);
+        }
+
         boolean isEmpty() {
-            return steps.isEmpty() && chat.isEmpty();
+            return steps.isEmpty() && chat.isEmpty() && files.isEmpty();
         }
     }
+
+    /**
+     * A file the owner lets the cloud model read, as the task shows it: its handle's number and its
+     * text ({@code AgentContext#sharedFiles}).
+     */
+    record FileText(int handle, String text) {}
 
     /** The chat's newest messages that never fold to a line: the turn the task answers. */
     static final int NEWEST_KEPT = 2;
@@ -150,27 +160,56 @@ final class ContextFit {
                        java.util.function.Function<String, Redactor.Cuttable> readable,
                        java.util.function.IntToLongFunction imageChars,
                        java.util.function.IntUnaryOperator images) {
+        return plan(turns, folded, chat, chatFolded, List.of(), Map.of(), requestChars, window, round, readable,
+                imageChars, images);
+    }
+
+    /**
+     * {@link #plan(List, Map, List, Map, long, Integer, int, java.util.function.Function,
+     * java.util.function.IntToLongFunction, java.util.function.IntUnaryOperator)}, with the files the
+     * owner lets the cloud model read among what folds by size, each to its first {@link #PREVIEW}
+     * characters, read in parts with read_result file=n: the task's message gives them whole, and a
+     * shared CSV of a few hundred kilobytes made every request too long for the window.
+     *
+     * @param files       the shared files, in order
+     * @param filesFolded the files already folded, by index in {@code files}
+     */
+    static Folded plan(List<AgentTrajectory.Turn> turns, Map<Integer, Fold> folded,
+                       List<String> chat, Map<Integer, ChatFold> chatFolded,
+                       List<FileText> files, Map<Integer, String> filesFolded,
+                       long requestChars, Integer window, int round,
+                       java.util.function.Function<String, Redactor.Cuttable> readable,
+                       java.util.function.IntToLongFunction imageChars,
+                       java.util.function.IntUnaryOperator images) {
         long target = target(requestChars, window, round);
-        // Each that can fold by size: a step (index >= 0) or a chat message (-1 - index), in the
-        // order it was written -- the chat before the task -- so that the stable sort keeps the
-        // older first among equals.
-        record Candidate(int key, int length) {}
+        // Each that can fold by size: a chat message, a shared file or a step, in the order it is
+        // written -- the chat, then the task's files, then its steps -- so that the stable sort keeps
+        // the older first among equals.
+        enum Kind { CHAT, FILE, STEP }
+        record Candidate(Kind kind, int index, int length) {}
         var candidates = new ArrayList<Candidate>();
         for (int i = 0; i < chat.size(); i++) {
             if (!chatFolded.containsKey(i) && chat.get(i).length() > FOLDABLE) {
-                candidates.add(new Candidate(-1 - i, chat.get(i).length()));
+                candidates.add(new Candidate(Kind.CHAT, i, chat.get(i).length()));
+            }
+        }
+        for (int i = 0; i < files.size(); i++) {
+            String text = files.get(i).text();
+            if (!filesFolded.containsKey(i) && text != null && text.length() > FOLDABLE) {
+                candidates.add(new Candidate(Kind.FILE, i, text.length()));
             }
         }
         for (int i = 0; i < turns.size(); i++) {
             var turn = turns.get(i);
             if (turn.byTheLoop() || folded.containsKey(i) || turn.observation() == null) continue;
             String output = turn.observation().output();
-            if (output != null && output.length() > FOLDABLE) candidates.add(new Candidate(i, output.length()));
+            if (output != null && output.length() > FOLDABLE) candidates.add(new Candidate(Kind.STEP, i, output.length()));
         }
         candidates.sort(Comparator.comparingInt(Candidate::length).reversed());
         var steps = new ArrayList<Integer>();
         var stepFolds = new LinkedHashMap<Integer, Fold>();
         var chatNow = new LinkedHashMap<Integer, ChatFold>();
+        var filesNow = new LinkedHashMap<Integer, String>();
         var labels = new ArrayList<String>();
         long size = requestChars;
         long chatChars = 0;
@@ -178,15 +217,22 @@ final class ContextFit {
         int chatImages = 0;
         for (var c : candidates) {
             if (size <= target) break;
-            if (c.key() >= 0) {
-                var turn = turns.get(c.key());
-                Fold f = new Fold(shown(turn, c.key() + 1, readable.apply(turn.observation().output())));
-                steps.add(c.key());
-                stepFolds.put(c.key(), f);
+            if (c.kind() == Kind.FILE) {
+                var file = files.get(c.index());
+                String f = shownFile(file.handle(), readable.apply(file.text()));
+                filesNow.put(c.index(), f);
+                labels.add("the file " + com.ownclaw.agent.ArtifactRef.handle(file.handle()) + " ("
+                        + count(c.length()) + " characters)");
+                size -= c.length() - f.length();
+            } else if (c.kind() == Kind.STEP) {
+                var turn = turns.get(c.index());
+                Fold f = new Fold(shown(turn, c.index() + 1, readable.apply(turn.observation().output())));
+                steps.add(c.index());
+                stepFolds.put(c.index(), f);
                 labels.add("the result of " + turn.action().tool() + " (" + count(c.length()) + " characters)");
                 size -= c.length() - f.shown().length();
             } else {
-                int i = -1 - c.key();
+                int i = c.index();
                 ChatFold f = new ChatFold(shownMessage(i + 1, chat.size(), readable.apply(chat.get(i))), false);
                 chatNow.put(i, f);
                 chatChars += c.length();
@@ -217,7 +263,26 @@ final class ContextFit {
                     + count(chatChars) + " characters" + (chatImages == 0 ? ""
                             : " and " + chatImages + (chatImages == 1 ? " image" : " images")) + ")");
         }
-        return new Folded(List.copyOf(steps), stepFolds, chatNow, List.copyOf(labels));
+        return new Folded(List.copyOf(steps), stepFolds, chatNow, filesNow, List.copyOf(labels));
+    }
+
+    /**
+     * A shared file's text folded to its first characters ({@link #plan}): what the task's message
+     * shows of it from then on, the note saying how read_result reads the rest.
+     */
+    static String shownFile(int handle, Redactor.Cuttable readable) {
+        String text = readable.text();
+        int cut = Math.min(text.length(),
+                text.offsetByCodePoints(0, Math.min(PREVIEW, text.codePointCount(0, text.length()))));
+        cut = readable.to(cut);
+        String h = com.ownclaw.agent.ArtifactRef.handle(handle);
+        return "[File " + h + " is " + count(text.length()) + " characters: too long to show whole with the rest "
+                + "of this task in the model's context window, so it is folded and only its first " + count(cut)
+                + " are below. Nothing was dropped: read_result with file=" + handle + " reads any part of it -- "
+                + "from, a character offset, and length, as much as fits when left out -- and with find, every "
+                + "place a text occurs in it. A tool you hand " + h + " is still given all of it.]\n"
+                + text.substring(0, cut) + "\n[… folded: characters " + count(cut) + "-" + count(text.length())
+                + " of file " + h + "]";
     }
 
     /** A chat message folded to its first characters, a line break after it, as every message has. */

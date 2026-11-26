@@ -1151,6 +1151,7 @@
             white-space: nowrap;
         }
         .file-chip.uploading .file-chip-switch { cursor: wait; opacity: .6 }
+        .file-chip.undecided { border-color: var(--red) }
         .file-chip-detail { display: none; flex-basis: 100%; font-size: 11px; color: var(--text-3); white-space: normal; line-height: 1.35 }
         .file-chip.open { flex-wrap: wrap; border-radius: 12px }
         .file-chip.open .file-chip-detail { display: block }
@@ -3850,6 +3851,16 @@
                     item.appendChild(node('div', 'task-trace-line muted', 'Its file carries ' + (a.metadata || 'more than the picture')
                             + ', so what skills read from it was kept private.'));
                 }
+                panel.appendChild(item);
+                return;
+            }
+            // A file the owner let the cloud model read, as he chose on its chip.
+            if (a.kind === 'shared file') {
+                item.appendChild(node('div', 'task-trace-line', a.handle + ' your file'
+                        + (a.name != null ? ' "' + a.name + '"' : '') + ' · ' + tdChars(a.chars)));
+                item.appendChild(node('div', 'task-trace-line muted', 'You let the cloud model read it: '
+                        + (a.chars ? 'its text was given to it through the privacy filter, and ' : '')
+                        + 'it made nothing skills read private (a private file sent with it still does).'));
                 panel.appendChild(item);
                 return;
             }
@@ -7583,9 +7594,17 @@
      */
     function switchCloud(chip) {
         if (!chip.dataset.fileId || chip.classList.contains('uploading')) return;
-        var visible = !(chip.dataset.shown === '1' || chip.dataset.cloudVisible === '1');
+        // Not confirmed, the choice asked for again: the server may have made it, or not.
+        var visible = chip.classList.contains('undecided') ? chip.dataset.wanted === '1'
+                : !(chip.dataset.shown === '1' || chip.dataset.cloudVisible === '1');
         var token = authToken;
+        var sw = chip.querySelector('.file-chip-switch');
         chip.classList.add('uploading');
+        if (sw) sw.disabled = true;
+        function settled() {
+            chip.classList.remove('uploading');
+            if (sw) sw.disabled = false;
+        }
         fetch('/api/files/' + encodeURIComponent(chip.dataset.fileId) + '/cloud', {
             method: 'POST',
             headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
@@ -7593,18 +7612,25 @@
         })
         .then(okJson)
         .then(function(said) {
-            chip.classList.remove('uploading');
+            settled();
             if (!chip.isConnected || authToken !== token) return;
+            chip.classList.remove('undecided');
+            delete chip.dataset.wanted;
+            delete chip.dataset.failed;
             seenFrom(chip, said);
             chip.dataset.chosen = '1';
             seenLine(chip);
         })
         .catch(function(err) {
-            chip.classList.remove('uploading');
-            if (chip.isConnected && authToken === token) {
-                addMsg('system', 'Could not change who sees ' + mdLiteral(chip.querySelector('.file-chip-name').textContent)
-                        + ': ' + mdLiteral(err.message));
-            }
+            settled();
+            if (!chip.isConnected || authToken !== token) return;
+            // The answer was lost, or a refusal: who sees the file is not known here, so the chip
+            // says so and the message waits (send) until the choice is confirmed -- sent now, it
+            // went as whatever the server last made it, perhaps not what the chip said.
+            chip.classList.add('undecided');
+            chip.dataset.wanted = visible ? '1' : '0';
+            chip.dataset.failed = String(err && err.message || 'no answer');
+            seenLine(chip);
         });
     }
 
@@ -7645,14 +7671,25 @@
         var seen = chip.querySelector('.file-chip-seen'), detail = chip.querySelector('.file-chip-detail');
         if (!seen || !detail) return;
         var sw = chip.querySelector('.file-chip-switch');
-        var open = chip.dataset.shown === '1' || chip.dataset.cloudVisible === '1';
+        var undecided = chip.classList.contains('undecided');
+        var open = undecided ? chip.dataset.wanted !== '1'
+                : chip.dataset.shown === '1' || chip.dataset.cloudVisible === '1';
         if (sw) {
-            sw.textContent = open ? '🔒 keep private' : '☁️ let the cloud see it';
-            sw.title = open ? 'Keep this file private: only your local model reads it'
+            sw.textContent = undecided ? (chip.dataset.wanted === '1' ? '↻ let the cloud see it' : '↻ keep private')
+                    : open ? '🔒 keep private' : '☁️ let the cloud see it';
+            sw.title = undecided ? 'Send your choice again'
+                    : open ? 'Keep this file private: only your local model reads it'
                     : 'Let the cloud model see this file: a picture as it is, any other file as what skills read from it';
+            sw.setAttribute('aria-pressed', !undecided && open ? 'true' : 'false');
         }
         var line, full;
-        if (chip.dataset.cloudVisible === '1') {
+        if (undecided) {
+            line = '⚠️ not confirmed — tap to try again';
+            full = 'OwnClaw did not confirm ' + (chip.dataset.wanted === '1' ? 'letting the cloud model see this file'
+                    : 'keeping this file private') + ' (' + chip.dataset.failed + '), so who sees it is not known. Tap "'
+                    + (sw ? sw.textContent.replace(/^↻ /, '') : 'the switch') + '" to send your choice again, or remove the file. A message '
+                    + 'is not sent while it is unconfirmed.';
+        } else if (chip.dataset.cloudVisible === '1') {
             line = chatRunsFree() ? '🏠 Free: no cloud model reads it' : '☁️ the cloud model can read it';
             full = 'You let the cloud model read this file: what skills read from it is shown to it, and a text file\'s '
                     + 'text is given to it, through the privacy filter, which takes out secrets and puts placeholders for '
@@ -7966,6 +8003,11 @@
         // referred to a forgotten PDF an hour later.
         if (!picked && fileChips.querySelector('.file-chip.uploading')) {
             showConnBanner('Still uploading — send again in a moment.');
+            return;
+        }
+        // A file whose switch was not confirmed: who sees it is not known, so it is not sent.
+        if (!picked && fileChips.querySelector('.file-chip.undecided')) {
+            showConnBanner('A file\'s choice of who sees it was not confirmed — tap its switch to try again, or remove it.');
             return;
         }
 

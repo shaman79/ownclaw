@@ -105,34 +105,54 @@ public class FileStorageService implements CloudImages {
         List<Map<String, Object>> rows = jdbc.queryForList(
                 "SELECT * FROM file_attachments WHERE id = ? AND user_id = ?", fileId, userId);
         if (rows.isEmpty()) return null;
-        Integer sent = jdbc.queryForObject("SELECT COUNT(*) FROM message_attachments WHERE file_id = ?", Integer.class, fileId);
-        if (sent != null && sent > 0) throw new AlreadySent();
+        if (sent(fileId)) throw new AlreadySent();
         Map<String, Object> row = rows.getFirst();
-        Path file = uploadsDir.resolve(String.valueOf(row.get("stored_name")));
         if (!visible) {
-            Object copy = row.get("cloud_copy");
-            jdbc.update("""
+            // The copy's path checked as every reader checks a stored name: a row edited to name
+            // ../ownclaw.db deletes nothing but a copy in the uploads directory.
+            Path copy = row.get("cloud_copy") instanceof String sidecar ? storedPath(sidecar) : null;
+            int changed = jdbc.update("""
                 UPDATE file_attachments SET shown_to_cloud = 0, cloud_visible = 0, cloud_copy = NULL,
                     cloud_media_type = NULL, cloud_width = NULL, cloud_height = NULL, cloud_bytes = NULL,
                     cloud_sha256 = NULL WHERE id = ? AND user_id = ?
-                """, fileId, userId);
-            if (copy != null) Files.deleteIfExists(uploadsDir.resolve(String.valueOf(copy)));
+                """ + UNSENT, fileId, userId, fileId);
+            if (changed == 0) throw new AlreadySent();
+            if (copy != null) Files.deleteIfExists(copy);
             log.info("File {} is private, as its owner chose", fileId);
             return new Stored(fileId, false, "you chose to keep it private", null, false);
         }
         PastedImage already = pastedImage(row);
-        if (already != null) return new Stored(fileId, true, null, null, false);
+        if (already != null) {
+            // Shown already: answered as it was shown, what its file carries beside the picture too.
+            return new Stored(fileId, true, null, new CloudImageCopy.Copy(already.mediaType(), already.width(),
+                    already.height(), already.originalWidth(), already.originalHeight(), new byte[0],
+                    already.metadata()), false);
+        }
         String type = String.valueOf(row.get("content_type"));
         if (type.startsWith("image/")) {
+            // Read as every reader reads a stored file: a plain file in the uploads directory, never
+            // through a link to one outside it.
+            Path file = plainFile(storedPath(String.valueOf(row.get("stored_name"))));
+            if (file == null) throw new IOException("its stored file is not a plain file in the uploads directory");
+            // Made as a pasted image's is. Not under the unsent condition: a message sent while the
+            // copy is made -- the page waits for the answer before it sends -- shows it, as he chose.
             Stored shown = shown(userId, fileId, file, CloudImageCopy.deadline());
-            if (shown.shownToCloud()) {
-                jdbc.update("UPDATE file_attachments SET cloud_visible = 0 WHERE id = ? AND user_id = ?", fileId, userId);
-                return shown;
-            }
+            if (shown.shownToCloud()) return shown;
         }
-        jdbc.update("UPDATE file_attachments SET cloud_visible = 1 WHERE id = ? AND user_id = ?", fileId, userId);
+        int changed = jdbc.update("UPDATE file_attachments SET cloud_visible = 1 WHERE id = ? AND user_id = ?"
+                + UNSENT, fileId, userId, fileId);
+        if (changed == 0) throw new AlreadySent();
         log.info("File {} may be read by the cloud model, as its owner chose: type={}", fileId, type);
         return new Stored(fileId, false, null, null, true);
+    }
+
+    /** An update's condition that the file went with no message: checked as it is written, never before. */
+    private static final String UNSENT = " AND NOT EXISTS (SELECT 1 FROM message_attachments WHERE file_id = ?)";
+
+    /** Whether the file went with a message. */
+    private boolean sent(String fileId) {
+        Integer n = jdbc.queryForObject("SELECT COUNT(*) FROM message_attachments WHERE file_id = ?", Integer.class, fileId);
+        return n != null && n > 0;
     }
 
     /** Whether {@code row}, a row of {@code file_attachments}, is a file its owner lets the cloud model read. */
@@ -430,7 +450,7 @@ public class FileStorageService implements CloudImages {
         return jdbc.queryForList("""
             SELECT f.id, f.user_id, f.original_name, f.content_type, f.size_bytes, f.uploaded_at,
                    f.shown_to_cloud, f.cloud_media_type, f.cloud_width, f.cloud_height, f.cloud_bytes,
-                   f.image_width, f.image_height, f.image_metadata
+                   f.image_width, f.image_height, f.image_metadata, f.cloud_visible
             FROM file_attachments f
             JOIN message_attachments ma ON ma.file_id = f.id
             WHERE ma.message_id = ?
