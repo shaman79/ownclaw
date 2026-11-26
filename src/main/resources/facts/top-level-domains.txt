@@ -1,7 +1,7 @@
 # The internet's top-level domains, one a line: the last label of every name under the ICANN
 # section of the Public Suffix List (https://publicsuffix.org/list/public_suffix_list.dat, as of
 # 2026-11), in its own script and as Punycode. A fact found in an answer that names a host under
-# one of them names a place outside the owner's own network (FactCapture#outsidePlaces).
+# one of them names a place outside the owner's own network (FactCapture#unknownPlaces).
 aaa
 aarp
 abb

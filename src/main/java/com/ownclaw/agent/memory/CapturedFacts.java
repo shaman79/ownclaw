@@ -165,6 +165,14 @@ public class CapturedFacts {
                 memory.storeFact(userId, chosen, fact);
                 memoryId = rowOf(userId, chosen);
                 jdbc.update("UPDATE fact_captures SET memory_id = ? WHERE ref = ?", memoryId, ref);
+                // The same fact still on offer from before 2026-11-26 is kept now: its Keep would
+                // keep it a second time, and its row says so after a reload.
+                for (String old : jdbc.queryForList("SELECT ref FROM fact_captures WHERE user_id = ? AND state = 'offered' "
+                        + "AND fact = ? AND replaces_id IS NULL", String.class, userId, fact)) {
+                    jdbc.update("UPDATE fact_captures SET state = 'kept', memory_id = ?, fact_key = ?, decided_at = datetime('now') "
+                            + "WHERE ref = ?", memoryId, chosen, old);
+                    if (conversations != null) conversations.markFact(userId, old, "kept");
+                }
             }
             return saved(new Capture(ref, userId, sessionId, taskId, source, state, chosen, fact, null, memoryId), row);
         });
@@ -194,7 +202,8 @@ public class CapturedFacts {
             if (now == null || id(now) != expectedId) throw new Abort();
             memory.storeFact(userId, key, fact);
             long memoryId = rowOf(userId, key);
-            jdbc.update("UPDATE fact_captures SET previous = ?, memory_id = ? WHERE ref = ?", now.content(), memoryId, ref);
+            jdbc.update("UPDATE fact_captures SET previous = ?, memory_id = ?, replaces_id = ? WHERE ref = ?",
+                    now.content(), memoryId, expectedId, ref);
             return saved(new Capture(ref, userId, sessionId, taskId, source, "kept", key, fact,
                     now.content(), memoryId), row);
         });
@@ -252,8 +261,18 @@ public class CapturedFacts {
             if (c.memoryId() == null || id(now) != c.memoryId()) {
                 return new Done(false, "Not undone: it has changed since, and now reads: " + now.content());
             }
-            if (c.previous() == null) memory.deleteFact(userId, c.key());
-            else memory.storeFact(userId, c.key(), c.previous());
+            if (c.previous() == null) {
+                memory.deleteFact(userId, c.key());
+            } else {
+                memory.storeFact(userId, c.key(), c.previous());
+                // The fact it replaced is back, in a row of its own: the capture that kept it says
+                // where it came from again -- the owner, or an answer -- not memory_manage's nothing.
+                Long replaced = jdbc.queryForObject("SELECT replaces_id FROM fact_captures WHERE ref = ?", Long.class, ref);
+                if (replaced != null) {
+                    jdbc.update("UPDATE fact_captures SET memory_id = ? WHERE user_id = ? AND state = 'kept' AND memory_id = ?",
+                            rowOf(userId, c.key()), userId, replaced);
+                }
+            }
             jdbc.update("UPDATE fact_captures SET state = 'undone', decided_at = datetime('now') "
                     + "WHERE ref = ? AND user_id = ?", ref, userId);
             if (conversations != null) conversations.markFact(userId, ref, "undone");
@@ -275,10 +294,7 @@ public class CapturedFacts {
         return found.isEmpty() ? null : found.getFirst();
     }
 
-    /**
-     * The facts still on offer to {@code userId}, made before 2026-11-26 and not yet kept: one the
-     * owner can still keep is not kept a second time beside it.
-     */
+    /** The facts still on offer to {@code userId}, made before 2026-11-26 and not yet kept. */
     public List<String> offered(String userId) {
         return jdbc.queryForList("SELECT fact FROM fact_captures WHERE user_id = ? AND state = 'offered'",
                 String.class, userId);
