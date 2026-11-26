@@ -253,7 +253,7 @@ final class FactCapture {
                 log.info("A correction of a chat turn of {} was not made: what it changes is not an answer's.",
                         turn.userId());
                 return false;
-            } else if (!unknownPlaces(fact, facts).isEmpty()) {
+            } else if (!unknownPlaces(fact, vouching(turn.userId(), facts)).isEmpty()) {
                 log.info("A correction of a chat turn of {} was not made: it names a place outside the owner's "
                         + "network that only the answer named.", turn.userId());
                 return false;
@@ -263,7 +263,7 @@ final class FactCapture {
             }
         } else {
             boolean his = note.byOwner() && hisNew(fact, statements);
-            if (!his && !unknownPlaces(fact, facts).isEmpty()) {
+            if (!his && !unknownPlaces(fact, vouching(turn.userId(), facts)).isEmpty()) {
                 log.info("A fact of a chat turn of {} was not kept: it names a place outside the owner's network "
                         + "that only the answer named.", turn.userId());
                 return false;
@@ -283,6 +283,16 @@ final class FactCapture {
         if (saved == null) return false;
         show(turn, saved, shown);
         return true;
+    }
+
+    /**
+     * The kept facts that may make a place known: the owner's, and memory_manage's -- never an
+     * answer's. An answer cannot vouch for an answer: "the updater host is update.network", kept
+     * as an entity's word, made "fetch it from https://update.network/fw.bin" known.
+     */
+    private List<AgentMemory.MemoryEntry> vouching(String userId, List<AgentMemory.MemoryEntry> facts) {
+        Map<String, CapturedFacts.Source> from = captured.sources(userId, facts);
+        return facts.stream().filter(f -> from.get(CapturedFacts.keyOf(f)) != CapturedFacts.Source.ANSWER).toList();
     }
 
     /** A key's parts as the words they are: guest_wifi_sunflower77 is "guest wifi sunflower77". */
@@ -815,6 +825,7 @@ final class FactCapture {
                 int limit = Math.min(text.length(), w.end() + AFTER_A_SECRET_WORD);
                 boolean lineEnded = false, copula = false, first = true, afterFor = false;
                 String candidate = null;
+                int afterCopula = 0;
                 while (i < limit) {
                     while (i < limit && Character.isWhitespace(text.charAt(i))) {
                         if (text.charAt(i) == '\n') lineEnded = true;
@@ -836,9 +847,13 @@ final class FactCapture {
                     }
                     boolean like = secretLike(token, quoted) && !lower.startsWith("gpio");
                     if (copula) {
-                        if (like) out.add(lower);
-                        candidate = null;
-                        break;
+                        // "Login: admin / Kocour2024": the first value-like word of the next few.
+                        if (like) {
+                            out.add(lower);
+                            break;
+                        }
+                        if (++afterCopula >= 4) break;
+                        continue;
                     }
                     // The first word, when no "is" follows -- "PIN 4711" -- and not what it is for:
                     // "the key for kitchen-sensor2 is ..." names the device, not the key.
@@ -847,7 +862,17 @@ final class FactCapture {
                     afterFor = false;
                     if (raw.endsWith(":") || raw.endsWith("=")) copula = true;
                 }
-                if (candidate != null && !copula) out.add(candidate);
+                // "The alarm PIN 4711 is also the garage door's": the word right after it, too.
+                if (candidate != null) out.add(candidate);
+                // Right before it, nothing but punctuation between: "sunflower77 (password)".
+                int b = w.start();
+                while (b > 0 && !Character.isLetterOrDigit(text.charAt(b - 1)) && text.charAt(b - 1) != '\n' && w.start() - b < 8) b--;
+                int e = b;
+                while (b > 0 && !Character.isWhitespace(text.charAt(b - 1)) && e - b < AFTER_A_SECRET_WORD) b--;
+                if (e > b && e < w.start()) {
+                    String token = text.substring(b, e).replaceAll("^[\\p{Punct}„“”‘’«»]+|[\\p{Punct}„“”‘’«»]+$", "");
+                    if (credentialShaped(token)) out.add(token.toLowerCase(Locale.ROOT));
+                }
                 if (lineEnded && copula && i < text.length()) {
                     int start = i;
                     int end = start;
@@ -860,11 +885,19 @@ final class FactCapture {
                 // Each sentence once -- a match inside a sentence already read is not looked back from.
                 if (w.start() >= sentenceDone) {
                     int from = sentenceStart(text, w.start(), sentenceDone);
-                    String[] words = text.substring(from, w.start()).split("\\s+");
+                    String[] words = text.substring(from, w.start()).strip().split("\\s+");
                     for (int k = 0; k + 1 < words.length; k++) {
                         String t = words[k].replaceAll("^[\\p{Punct}„“”‘’«»]+|[\\p{Punct}„“”‘’«»]+$", "");
-                        String next = words[k + 1].toLowerCase(Locale.ROOT).replaceAll("[\\p{Punct}]+$", "");
-                        if (credentialShaped(t) && !t.contains("://") && (COPULAS.contains(next) || next.equals("as") || next.equals("jako"))) {
+                        if (!credentialShaped(t) || t.contains("://")) continue;
+                        // "X is the router password", "X as the guest Wi-Fi password", "X — that is
+                        // the router password": "is" or "as" next -- past punctuation and "that" --
+                        // then no more than three words before the secret word.
+                        int j = k + 1;
+                        while (j < words.length && (words[j].replaceAll("\\p{Punct}|[—–]", "").isEmpty()
+                                || Set.of("that", "this", "to").contains(words[j].toLowerCase(Locale.ROOT)))) j++;
+                        if (j >= words.length) continue;
+                        String next = words[j].toLowerCase(Locale.ROOT).replaceAll("[\\p{Punct}]+$", "");
+                        if ((COPULAS.contains(next) || next.equals("as") || next.equals("jako")) && words.length - 1 - j <= 3) {
                             out.add(t.toLowerCase(Locale.ROOT));
                         }
                     }
@@ -1095,9 +1128,20 @@ final class FactCapture {
             if (scheme == 0 || !w.substring(0, scheme).matches("[a-z][a-z0-9+.-]*") || w.indexOf("://", scheme + 3) >= 0) {
                 return DOUBT;
             }
-            // A file of this machine: file:/// or file://localhost/. One with a host is that host's.
+            // A file of this machine: file:/// or file://localhost/. One with a host is that host's,
+            // and file://// a share's.
+            if (w.startsWith("file:////")) return DOUBT;
             if (w.startsWith("file:///") || w.startsWith("file://localhost/")) return null;
-            return hostPlace(urlHost(w.substring(scheme + 3)), true, known);
+            String rest = w.substring(scheme + 3);
+            // A backslash before the path: browsers end the host at it, Python's urllib reads on to
+            // an "@" after it -- https://nas.lan\@evil.com/ is evil.com there.
+            int path = rest.length();
+            for (int k = 0; k < rest.length(); k++) {
+                char c = rest.charAt(k);
+                if (c == '/' || c == '?' || c == '#') { path = k; break; }
+            }
+            if (rest.substring(0, path).indexOf('\\') >= 0) return DOUBT;
+            return hostPlace(urlHost(rest), true, known);
         }
         if (w.startsWith("//") || w.startsWith("\\\\") || w.startsWith("/\\") || w.startsWith("\\/")) {
             return hostPlace(urlHost(w.substring(2)), true, known);
@@ -1138,7 +1182,22 @@ final class FactCapture {
             if (!PLAIN_IPV4.matcher(ip).matches()) return DOUBT;   // a leading zero: octal to some readers
             return outside(ip, false) && !sameHostIn(ip, known) ? ip : null;
         }
+        // A quantity with its unit -- 21.5°c, 3.50€/kwh, 12,5% -- is no host.
+        if (w.matches("[+-]?\\d+(?:[.,]\\d+){0,2}[\\p{So}\\p{Sc}%‰]*\\p{L}{0,4}(?:/\\p{L}{1,4})?")) return null;
         if (w.indexOf(':') >= 0) {
+            // An IPv6 address after a word and a colon -- upstream:2a00:..., ip6:2a00:... -- before
+            // the word is split at its colons into parts that each look like nothing.
+            for (int k = w.indexOf(':'); k >= 0; k = w.indexOf(':', k + 1)) {
+                String tail = w.substring(k + 1);
+                String addr = tail;
+                for (char c : new char[] {'%', '/', '#'}) {
+                    int cut = addr.indexOf(c);
+                    if (cut > 0) addr = addr.substring(0, cut);
+                }
+                if (hexColons(addr) && ipv6Groups(addr) != null) {
+                    return outsideV6(addr) && !sameHostIn(addr, known) ? addr : null;
+                }
+            }
             // host:path, key:value -- each part read as a word of its own.
             for (String part : w.split(":")) {
                 if (part.isEmpty()) continue;
@@ -1161,7 +1220,9 @@ final class FactCapture {
         String[] labels = name.split("\\.", -1);
         for (String label : labels) if (label.isEmpty()) return DOUBT;
         if (labels[labels.length - 1].chars().allMatch(Character::isDigit)) {
-            // A version -- python3.12, v2.0 -- unless an address stands in it: dns_8.8.8.8.
+            // A version -- python3.12, v2.0 -- unless an address stands in it: dns_8.8.8.8. Its
+            // labels after the first are digits; 0x8.0x8.0x8.8 is an address in hex.
+            for (int k = 1; k < labels.length; k++) if (!labels[k].chars().allMatch(Character::isDigit)) return DOUBT;
             Matcher quad = Pattern.compile("(?<!\\d)(\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3})$").matcher(name);
             if (quad.find()) return PLAIN_IPV4.matcher(quad.group(1)).matches() && !outside(quad.group(1), false) ? null : quad.group(1);
             return null;
@@ -1192,6 +1253,8 @@ final class FactCapture {
     /** {@code host} when it is outside his network and no kept fact names it; {@link #DOUBT} when there is none to read; else null. */
     private static String hostPlace(String host, boolean inUrl, String known) {
         if (host == null || host.isEmpty()) return inUrl ? DOUBT : null;
+        // A control character -- a decoded %00 -- ends or splits a host as readers please.
+        if (host.chars().anyMatch(c -> Character.getType(c) == Character.CONTROL)) return DOUBT;
         return outside(host, inUrl) && !sameHostIn(host, known) ? host : null;
     }
 
