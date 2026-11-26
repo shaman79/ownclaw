@@ -35,8 +35,9 @@ class HostPackagesTest {
         final List<Path> dirs = new CopyOnWriteArrayList<>();
         final List<List<Path>> reads = new CopyOnWriteArrayList<>();
         Set<String> installed = Set.of("libc6", "zlib1g");
-        String inst = "Inst libleptonica6 (1.82.0-3 Debian:12 [amd64])\nInst libtesseract5 (5.3.0-2 Debian:12 [amd64])\n"
-                + "Inst tesseract-ocr-eng (1:4.1.0-2 Debian:12 [all])\nInst tesseract-ocr (5.3.0-2 Debian:12 [amd64])\n";
+        Set<String> held = Set.of();
+        /** What the simulated install prints; null: what apt would for the names asked, tesseract's libraries before them. */
+        String inst;
         int simulateExit = 0, downloadExit = 0, updateExit = 0;
         boolean has = true;
         CountDownLatch holdDownload;
@@ -58,6 +59,7 @@ class HostPackagesTest {
                 var out = new StringBuilder();
                 for (String a : argv.subList(3, argv.size())) {
                     if (installed.contains(a)) out.append(a).append(" install ok installed\n");
+                    if (held.contains(a)) out.append(a).append(" hold ok installed\n");
                 }
                 return new HostPackages.Ran(out.length() == argv.size() - 3 ? 0 : 1, out.toString());
             }
@@ -73,9 +75,9 @@ class HostPackagesTest {
                     case "libtesseract5", "libleptonica6" ->
                             Files.writeString(Files.createDirectories(root.resolve("usr/lib/x86_64-linux-gnu"))
                                     .resolve(pkg + ".so"), "elf");
-                    case "tesseract-ocr-eng" ->
+                    case "tesseract-ocr-eng", "tesseract-ocr-ces", "tesseract-ocr-osd" ->
                             Files.writeString(Files.createDirectories(root.resolve("usr/share/tesseract-ocr/5/tessdata"))
-                                    .resolve("eng.traineddata"), "data");
+                                    .resolve(pkg.substring("tesseract-ocr-".length()) + ".traineddata"), "data");
                     default -> { }
                 }
                 return new HostPackages.Ran(0, "");
@@ -94,7 +96,17 @@ class HostPackagesTest {
                 case "install" -> {
                     assertTrue(argv.contains("-s"), "only simulated");
                     assertTrue(argv.contains("--no-install-recommends"));
-                    return new HostPackages.Ran(simulateExit, simulateExit == 0 ? inst : "E: Unable to locate package tesseract-ocr-xyz");
+                    String out = inst;
+                    if (out == null) {
+                        var sb = new StringBuilder();
+                        var asked = argv.subList(argv.indexOf("install") + 1, argv.size());
+                        if (asked.stream().anyMatch(a -> a.startsWith("tesseract"))) {
+                            sb.append("Inst libleptonica6 (1.82.0-3 Debian:12 [amd64])\nInst libtesseract5 (5.3.0-2 Debian:12 [amd64])\n");
+                        }
+                        for (String a : asked) sb.append("Inst ").append(a).append(" (1.0-1 Debian:12 [amd64])\n");
+                        out = sb.toString();
+                    }
+                    return new HostPackages.Ran(simulateExit, simulateExit == 0 ? out : "E: Unable to locate package tesseract-ocr-xyz");
                 }
                 default -> {
                     if (holdDownload != null) holdDownload.await();
@@ -136,10 +148,10 @@ class HostPackagesTest {
         assertEquals(0755, mode & 07777, "the setuid bit is off");
         assertEquals(1, said.size(), "the task is told, once: " + said);
         assertTrue(said.getFirst().contains("tesseract-ocr, tesseract-ocr-eng"), said.getFirst());
-        assertEquals("libleptonica6\nlibtesseract5\ntesseract-ocr-eng\ntesseract-ocr\n",
+        assertEquals("libleptonica6\nlibtesseract5\ntesseract-ocr\ntesseract-ocr-eng\n",
                 Files.readString(root.getParent().resolve("packages.txt")), "what apt said installing them needs");
         try (var left = Files.list(tmp.resolve("data/system-packages"))) {
-            assertEquals(Set.of("apt", root.getParent().getFileName().toString()),
+            assertEquals(Set.of("apt", "query", root.getParent().getFileName().toString()),
                     Set.copyOf(left.map(p -> p.getFileName().toString()).toList()), "nothing half-made is left");
         }
         assertFalse(Files.exists(root.getParent().resolve("dl")), "the downloads are not kept");
@@ -197,7 +209,8 @@ class HostPackagesTest {
         var b = new HostPackages(tmp.resolve("b"), offline).provide(TESSERACT, null, () -> false);
         assertTrue(b.failure().contains("404 Not Found"), b.failure());
         try (var left = Files.list(tmp.resolve("b"))) {
-            assertEquals(List.of("apt"), left.map(p -> p.getFileName().toString()).toList(), "no set, nor its partial");
+            assertEquals(Set.of("apt", "query"), Set.copyOf(left.map(p -> p.getFileName().toString()).toList()),
+                    "no set, nor its partial");
         }
         // Made again next time, not taken for done.
         offline.downloadExit = 0;
@@ -232,14 +245,14 @@ class HostPackagesTest {
     }
 
     @Test
-    @DisplayName("a set not used for 30 days is removed, and what an unpacking left; a set in use and the lists stay")
+    @DisplayName("a set not used for eight days is removed, and what an unpacking left; a set in use and the lists stay")
     void unusedSetsAreSwept(@TempDir Path tmp) throws Exception {
         var apt = new FakeApt();
         var packages = new HostPackages(tmp.resolve("sp"), apt);
         Path used = packages.provide(TESSERACT, null, () -> false).root().getParent();
         Path old = Files.createDirectories(tmp.resolve("sp/0123456789abcdef/root"));
         Files.writeString(old.getParent().resolve("ready"), "x");
-        Files.setLastModifiedTime(old.getParent().resolve("ready"), FileTime.from(Instant.now().minus(Duration.ofDays(31))));
+        Files.setLastModifiedTime(old.getParent().resolve("ready"), FileTime.from(Instant.now().minus(Duration.ofDays(9))));
         Path partial = Files.createDirectories(tmp.resolve("sp/fedcba9876543210.partial-1a2b"));
         Files.setLastModifiedTime(partial, FileTime.from(Instant.now().minus(Duration.ofHours(2))));
         Path fresh = Files.createDirectories(tmp.resolve("sp/fedcba9876543210.partial-3c4d"));
@@ -247,7 +260,7 @@ class HostPackagesTest {
 
         assertNull(packages.provide(List.of("poppler-utils"), null, () -> false).failure());   // a new set sweeps
 
-        assertFalse(Files.exists(old.getParent()), "unused for 31 days");
+        assertFalse(Files.exists(old.getParent()), "unused for nine days: last week's");
         assertFalse(Files.exists(partial), "an unpacking that ended two hours ago");
         assertTrue(Files.exists(fresh), "one that may still be under way");
         assertTrue(Files.exists(used), "used today");
@@ -289,6 +302,105 @@ class HostPackagesTest {
         provided.applyTo(bare);
         assertTrue(bare.get("PATH").endsWith(":/sp/usr/bin") || bare.get("PATH").equals("/sp/usr/bin"), bare.get("PATH"));
         // Mutation: put the packages first -> a package's python3 would come before the skill's own.
+    }
+
+    @Test
+    @DisplayName("an upgrade of a package the host has is never fetched: its own library stays the one loaded, with its updates")
+    void upgradesAreNotFetched(@TempDir Path tmp) {
+        var apt = new FakeApt();
+        apt.inst = "Inst libtiff6 [4.5.0-6] (4.5.0-6+deb12u1 Debian-Security:12 [amd64])\n"
+                + "Inst tesseract-ocr (5.3.0-2 Debian:12 [amd64])\nInst tesseract-ocr-eng (1:4.1.0-2 Debian:12 [all])\n";
+        assertNull(new HostPackages(tmp.resolve("sp"), apt).provide(TESSERACT, null, () -> false).failure());
+        var download = apt.calls.get(indexOf(apt, "download"));
+        assertFalse(download.contains("libtiff6"), String.valueOf(download));
+        assertTrue(download.contains("tesseract-ocr"));
+        // Mutation: take every Inst line -> libtiff6 is fetched and loaded before the host's.
+    }
+
+    @Test
+    @DisplayName("a declared name apt reads as a pattern, or one another package provides, is refused: only exactly that package")
+    void onlyExactNames(@TempDir Path tmp) {
+        var apt = new FakeApt();
+        apt.inst = "Inst texlive-lang-czechslovak (2022.20230122-3 Debian:12 [all])\nInst texlive-lang-german (2022 Debian:12 [all])\n";
+        var got = new HostPackages(tmp.resolve("sp"), apt).provide(List.of("texlive-lang-.+"), null, () -> false);
+        assertNotNull(got.failure());
+        assertTrue(got.failure().contains("no package named exactly \"texlive-lang-.+\""), got.failure());
+        assertEquals(0, apt.count("download"));
+    }
+
+    @Test
+    @DisplayName("a package the host holds counts as installed")
+    void heldIsInstalled(@TempDir Path tmp) {
+        var apt = new FakeApt();
+        apt.held = Set.of("tesseract-ocr", "tesseract-ocr-eng");
+        var got = new HostPackages(tmp.resolve("sp"), apt).provide(TESSERACT, null, () -> false);
+        assertNull(got.failure(), got.failure());
+        assertNull(got.root());
+    }
+
+    @Test
+    @DisplayName("a host that has tesseract and lacks a language: the set's tessdata holds the host's languages too")
+    void theHostsLanguagesStay(@TempDir Path tmp) throws Exception {
+        Path host = tmp.resolve("host/tesseract-ocr");
+        Files.createDirectories(host.resolve("5/tessdata"));
+        Files.writeString(host.resolve("5/tessdata/eng.traineddata"), "host eng");
+        Files.writeString(host.resolve("5/tessdata/osd.traineddata"), "host osd");
+        var apt = new FakeApt();
+        apt.installed = Set.of("tesseract-ocr", "tesseract-ocr-eng");
+        var got = new HostPackages(tmp.resolve("sp"), apt, host)
+                .provide(List.of("tesseract-ocr", "tesseract-ocr-ces", "tesseract-ocr-eng"), null, () -> false);
+        assertNull(got.failure(), got.failure());
+        Path data = Path.of(got.env().get("TESSDATA_PREFIX"));
+        try (var files = Files.list(data)) {
+            assertEquals(Set.of("ces.traineddata", "eng.traineddata", "osd.traineddata"),
+                    Set.copyOf(files.map(f -> f.getFileName().toString()).toList()));
+        }
+        assertTrue(Files.isSymbolicLink(data.resolve("eng.traineddata")));
+        assertEquals("host eng", Files.readString(data.resolve("eng.traineddata")));
+        assertFalse(Files.isSymbolicLink(data.resolve("ces.traineddata")), "the set's own is its own");
+        // Mutation: drop withHostLanguages -> TESSDATA_PREFIX holds ces alone, and -l ces+eng fails.
+    }
+
+    @Test
+    @DisplayName("a run stopped while another unpacks ends at once, its thread not interrupted")
+    void aStopWhileWaiting(@TempDir Path tmp) throws Exception {
+        var apt = new FakeApt();
+        apt.holdDownload = new CountDownLatch(1);
+        var packages = new HostPackages(tmp.resolve("sp"), apt);
+        Thread first = Thread.ofVirtual().start(() -> packages.provide(TESSERACT, null, () -> false));
+        long until = System.currentTimeMillis() + 10_000;
+        while (apt.count("download") < 1 && System.currentTimeMillis() < until) Thread.sleep(10);
+        var result = new HostPackages.Provided[1];
+        var interrupted = new boolean[1];
+        Thread second = Thread.ofVirtual().start(() -> {
+            result[0] = packages.provide(List.of("poppler-utils"), null, () -> true);
+            interrupted[0] = Thread.currentThread().isInterrupted();
+        });
+        second.join(5_000);
+        assertFalse(second.isAlive(), "it waits for the lock no longer than the stop");
+        assertTrue(result[0].failure().startsWith("stopped"), result[0].failure());
+        assertFalse(interrupted[0], "a stop is no interrupt: the run after it is not killed for one");
+        apt.holdDownload.countDown();
+        first.join(10_000);
+    }
+
+    @Test
+    @DisplayName("a set is fetched again each week; when the archives are out of reach, last week's is used while it is kept")
+    void weekly(@TempDir Path tmp) throws Exception {
+        var monday = java.time.LocalDate.of(2026, 11, 23);
+        assertEquals(HostPackages.key(TESSERACT, monday), HostPackages.key(TESSERACT, monday.plusDays(6)));
+        assertNotEquals(HostPackages.key(TESSERACT, monday), HostPackages.key(TESSERACT, monday.plusDays(7)));
+        assertEquals(HostPackages.key(TESSERACT, monday), HostPackages.key(List.of("tesseract-ocr-eng", "tesseract-ocr"), monday));
+
+        var apt = new FakeApt();
+        var today = java.time.LocalDate.now(java.time.ZoneOffset.UTC);
+        Path last = tmp.resolve("sp").resolve(HostPackages.key(TESSERACT, today.minusWeeks(1)));
+        Files.createDirectories(last.resolve("root/usr/bin"));
+        Files.writeString(last.resolve("ready"), "x");
+        apt.downloadExit = 100;
+        var got = new HostPackages(tmp.resolve("sp"), apt).provide(TESSERACT, null, () -> false);
+        assertNull(got.failure(), got.failure());
+        assertEquals(last.resolve("root"), got.root());
     }
 
     private static int indexOf(FakeApt apt, String verb) {
