@@ -666,13 +666,14 @@ public class AgentLoop {
                 Artifact a;
                 if (image != null) {
                     // What it is, the size it was pasted at and the size the cloud model is shown --
-                    // never the name, as for any file.
+                    // never the name, as for any file -- and what its file carries beside the
+                    // picture, which it is given too: he lets it see the image, and it sees it whole.
                     boolean scaled = image.width() != image.originalWidth() || image.height() != image.originalHeight();
+                    String fileData = fileStorage.imageFileData(id, image.metadata());
                     a = context.addPastedImage(image, List.of("pasted image", ct + ", " + size + " bytes, "
                             + image.originalWidth() + "x" + image.originalHeight() + " px; the cloud model is shown it"
                             + (scaled ? " at " + image.width() + "x" + image.height() + " px" : "")
-                            + (image.metadata() == null ? ""
-                                    : "; its file also carries " + image.metadata() + ", so what skills read from it is private")));
+                            + (fileData == null ? "" : ", and its file data: " + image.metadata())), fileData);
                 } else if (FileStorageService.cloudVisible(info)) {
                     // A file the owner lets the cloud model read (his choice, before he sent it): no
                     // private file -- its text, when it has one, and what skills read from it go to
@@ -4619,10 +4620,8 @@ public class AgentLoop {
             d.put("height", image.height());
             d.put("imageWidth", image.originalWidth());
             d.put("imageHeight", image.originalHeight());
-            if (image.metadata() != null) {
-                d.put("resultsPrivate", true);
-                d.put("metadata", image.metadata());
-            }
+            // What its file carries beside the picture, which the cloud model is given too.
+            if (image.metadata() != null) d.put("metadata", image.metadata());
         }
         if (!a.why().isEmpty()) d.put("why", a.why());
         return d;

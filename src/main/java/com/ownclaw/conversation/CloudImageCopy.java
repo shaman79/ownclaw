@@ -84,7 +84,7 @@ import java.util.concurrent.TimeoutException;
  * <p>
  * What the pasted file carries beside the picture -- EXIF (a camera's, a time, a place), XMP,
  * IPTC, a colour profile, text, a comment, a thumbnail, more frames, bytes after its end -- is said
- * ({@link Copy#metadata}): skills are handed that file, so whatever they read from it is private.
+ * ({@link Copy#metadata}), and given to the cloud model in full with the picture ({@link ImageFileData}).
  */
 public final class CloudImageCopy {
 

@@ -102,7 +102,9 @@ public class AgentContext {
 
     /**
      * A file sent with this message, as registered: its artifact, and -- for an image the owner
-     * pasted, shown to the cloud model -- the image; null for a private file.
+     * pasted, shown to the cloud model -- the image; null for a private file. Shared: a file the
+     * owner lets the cloud model read, or an image whose file data it is given -- the artifact's
+     * output is that text ({@link #addSharedFile}, {@link #addPastedImage}).
      */
     public record Attachment(Artifact artifact, com.ownclaw.conversation.FileStorageService.PastedImage image,
                              boolean shared, String name) {
@@ -876,32 +878,37 @@ public class AgentContext {
         return a;
     }
 
-    /**
-     * Register an image the owner pasted into the web chat box, which the cloud model is shown --
-     * its file marked so when it was uploaded (FileStorageService): a PUBLIC artifact, with no text.
-     * Every skill is handed it as it is handed a file ({@link #attachmentIds}). It makes no result
-     * private when its file holds the picture alone: the cloud model sees the picture itself, so
-     * what a skill reads from it is nothing the cloud has not been shown. One whose file carries
-     * more ({@link #files}), and a private file sent with it, make every result private
-     * ({@link #decide}).
-     */
+    /** {@link #addPastedImage(com.ownclaw.conversation.FileStorageService.PastedImage, List, String)}, of a file that holds the picture alone. */
     public synchronized Artifact addPastedImage(com.ownclaw.conversation.FileStorageService.PastedImage image,
                                                 List<String> why) {
+        return addPastedImage(image, why, null);
+    }
+
+    /**
+     * Register an image the owner pasted into the web chat box, which the cloud model is shown --
+     * its file marked so when it was uploaded (FileStorageService): a PUBLIC artifact. Every skill is
+     * handed it as it is handed a file ({@link #attachmentIds}), and it makes no result private: the
+     * owner lets the cloud model see it, and it sees it whole (his decision of 2026-11-26) -- the
+     * picture, and what its file carries beside it, {@code fileData} ({@code ImageFileData}): the
+     * artifact's text, given as a shared file's is ({@link #sharedFiles}), folded and read as one's.
+     * Null when the file holds the picture alone. A private file sent with it still makes every
+     * result private ({@link #decide}).
+     */
+    public synchronized Artifact addPastedImage(com.ownclaw.conversation.FileStorageService.PastedImage image,
+                                                List<String> why, String fileData) {
         Artifact a = addArtifact("attachment", Map.of("fileId", image.fileId()), Map.of("fileId", image.fileId()),
-                "", true, new Artifact.Decision(com.ownclaw.privacy.Label.PUBLIC, why));
-        attachments.add(new Attachment(a, image));
+                fileData == null ? "" : fileData, true, new Artifact.Decision(com.ownclaw.privacy.Label.PUBLIC, why));
+        attachments.add(new Attachment(a, image, fileData != null, null));
         return a;
     }
 
     /**
      * The files registered for this task that make every result of it PRIVATE, in order: each private
-     * file, and each pasted image whose file carries more than the picture -- EXIF data, text, a colour
-     * profile ({@code PastedImage#metadata}). Skills are handed that file whole, so what they read
-     * from it can be what the picture never showed; the picture itself is still shown to the cloud.
+     * file ({@link #privateFiles}). An image the owner lets the cloud model see makes none: it is
+     * given what its file carries beside the picture too.
      */
     public synchronized List<Artifact> files() {
-        return attachments.stream().filter(p -> !p.shared() && (p.image() == null || p.image().metadata() != null))
-                .map(Attachment::artifact).toList();
+        return privateFiles();
     }
 
     /** The private files registered for this task, in order: those the cloud is never shown. */
@@ -909,7 +916,10 @@ public class AgentContext {
         return attachments.stream().filter(p -> !p.shared() && p.image() == null).map(Attachment::artifact).toList();
     }
 
-    /** The files the owner lets the cloud model read, registered for this task, in order ({@link #addSharedFile}). */
+    /**
+     * The files the owner lets the cloud model read, registered for this task, in order
+     * ({@link #addSharedFile}) -- and the images whose file data it is given ({@link #addPastedImage}).
+     */
     public synchronized List<Artifact> sharedFiles() {
         return attachments.stream().filter(Attachment::shared).map(Attachment::artifact).toList();
     }

@@ -183,8 +183,7 @@ final class TaskEnding {
                             : "shown to the cloud model with " + with + (with == 1 ? " request" : " requests")
                                 + (failed == 0 ? "" : " (" + failed + " failed after the model had read "
                                     + (failed == 1 ? "it)" : "them)")))
-                    .append(image.metadata() == null ? "."
-                            : "; its file carries " + image.metadata() + ", so what skills read from it is private.");
+                    .append('.');
                 continue;
             }
             String name = "result " + a.n() + " (" + a.tool() + ")";

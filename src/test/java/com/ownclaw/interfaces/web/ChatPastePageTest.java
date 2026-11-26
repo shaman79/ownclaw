@@ -129,7 +129,7 @@ class ChatPastePageTest {
         String from = between("function seenFrom(chip, said) {", "function switchCloud(chip) {");
         assertTrue(from.contains("chip.dataset.shown = said.shown_to_cloud ? '1' : '';"), "the server's word: " + from);
         assertTrue(from.contains("chip.dataset.cloudVisible = said.cloud_visible ? '1' : '';"), from);
-        assertTrue(from.contains("chip.dataset.carries = said.results_private ? String(said.metadata || 'more than the picture') : '';"), from);
+        assertTrue(from.contains("chip.dataset.carries = said.metadata ? String(said.metadata) : '';"), from);
         String free = between("function chatRunsFree() {", "var cloudSeesImages");
         assertTrue(free.contains("return (costSel.value || defaultCostMode) === 'free';"), free);
         String line = between("function seenLine(chip) {", "function refreshSeen()");
@@ -137,15 +137,16 @@ class ChatPastePageTest {
         int kept = line.indexOf("} else if (chip.dataset.shown !== '1') { line = '🔒 private';");
         int onFree = line.indexOf("} else if (chatRunsFree()) { line = '🏠 Free: the local model can\\'t see it';");
         int notSent = line.indexOf("} else if (!cloudSeesImages) { line = '☁️ not seen: the cloud model is sent no images';");
-        int carries = line.indexOf("} else if (chip.dataset.carries) { line = '☁️ the cloud model will see it · skill results private';");
         int sees = line.indexOf("} else { line = '☁️ the cloud model will see it';");
-        assertTrue(readable >= 0 && kept > readable && onFree > kept && notSent > onFree && carries > notSent && sees > carries,
+        assertTrue(readable >= 0 && kept > readable && onFree > kept && notSent > onFree && sees > notSent,
                 "each case, in this order -- Free and a cloud sent none before any 'will see it': " + line);
         assertTrue(line.contains("+ (cloudSeesImages ? 'If the chat later runs on the cloud model, the image goes with "
                 + "the chat\\'s history, as its ' + 'text does. ' : 'Nor would the cloud model be, if the chat later ran on "
                 + "it: it is sent no images. ')"), "Free says what a later cloud turn does -- and with a cloud sent none, not that: " + line);
         assertFalse(line.contains("cloudProvider"), "the provider is the owner's setting, not every account's: " + line);
-        assertTrue(line.contains("so what skills ' + 'read from it stays private."), line);
+        assertTrue(line.contains("+ (chip.dataset.carries ? 'Its file data — ' + chip.dataset.carries + ': a time, a place, a camera, ' "
+                + "+ 'as the file holds them — is given to it too, as text, through the privacy filter. ' : '')"), line);
+        assertFalse(line.contains("skill results private"), "one line for every image the cloud model sees: " + line);
         assertTrue(line.contains("seen.textContent = line; seen.title = full; detail.textContent = full;"), line);
         assertFalse(line.contains("innerHTML") || mark.contains("innerHTML"), "text, never markup");
         assertTrue(page.contains("costSel.addEventListener('change', refreshSeen);"), "the chat's choice changes the line");

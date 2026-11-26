@@ -178,6 +178,127 @@ public final class TestImages {
                 more.getBytes(java.nio.charset.StandardCharsets.ISO_8859_1));
     }
 
+    // ── EXIF, written as a camera writes it ──
+
+    /** An entry of a TIFF directory: its tag, type, count and value bytes (little-endian), or a directory beneath. */
+    public record Entry(int tag, int type, long count, byte[] value, java.util.List<Entry> beneath) {
+        public static Entry ascii(int tag, String text) {
+            byte[] b = (text + "\0").getBytes(java.nio.charset.StandardCharsets.UTF_8);
+            return new Entry(tag, 2, b.length, b, null);
+        }
+
+        public static Entry shorts(int tag, int... values) {
+            var b = java.nio.ByteBuffer.allocate(2 * values.length).order(java.nio.ByteOrder.LITTLE_ENDIAN);
+            for (int v : values) b.putShort((short) v);
+            return new Entry(tag, 3, values.length, b.array(), null);
+        }
+
+        public static Entry longs(int tag, long... values) {
+            var b = java.nio.ByteBuffer.allocate(4 * values.length).order(java.nio.ByteOrder.LITTLE_ENDIAN);
+            for (long v : values) b.putInt((int) v);
+            return new Entry(tag, 4, values.length, b.array(), null);
+        }
+
+        /** Rationals, as numerator, denominator pairs. */
+        public static Entry rationals(int tag, long... pairs) {
+            var b = java.nio.ByteBuffer.allocate(4 * pairs.length).order(java.nio.ByteOrder.LITTLE_ENDIAN);
+            for (long v : pairs) b.putInt((int) v);
+            return new Entry(tag, 5, pairs.length / 2, b.array(), null);
+        }
+
+        public static Entry bytes(int tag, int type, byte[] value) {
+            return new Entry(tag, type, value.length, value, null);
+        }
+
+        public static Entry directory(int tag, Entry... entries) {
+            return new Entry(tag, 4, 1, null, java.util.List.of(entries));
+        }
+    }
+
+    /**
+     * A little-endian TIFF of the first directory {@code ifd0} -- its directories beneath it laid out
+     * after it, each value of more than four bytes after them all -- and, when given, a second, the
+     * thumbnail's {@code ifd1}.
+     */
+    public static byte[] tiff(java.util.List<Entry> ifd0, java.util.List<Entry> ifd1) {
+        var order = new java.util.ArrayList<java.util.List<Entry>>();
+        order.add(ifd0);
+        if (ifd1 != null) order.add(ifd1);
+        for (int i = 0; i < order.size(); i++) {
+            for (Entry e : order.get(i)) if (e.beneath() != null) order.add(e.beneath());
+        }
+        var at = new java.util.IdentityHashMap<java.util.List<Entry>, Integer>();
+        int offset = 8;
+        for (var d : order) {
+            at.put(d, offset);
+            offset += 2 + 12 * d.size() + 4;
+        }
+        var out = java.nio.ByteBuffer.allocate(1 << 20).order(java.nio.ByteOrder.LITTLE_ENDIAN);
+        out.put(new byte[]{'I', 'I', 42, 0}).putInt(8);
+        int data = offset;
+        var values = new ByteArrayOutputStream();
+        for (var d : order) {
+            out.position(at.get(d));
+            out.putShort((short) d.size());
+            for (Entry e : d) {
+                out.putShort((short) e.tag()).putShort((short) e.type()).putInt((int) e.count());
+                if (e.beneath() != null) {
+                    out.putInt(at.get(e.beneath()));
+                } else if (e.value().length <= 4) {
+                    out.put(java.util.Arrays.copyOf(e.value(), 4));
+                } else {
+                    out.putInt(data + values.size());
+                    values.writeBytes(e.value());
+                    if (values.size() % 2 == 1) values.write(0);
+                }
+            }
+            out.putInt(d == ifd0 && ifd1 != null ? at.get(ifd1) : 0);
+        }
+        out.position(data);
+        out.put(values.toByteArray());
+        return java.util.Arrays.copyOf(out.array(), out.position());
+    }
+
+    /**
+     * A phone photo's EXIF, as an APP1 segment's data: a camera, a time, a place -- the Greenwich
+     * observatory, no one's home -- a description, a comment, the maker's own notes, a thumbnail.
+     */
+    public static byte[] phoneExif() {
+        byte[] maker = new byte[200];
+        for (int i = 0; i < maker.length; i++) maker[i] = (byte) (i * 7 + 1);
+        byte[] comment = concat("ASCII\0\0\0".getBytes(java.nio.charset.StandardCharsets.ISO_8859_1),
+                "the rack in the hall".getBytes(java.nio.charset.StandardCharsets.ISO_8859_1));
+        var exif = java.util.List.of(
+                Entry.ascii(0x9003, "2026:05:01 10:20:30"),
+                Entry.ascii(0x9011, "+01:00"),
+                Entry.rationals(0x829D, 18, 10),
+                Entry.rationals(0x829A, 1, 120),
+                Entry.shorts(0x8827, 100),
+                Entry.bytes(0x927C, 7, maker),
+                Entry.bytes(0x9286, 7, comment));
+        var gps = java.util.List.of(
+                Entry.ascii(1, "N"),
+                Entry.rationals(2, 51, 1, 28, 1, 3860, 100),
+                Entry.ascii(3, "W"),
+                Entry.rationals(4, 0, 1, 0, 1, 140, 100),
+                Entry.bytes(5, 1, new byte[]{0}),
+                Entry.rationals(6, 4750, 100),
+                Entry.bytes(0, 1, new byte[]{2, 2, 0, 0}));
+        var ifd0 = java.util.List.of(
+                Entry.ascii(0x010E, "Cabinet door, left side"),
+                Entry.ascii(0x010F, "ExampleCam"),
+                Entry.ascii(0x0110, "X1 Pro"),
+                Entry.shorts(0x0112, 6),
+                Entry.ascii(0x0132, "2026:05:01 10:20:30"),
+                new Entry(0x8769, 4, 1, null, exif),
+                new Entry(0x8825, 4, 1, null, gps));
+        var ifd1 = java.util.List.of(
+                Entry.shorts(0x0103, 6),
+                Entry.longs(0x0201, 0),
+                Entry.longs(0x0202, 1234));
+        return concat("Exif\0\0".getBytes(java.nio.charset.StandardCharsets.ISO_8859_1), tiff(ifd0, ifd1));
+    }
+
     /** {@code png} with a chunk of {@code type} after its header chunk. */
     public static byte[] withChunk(byte[] png, String type, byte[] data) {
         var out = new ByteArrayOutputStream();
@@ -216,7 +337,7 @@ public final class TestImages {
         return b;
     }
 
-    static byte[] concat(byte[]... parts) {
+    public static byte[] concat(byte[]... parts) {
         var out = new ByteArrayOutputStream();
         for (byte[] p : parts) out.writeBytes(p);
         return out.toByteArray();

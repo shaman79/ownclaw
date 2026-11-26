@@ -182,6 +182,7 @@ class CloudSwitchTest {
         var again = rig.cloud("u1", id, true);
         assertEquals(true, again.get("shown_to_cloud"));
         assertEquals(first.get("cloud_width"), again.get("cloud_width"));
-        assertEquals(first.get("results_private"), again.get("results_private"), first + " / " + again);
+        assertEquals(first.get("metadata"), again.get("metadata"), first + " / " + again);
+        assertNull(again.get("results_private"), "no result of an image the cloud model sees is private: " + again);
     }
 }

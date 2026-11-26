@@ -510,33 +510,38 @@ class PastedImageTaskTest {
     }
 
     @Test
-    @DisplayName("a photo whose file carries EXIF with a place and an address: shown to the cloud, and what skills read from it private")
-    void metadataMakesResultsPrivate(@TempDir Path tmp) throws Exception {
+    @DisplayName("a photo whose file carries EXIF -- a camera, a time, a place: the cloud model is shown it with its file data, and what skills read from it is not private (the owner, 2026-11-26)")
+    void fileDataGoesWithIt(@TempDir Path tmp) throws Exception {
         var rig = new LoopRig(tmp, List.of(LocalModeTest.NOOP));
         byte[] jpeg = TestImages.withSegment(TestImages.encoded(TestImages.screenshot(800, 600), "jpeg"), 0xE1,
-                TestImages.exif(1, "GPS 49.19N 16.61E owner@example.com"));
+                TestImages.phoneExif());
         var photo = rig.files.store("u1", "image.jpg", "image/jpeg", new ByteArrayInputStream(jpeg), true);
         assertTrue(photo.shownToCloud());
-        var ctx = new AgentContext("u1", "c3d4e5f6", "what does it show?");
+        var ctx = new AgentContext("u1", "c3d4e5f6", "where was it taken?");
         AgentLoop.registerAttachments(ctx, List.of(photo.id()), rig.files, rig.events);
         assertEquals(1, ctx.pasted().size(), "its picture is shown");
-        assertEquals(1, ctx.files().size(), "and it counts among the files that make results private");
-        assertTrue(ctx.privateFiles().isEmpty(), "it is no private file: the cloud sees the picture");
-        var decision = ctx.decide(List.of(), List.of(), false, "{\"GPS\": \"49.19N 16.61E\", \"owner\": \"owner@example.com\"}");
-        assertEquals(Label.PRIVATE, decision.label(), "a skill's report of its EXIF stays on this machine");
+        assertTrue(ctx.files().isEmpty(), "it makes no result private");
+        assertEquals(1, ctx.sharedFiles().size(), "its file data is given as a shared file's text is");
+        var decision = ctx.decide(List.of(), List.of(), false, "{\"GPS\": \"51.4774 N, 0.0004 W\"}");
+        assertEquals(Label.PUBLIC, decision.label(), "a skill's report of its EXIF goes to the cloud model too");
         String task = ChatCacheTest.engine().anthropicTask(ctx).text();
-        assertTrue(task.contains("The file of {{1}} carries EXIF data beside the picture"), task);
-        assertTrue(task.contains("every result of this task is private"), task);
-        assertEquals("", ThinkingEngine.filesSection(ctx), "not listed as a private file: it is shown");
+        String data = ctx.sharedFiles().getFirst().output();
+        assertTrue(data.contains("Place where it was taken (GPS): 51.477389 N, 0.000389 W"), data);
+        assertTrue(task.contains("[file {{1}} " + ThinkingEngine.markOf(data) + " begins]\n" + data + "\n[file {{1}} "
+                + ThinkingEngine.markOf(data) + " ends]"), "between its marks, as data: " + task);
+        assertTrue(task.contains("What the file of {{1}} holds beside the picture -- its file data -- is under "
+                + "\"Files the user lets you read\" above."), task);
+        assertFalse(task.contains("private"), "nothing of the task is private: " + task);
 
-        // And through the loop: the picture goes, the address does not.
-        rig.cloud.think.add(respond("A router's page."));
-        rig.turn(LocalModeTest.session(rig), "what does it show?", List.of(photo.id()));
+        // And through the loop: the picture goes, as a copy of its pixels, and its place with it.
+        rig.cloud.think.add(respond("At the observatory."));
+        rig.turn(LocalModeTest.session(rig), "where was it taken?", List.of(photo.id()));
         LlmMessage sent = first(rig.cloud.calls("think").get(0));
         assertNotNull(sent.images().getFirst().sent(), "the picture is sent");
-        String bytes = new String(Base64.getDecoder().decode(sent.images().getFirst().sent().base64()), StandardCharsets.ISO_8859_1);
-        assertFalse(bytes.contains("owner@example.com"), "its copy holds the picture alone");
-        // Mutation: count only private files in files() -> the EXIF a skill reads goes to the cloud as public.
+        assertTrue(LocalModeTest.all(rig.cloud.calls("think").getFirst()).contains("51.477389 N, 0.000389 W"),
+                "and the place it was taken");
+        // Mutation: count shown images with metadata in files() again -> the place stays private and the model
+        // is told every result is.
     }
 
     @Test

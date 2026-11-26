@@ -244,7 +244,8 @@ public class FileStorageService implements CloudImages {
     /**
      * The pasted image stored as {@code id} at {@code file}, shown to the cloud model if it is one: its
      * copy written beside it, always -- never the pasted bytes themselves -- and recorded with what the
-     * pasted file carries beside the picture, which makes what skills read from it private.
+     * pasted file carries beside the picture, in words, which its file data then says in full
+     * ({@link #imageFileData}).
      */
     private Stored shown(String userId, String id, Path file, long checkedBy) throws IOException {
         CloudImageCopy.Made made = CloudImageCopy.of(file, userId, checkedBy);
@@ -282,8 +283,8 @@ public class FileStorageService implements CloudImages {
      * @param width       the copy's width, which the model reads
      * @param bytes       the copy's size
      * @param metadata    what the pasted file carries beside the picture -- EXIF data, text, a colour
-     *                    profile -- in words, or null when it holds the picture alone. Skills are
-     *                    handed that file, so what they read from it is private.
+     *                    profile -- in words, or null when it holds the picture alone. The cloud model
+     *                    is given it in full, as the image's file data ({@link #imageFileData}).
      */
     public record PastedImage(String fileId, String contentType, String mediaType, int width, int height, long bytes,
                               int originalWidth, int originalHeight, String metadata) {
@@ -515,6 +516,24 @@ public class FileStorageService implements CloudImages {
      * canary and nothing of it could be recognised on its way out. The upload limit is the only
      * bound on its size.
      */
+    /**
+     * The file data of the image stored as {@code fileId}, whose file carries {@code beside} beside
+     * its picture ({@link PastedImage#metadata}): its EXIF, XMP, text, comments, in words
+     * ({@link ImageFileData}). The owner's decision of 2026-11-26: an image he lets the cloud model
+     * see, it sees whole. Null when it holds the picture alone, or its file cannot be read now.
+     */
+    public String imageFileData(String fileId, String beside) {
+        if (beside == null) return null;
+        Path path = getFilePath(fileId);
+        if (path == null) return null;
+        try {
+            return ImageFileData.of(Files.readAllBytes(path), beside);
+        } catch (IOException e) {
+            log.warn("Could not read image {} for its file data ({})", fileId, e.getClass().getSimpleName());
+            return null;
+        }
+    }
+
     public String readAsText(String fileId) {
         Path path = getFilePath(fileId);
         if (path == null || !Files.exists(path)) return null;

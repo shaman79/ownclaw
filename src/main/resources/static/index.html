@@ -3846,9 +3846,14 @@
                             + 'Skills were given the file as you pasted it.'
                         : 'Not shown to the cloud model in this task: no request that went carried it. '
                             + 'Skills were given the file as you pasted it.'));
+                // Before 2026-11-26 such a file's skill results were kept private; since, the cloud
+                // model is given what it carries too.
                 if (a.resultsPrivate) {
                     item.appendChild(node('div', 'task-trace-line muted', 'Its file carries ' + (a.metadata || 'more than the picture')
                             + ', so what skills read from it was kept private.'));
+                } else if (a.metadata && a.shownWith) {
+                    item.appendChild(node('div', 'task-trace-line muted', 'Its file data — ' + a.metadata
+                            + ' — was given to the cloud model too, as text, through the privacy filter.'));
                 }
                 panel.appendChild(item);
                 return;
@@ -7581,7 +7586,7 @@
         chip.dataset.shown = said.shown_to_cloud ? '1' : '';
         chip.dataset.cloudVisible = said.cloud_visible ? '1' : '';
         chip.dataset.privateBecause = !said.shown_to_cloud && !said.cloud_visible ? String(said.private_because || '') : '';
-        chip.dataset.carries = said.results_private ? String(said.metadata || 'more than the picture') : '';
+        chip.dataset.carries = said.metadata ? String(said.metadata) : '';
     }
 
     /**
@@ -7650,7 +7655,7 @@
     /**
      * What a chip says of who sees its file, as text, never markup, and what that means in full: a
      * file, private; a pasted image the cloud model is shown as it is -- the filter reads text -- with
-     * what skills read from it private when its file carries more than the picture; on Free nobody,
+     * what its file carries beside the picture, its file data, as text; on Free nobody,
      * for the local model cannot see images, until the chat runs on the cloud, when the image goes
      * with the chat's history; a cloud model that is sent no image, nobody; or kept private, and why.
      */
@@ -7692,14 +7697,11 @@
             line = '☁️ not seen: the cloud model is sent no images';
             full = 'OwnClaw sends images to Anthropic\'s models only, and this chat\'s cloud model is sent none; the '
                     + 'local model cannot see images either. Skills are given it as a file.';
-        } else if (chip.dataset.carries) {
-            line = '☁️ the cloud model will see it · skill results private';
-            full = 'The cloud model is shown this picture as it is: the privacy filter reads text, not pictures. Its '
-                    + 'file also carries ' + chip.dataset.carries + ', and skills are given the file, so what skills '
-                    + 'read from it stays private.';
         } else {
             line = '☁️ the cloud model will see it';
             full = 'The cloud model is shown this picture as it is: the privacy filter reads text, not pictures. '
+                    + (chip.dataset.carries ? 'Its file data — ' + chip.dataset.carries + ': a time, a place, a camera, '
+                        + 'as the file holds them — is given to it too, as text, through the privacy filter. ' : '')
                     + 'Skills are given it as a file too.';
         }
         seen.textContent = line;
