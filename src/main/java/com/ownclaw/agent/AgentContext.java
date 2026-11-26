@@ -104,7 +104,11 @@ public class AgentContext {
      * A file sent with this message, as registered: its artifact, and -- for an image the owner
      * pasted, shown to the cloud model -- the image; null for a private file.
      */
-    public record Attachment(Artifact artifact, com.ownclaw.conversation.FileStorageService.PastedImage image) {}
+    public record Attachment(Artifact artifact, com.ownclaw.conversation.FileStorageService.PastedImage image, boolean shared) {
+        public Attachment(Artifact artifact, com.ownclaw.conversation.FileStorageService.PastedImage image) {
+            this(artifact, image, false);
+        }
+    }
 
     // ── the task's results, and what may be said about them ──
 
@@ -890,13 +894,30 @@ public class AgentContext {
      * from it can be what the picture never showed; the picture itself is still shown to the cloud.
      */
     public synchronized List<Artifact> files() {
-        return attachments.stream().filter(p -> p.image() == null || p.image().metadata() != null)
+        return attachments.stream().filter(p -> !p.shared() && (p.image() == null || p.image().metadata() != null))
                 .map(Attachment::artifact).toList();
     }
 
     /** The private files registered for this task, in order: those the cloud is never shown. */
     public synchronized List<Artifact> privateFiles() {
-        return attachments.stream().filter(p -> p.image() == null).map(Attachment::artifact).toList();
+        return attachments.stream().filter(p -> !p.shared() && p.image() == null).map(Attachment::artifact).toList();
+    }
+
+    /** The files the owner lets the cloud model read, registered for this task, in order ({@link #addSharedFile}). */
+    public synchronized List<Artifact> sharedFiles() {
+        return attachments.stream().filter(Attachment::shared).map(Attachment::artifact).toList();
+    }
+
+    /**
+     * Register a file the owner lets the cloud model read (his choice of 2026-11-26, file by file):
+     * a PUBLIC artifact, its text whole when it is text, which no result of the task is made private
+     * by. Every skill is handed it, as any file.
+     */
+    public synchronized Artifact addSharedFile(String fileId, String text, List<String> why) {
+        Artifact a = addArtifact("attachment", Map.of("fileId", fileId), Map.of("fileId", fileId),
+                text == null ? "" : text, true, new Artifact.Decision(com.ownclaw.privacy.Label.PUBLIC, why));
+        attachments.add(new Attachment(a, null, true));
+        return a;
     }
 
     /** The images pasted with this message, shown to the cloud model, in order. */

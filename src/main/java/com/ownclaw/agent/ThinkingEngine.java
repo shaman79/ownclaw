@@ -1317,6 +1317,37 @@ public class ThinkingEngine {
      * the file holds. In the user message, so the cached system prompt and tools stay the same.
      */
     static String filesSection(AgentContext context) {
+        return privateFilesSection(context) + sharedFilesSection(context);
+    }
+
+    /**
+     * The files the owner lets the cloud model read, sent with this message ({@code
+     * AgentContext#addSharedFile}): each by its handle, type, size and name, and a text file's text
+     * whole -- he chose to share it, and the gateway's filter reads it as it reads every part. Every
+     * skill is given them, and what it reads from them is not private.
+     */
+    static String sharedFilesSection(AgentContext context) {
+        List<Artifact> files = context.sharedFiles();
+        if (files.isEmpty()) return "";
+        var sb = new StringBuilder("## Files the user lets you read, sent with this message\n");
+        for (Artifact f : files) {
+            sb.append("- ").append(f.handle());
+            if (f.why().size() > 1) sb.append(": ").append(f.why().get(1));
+            if (f.why().size() > 2) sb.append(", named \"").append(f.why().get(2)).append('"');
+            sb.append('\n');
+        }
+        sb.append("Every skill run in this task is given them as params._attached_files, a list of ")
+          .append("{id, name, content_type, path, container_path}; what a skill reads from them is shown ")
+          .append("to you. A text file's text follows; pass its handle in a tool argument to hand it on.\n");
+        for (Artifact f : files) {
+            if (f.output().isEmpty()) continue;
+            sb.append("\n### ").append(f.handle()).append('\n').append(f.output()).append('\n');
+        }
+        return sb.toString();
+    }
+
+    /** The private files sent with this message, as the cloud may know them (filesSection). */
+    static String privateFilesSection(AgentContext context) {
         List<Artifact> files = context.privateFiles();
         if (files.isEmpty()) return "";
         var sb = new StringBuilder("## Files sent with this message\n");

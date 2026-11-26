@@ -119,24 +119,27 @@ class ChatPastePageTest {
     }
 
     @Test
-    @DisplayName("every chip says who sees its file, as text, with what that means a tap away: private, the cloud model, nobody on Free, nobody with a cloud sent no images")
+    @DisplayName("every chip says who sees its file, as text, with what that means a tap away: private, readable, the cloud model, nobody on Free, nobody with a cloud sent no images")
     void theChipSaysWhoSeesIt() {
-        String mark = between("function markSeen(chip, uploaded, pasted) {", "function chatRunsFree()");
+        String mark = between("function markSeen(chip, uploaded, pasted) {", "function seenFrom(chip, said) {");
         assertTrue(mark.contains("chip.classList.add(pasted ? 'pasted' : 'attached');"), "every chip, a file's too: " + mark);
-        assertTrue(mark.contains("chip.dataset.shown = pasted && uploaded.shown_to_cloud ? '1' : '';"), "the server's word: " + mark);
-        assertTrue(mark.contains("chip.dataset.carries = pasted && uploaded.results_private ? String(uploaded.metadata || 'more than the picture') : '';"), mark);
+        assertTrue(mark.contains("seenFrom(chip, pasted ? uploaded : {});"), "a 📎 file is private whatever the answer says: " + mark);
         assertTrue(mark.contains("var seen = node('button', 'file-chip-seen');"), "a button, which a touch screen can tap: " + mark);
         assertTrue(mark.contains("var open = chip.classList.toggle('open'); seen.setAttribute('aria-expanded', open ? 'true' : 'false');"), mark);
+        String from = between("function seenFrom(chip, said) {", "function switchCloud(chip) {");
+        assertTrue(from.contains("chip.dataset.shown = said.shown_to_cloud ? '1' : '';"), "the server's word: " + from);
+        assertTrue(from.contains("chip.dataset.cloudVisible = said.cloud_visible ? '1' : '';"), from);
+        assertTrue(from.contains("chip.dataset.carries = said.results_private ? String(said.metadata || 'more than the picture') : '';"), from);
         String free = between("function chatRunsFree() {", "var cloudSeesImages");
         assertTrue(free.contains("return (costSel.value || defaultCostMode) === 'free';"), free);
         String line = between("function seenLine(chip) {", "function refreshSeen()");
-        int attached = line.indexOf("if (chip.classList.contains('attached')) { line = '🔒 private';");
+        int readable = line.indexOf("if (chip.dataset.cloudVisible === '1') { line = chatRunsFree() ? '🏠 Free: no cloud model reads it' : '☁️ the cloud model can read it';");
         int kept = line.indexOf("} else if (chip.dataset.shown !== '1') { line = '🔒 private';");
         int onFree = line.indexOf("} else if (chatRunsFree()) { line = '🏠 Free: the local model can\\'t see it';");
         int notSent = line.indexOf("} else if (!cloudSeesImages) { line = '☁️ not seen: the cloud model is sent no images';");
         int carries = line.indexOf("} else if (chip.dataset.carries) { line = '☁️ the cloud model will see it · skill results private';");
         int sees = line.indexOf("} else { line = '☁️ the cloud model will see it';");
-        assertTrue(attached >= 0 && kept > attached && onFree > kept && notSent > onFree && carries > notSent && sees > carries,
+        assertTrue(readable >= 0 && kept > readable && onFree > kept && notSent > onFree && carries > notSent && sees > carries,
                 "each case, in this order -- Free and a cloud sent none before any 'will see it': " + line);
         assertTrue(line.contains("+ (cloudSeesImages ? 'If the chat later runs on the cloud model, the image goes with "
                 + "the chat\\'s history, as its ' + 'text does. ' : 'Nor would the cloud model be, if the chat later ran on "
@@ -148,6 +151,26 @@ class ChatPastePageTest {
         assertTrue(page.contains("costSel.addEventListener('change', refreshSeen);"), "the chat's choice changes the line");
         assertTrue(page.contains("var chips = fileChips.querySelectorAll('.file-chip.pasted, .file-chip.attached');"));
         // Mutation: say "will see it" before checking Free or the cloud -> a chip claims what does not happen.
+    }
+
+    @Test
+    @DisplayName("every chip has a switch: the owner lets the cloud see the file, or keeps it private, before he sends it; the server makes it")
+    void theSwitch() {
+        String mark = between("function markSeen(chip, uploaded, pasted) {", "function seenFrom(chip, said) {");
+        assertTrue(mark.contains("var sw = node('button', 'file-chip-switch'); sw.type = 'button'; "
+                + "sw.addEventListener('click', function() { switchCloud(chip); });"), mark);
+        String sw = between("function switchCloud(chip) {", "function chatRunsFree() {");
+        assertTrue(sw.contains("if (!chip.dataset.fileId || chip.classList.contains('uploading')) return;"), "one choice at a time, once uploaded: " + sw);
+        assertTrue(sw.contains("var visible = !(chip.dataset.shown === '1' || chip.dataset.cloudVisible === '1');"), sw);
+        assertTrue(sw.contains("chip.classList.add('uploading');"), "a message waits for the choice (send): " + sw);
+        assertTrue(sw.contains("fetch('/api/files/' + encodeURIComponent(chip.dataset.fileId) + '/cloud', { method: 'POST', "
+                + "headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' }, body: JSON.stringify({ visible: visible }) })"), sw);
+        assertTrue(sw.contains("if (!chip.isConnected || authToken !== token) return; seenFrom(chip, said); chip.dataset.chosen = '1'; seenLine(chip);"),
+                "the server's word, not the click's: " + sw);
+        String line = between("function seenLine(chip) {", "function refreshSeen()");
+        assertTrue(line.contains("sw.textContent = open ? '🔒 keep private' : '☁️ let the cloud see it';"), line);
+        assertTrue(page.contains("if (!picked && fileChips.querySelector('.file-chip.uploading')) {"), "Send waits for a switch under way");
+        // Mutation: set the line from the click instead of the answer -> a refused switch says the file is shown.
     }
 
     @Test
@@ -271,7 +294,8 @@ class ChatPastePageTest {
     @DisplayName("the hint under the box says it plainly: images pasted or dropped are shown to the cloud model, unfiltered; other files and 📎 stay private")
     void theHintSaysSo() {
         assertTrue(page.contains("Images you paste or drop here — screenshots, photos (PNG, JPEG, GIF) — are shown to the cloud model as pictures "
-                + "(the privacy filter reads text, not pictures); other files, and anything you attach with 📎, stay private"),
+                + "(the privacy filter reads text, not pictures); other files, and anything you attach with 📎, stay private "
+                + "— switch any file on its chip before you send"),
                 page.substring(page.indexOf("<div class=\"input-hint\">"), page.indexOf("<div class=\"input-hint\">") + 500));
         assertFalse(page.contains("paste or 📎 to attach files — they stay private"), "pasted images are not private");
     }

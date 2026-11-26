@@ -1137,6 +1137,20 @@
             text-align: left;
         }
         .file-chip-remove { flex-shrink: 0 }
+        /* Who may see it, the owner's to choose before he sends it: one tap switches. */
+        .file-chip-switch {
+            flex-shrink: 0;
+            font: inherit;
+            font-size: 11px;
+            color: var(--accent-hi);
+            background: none;
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            padding: 0 6px;
+            cursor: pointer;
+            white-space: nowrap;
+        }
+        .file-chip.uploading .file-chip-switch { cursor: wait; opacity: .6 }
         .file-chip-detail { display: none; flex-basis: 100%; font-size: 11px; color: var(--text-3); white-space: normal; line-height: 1.35 }
         .file-chip.open { flex-wrap: wrap; border-radius: 12px }
         .file-chip.open .file-chip-detail { display: block }
@@ -2850,7 +2864,7 @@
             </select>
         </label>
     </div>
-    <div class="input-hint"><span id="hint-keys">Enter to send &nbsp;&middot;&nbsp; Shift+Enter for new line</span> &nbsp;&middot;&nbsp; <span id="hint-images">Images you paste or drop here — screenshots, photos (PNG, JPEG, GIF) — are shown to the cloud model as pictures (the privacy filter reads text, not pictures); other files, and anything you attach with 📎, stay private</span> &nbsp;&middot;&nbsp; <strong>/help</strong> for commands</div>
+    <div class="input-hint"><span id="hint-keys">Enter to send &nbsp;&middot;&nbsp; Shift+Enter for new line</span> &nbsp;&middot;&nbsp; <span id="hint-images">Images you paste or drop here — screenshots, photos (PNG, JPEG, GIF) — are shown to the cloud model as pictures (the privacy filter reads text, not pictures); other files, and anything you attach with 📎, stay private — switch any file on its chip before you send</span> &nbsp;&middot;&nbsp; <strong>/help</strong> for commands</div>
 </div>
 
     </div><!-- end #chat-main -->
@@ -7534,9 +7548,11 @@
      */
     function markSeen(chip, uploaded, pasted) {
         chip.classList.add(pasted ? 'pasted' : 'attached');
-        chip.dataset.shown = pasted && uploaded.shown_to_cloud ? '1' : '';
-        chip.dataset.privateBecause = pasted && !uploaded.shown_to_cloud ? String(uploaded.private_because || '') : '';
-        chip.dataset.carries = pasted && uploaded.results_private ? String(uploaded.metadata || 'more than the picture') : '';
+        seenFrom(chip, pasted ? uploaded : {});
+        var sw = node('button', 'file-chip-switch');
+        sw.type = 'button';
+        sw.addEventListener('click', function() { switchCloud(chip); });
+        chip.insertBefore(sw, chip.querySelector('.file-chip-remove'));
         var seen = node('button', 'file-chip-seen');
         seen.type = 'button';
         seen.setAttribute('aria-expanded', 'false');
@@ -7548,6 +7564,48 @@
         chip.insertBefore(seen, chip.querySelector('.file-chip-remove'));
         chip.appendChild(detail);
         seenLine(chip);
+    }
+
+    /** Who sees a chip's file, as the server said it: shown as a picture, readable, or private and why. */
+    function seenFrom(chip, said) {
+        chip.dataset.shown = said.shown_to_cloud ? '1' : '';
+        chip.dataset.cloudVisible = said.cloud_visible ? '1' : '';
+        chip.dataset.privateBecause = !said.shown_to_cloud && !said.cloud_visible ? String(said.private_because || '') : '';
+        chip.dataset.carries = said.results_private ? String(said.metadata || 'more than the picture') : '';
+    }
+
+    /**
+     * The owner's choice for a chip's file, before he sends it: the cloud model may see it, or not
+     * (his decision of 2026-11-26). The server makes it -- an image shown as a picture, any other
+     * file readable, or private -- and says who sees it now, which the chip then says. Uploading
+     * meanwhile, so a message is not sent before the choice is made (send), and as whoever made the
+     * chip's upload: signed out meanwhile, the answer is not drawn.
+     */
+    function switchCloud(chip) {
+        if (!chip.dataset.fileId || chip.classList.contains('uploading')) return;
+        var visible = !(chip.dataset.shown === '1' || chip.dataset.cloudVisible === '1');
+        var token = authToken;
+        chip.classList.add('uploading');
+        fetch('/api/files/' + encodeURIComponent(chip.dataset.fileId) + '/cloud', {
+            method: 'POST',
+            headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ visible: visible })
+        })
+        .then(okJson)
+        .then(function(said) {
+            chip.classList.remove('uploading');
+            if (!chip.isConnected || authToken !== token) return;
+            seenFrom(chip, said);
+            chip.dataset.chosen = '1';
+            seenLine(chip);
+        })
+        .catch(function(err) {
+            chip.classList.remove('uploading');
+            if (chip.isConnected && authToken === token) {
+                addMsg('system', 'Could not change who sees ' + mdLiteral(chip.querySelector('.file-chip-name').textContent)
+                        + ': ' + mdLiteral(err.message));
+            }
+        });
     }
 
     /** Whether a message sent now runs on the local model only: Free, chosen next to Send or the default. */
@@ -7569,9 +7627,10 @@
         if (hint) hint.textContent = cloudSeesImages
                 ? 'Images you paste or drop here — screenshots, photos (PNG, JPEG, GIF) — are shown to the cloud model as '
                     + 'pictures (the privacy filter reads text, not pictures); other files, and anything you attach with 📎, '
-                    + 'stay private'
+                    + 'stay private — switch any file on its chip before you send'
                 : 'This chat\'s cloud model is sent no images: images you paste or drop are not shown to it, and skills '
-                    + 'are given them as files; other files, and anything you attach with 📎, stay private';
+                    + 'are given them as files; other files, and anything you attach with 📎, stay private — switch any '
+                    + 'file on its chip before you send';
         refreshSeen();
     }
 
@@ -7585,15 +7644,29 @@
     function seenLine(chip) {
         var seen = chip.querySelector('.file-chip-seen'), detail = chip.querySelector('.file-chip-detail');
         if (!seen || !detail) return;
+        var sw = chip.querySelector('.file-chip-switch');
+        var open = chip.dataset.shown === '1' || chip.dataset.cloudVisible === '1';
+        if (sw) {
+            sw.textContent = open ? '🔒 keep private' : '☁️ let the cloud see it';
+            sw.title = open ? 'Keep this file private: only your local model reads it'
+                    : 'Let the cloud model see this file: a picture as it is, any other file as what skills read from it';
+        }
         var line, full;
-        if (chip.classList.contains('attached')) {
-            line = '🔒 private';
-            full = 'A file you attach with 📎, or paste or drop that is no image, stays private: only your local model reads it. '
-                    + 'The cloud model is told only that a file came, with its type and size.';
+        if (chip.dataset.cloudVisible === '1') {
+            line = chatRunsFree() ? '🏠 Free: no cloud model reads it' : '☁️ the cloud model can read it';
+            full = 'You let the cloud model read this file: what skills read from it is shown to it, and a text file\'s '
+                    + 'text is given to it, through the privacy filter, which takes out secrets and puts placeholders for '
+                    + 'names and addresses.' + (chatRunsFree() ? ' This chat runs on the local model only (Free), so no '
+                        + 'cloud model is sent anything now.' : '');
         } else if (chip.dataset.shown !== '1') {
             line = '🔒 private';
-            full = 'Kept private, like an attached file: ' + (chip.dataset.privateBecause
-                    || 'it is not an image the cloud model can be shown') + '.';
+            full = chip.dataset.chosen === '1' ? 'You chose to keep it private: only your local model reads it.'
+                    : chip.classList.contains('attached')
+                        ? 'A file you attach with 📎, or paste or drop that is no image, stays private: only your local '
+                            + 'model reads it. The cloud model is told only that a file came, with its type and size.'
+                        : 'Kept private, like an attached file: ' + (chip.dataset.privateBecause
+                            || 'it is not an image the cloud model can be shown') + '.';
+            full += ' Tap "let the cloud see it" to show it to the cloud model.';
         } else if (chatRunsFree()) {
             line = '🏠 Free: the local model can\'t see it';
             full = 'This chat runs on the local model only (Free), and the local model cannot see images, so no model '

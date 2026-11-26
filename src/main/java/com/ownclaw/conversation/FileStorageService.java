@@ -78,7 +78,67 @@ public class FileStorageService implements CloudImages {
      * @param privateBecause why a file the page said was a pasted image stays private, or null
      * @param copy           the copy the cloud model is sent, when it is shown
      */
-    public record Stored(String id, boolean shownToCloud, String privateBecause, CloudImageCopy.Copy copy) {}
+    public record Stored(String id, boolean shownToCloud, String privateBecause, CloudImageCopy.Copy copy,
+                         boolean cloudVisible) {
+        public Stored(String id, boolean shownToCloud, String privateBecause, CloudImageCopy.Copy copy) {
+            this(id, shownToCloud, privateBecause, copy, false);
+        }
+    }
+
+    /** Thrown when a file's choice is asked to change after it went with a message: then it is fixed. */
+    public static final class AlreadySent extends RuntimeException {
+        AlreadySent() {
+            super("it went with a message already, and what that message showed cannot change", null, false, false);
+        }
+    }
+
+    /**
+     * The owner's choice for one of his files, before he sends it: whether the cloud model may see
+     * it. An image whose bytes decode as one is then shown as a picture, its copy made as a pasted
+     * one's is ({@link #shown}); any other file -- a PDF, a CSV, an image that does not decode -- is
+     * then no private file ({@code cloud_visible}): what skills read from it is not private, and a
+     * text file's text is given to the cloud model. Not visible, it is private, whatever it was:
+     * a pasted screenshot too. Null when there is no such file of his; {@link AlreadySent} once it
+     * went with a message.
+     */
+    public Stored setCloud(String userId, String fileId, boolean visible) throws IOException {
+        List<Map<String, Object>> rows = jdbc.queryForList(
+                "SELECT * FROM file_attachments WHERE id = ? AND user_id = ?", fileId, userId);
+        if (rows.isEmpty()) return null;
+        Integer sent = jdbc.queryForObject("SELECT COUNT(*) FROM message_attachments WHERE file_id = ?", Integer.class, fileId);
+        if (sent != null && sent > 0) throw new AlreadySent();
+        Map<String, Object> row = rows.getFirst();
+        Path file = uploadsDir.resolve(String.valueOf(row.get("stored_name")));
+        if (!visible) {
+            Object copy = row.get("cloud_copy");
+            jdbc.update("""
+                UPDATE file_attachments SET shown_to_cloud = 0, cloud_visible = 0, cloud_copy = NULL,
+                    cloud_media_type = NULL, cloud_width = NULL, cloud_height = NULL, cloud_bytes = NULL,
+                    cloud_sha256 = NULL WHERE id = ? AND user_id = ?
+                """, fileId, userId);
+            if (copy != null) Files.deleteIfExists(uploadsDir.resolve(String.valueOf(copy)));
+            log.info("File {} is private, as its owner chose", fileId);
+            return new Stored(fileId, false, "you chose to keep it private", null, false);
+        }
+        PastedImage already = pastedImage(row);
+        if (already != null) return new Stored(fileId, true, null, null, false);
+        String type = String.valueOf(row.get("content_type"));
+        if (type.startsWith("image/")) {
+            Stored shown = shown(userId, fileId, file, CloudImageCopy.deadline());
+            if (shown.shownToCloud()) {
+                jdbc.update("UPDATE file_attachments SET cloud_visible = 0 WHERE id = ? AND user_id = ?", fileId, userId);
+                return shown;
+            }
+        }
+        jdbc.update("UPDATE file_attachments SET cloud_visible = 1 WHERE id = ? AND user_id = ?", fileId, userId);
+        log.info("File {} may be read by the cloud model, as its owner chose: type={}", fileId, type);
+        return new Stored(fileId, false, null, null, true);
+    }
+
+    /** Whether {@code row}, a row of {@code file_attachments}, is a file its owner lets the cloud model read. */
+    public static boolean cloudVisible(Map<String, Object> row) {
+        return row != null && row.get("cloud_visible") instanceof Number n && n.intValue() == 1;
+    }
 
     /**
      * {@link #store(String, String, String, InputStream)}, and -- when the page says the file is an

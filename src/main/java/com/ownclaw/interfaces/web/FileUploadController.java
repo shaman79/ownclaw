@@ -78,21 +78,7 @@ public class FileUploadController {
                 result.put("original_name", FileStorageService.nameKept(name, type, pastedImages));
                 result.put("size_bytes", file.getSize());
                 result.put("content_type", type);
-                if (pastedImages) {
-                    result.put("shown_to_cloud", stored.shownToCloud());
-                    if (stored.copy() != null) {
-                        result.put("cloud_width", stored.copy().width());
-                        result.put("cloud_height", stored.copy().height());
-                        result.put("image_width", stored.copy().originalWidth());
-                        result.put("image_height", stored.copy().originalHeight());
-                        // What its file carries beside the picture: skills are handed that file, so what
-                        // they read from it is private, as for any file.
-                        result.put("results_private", stored.copy().metadata() != null);
-                        if (stored.copy().metadata() != null) result.put("metadata", stored.copy().metadata());
-                    } else {
-                        result.put("private_because", stored.privateBecause());
-                    }
-                }
+                if (pastedImages) seen(result, stored);
                 results.add(result);
             } catch (Exception e) {
                 log.error("File upload failed: {}", e.getMessage(), e);
@@ -101,6 +87,52 @@ public class FileUploadController {
             }
         }
         return ResponseEntity.ok(Map.of("files", results));
+    }
+
+    /** Who sees a file, as the page's chip says it: shown as a picture and at what size, readable, or private and why. */
+    private static void seen(Map<String, Object> result, FileStorageService.Stored stored) {
+        result.put("shown_to_cloud", stored.shownToCloud());
+        result.put("cloud_visible", stored.cloudVisible());
+        if (stored.copy() != null) {
+            result.put("cloud_width", stored.copy().width());
+            result.put("cloud_height", stored.copy().height());
+            result.put("image_width", stored.copy().originalWidth());
+            result.put("image_height", stored.copy().originalHeight());
+            // What its file carries beside the picture: skills are handed that file, so what
+            // they read from it is private, as for any file.
+            result.put("results_private", stored.copy().metadata() != null);
+            if (stored.copy().metadata() != null) result.put("metadata", stored.copy().metadata());
+        } else if (!stored.shownToCloud() && !stored.cloudVisible()) {
+            result.put("private_because", stored.privateBecause());
+        }
+    }
+
+    /**
+     * The owner's choice for a file of his, before he sends it, whether the cloud model may see it.
+     * POST /api/files/{fileId}/cloud {"visible": true|false}: an image shown as a picture, any other
+     * file readable (FileStorageService#setCloud); not visible, private. Answered as an upload is:
+     * who sees it now. 404 for a file that is not his, 409 once it went with a message.
+     */
+    @PostMapping("/{fileId}/cloud")
+    public ResponseEntity<?> cloud(HttpServletRequest request, @PathVariable String fileId,
+                                   @RequestBody Map<String, Object> body) {
+        String userId = (String) request.getAttribute("userId");
+        if (!(body.get("visible") instanceof Boolean visible)) {
+            return ResponseEntity.badRequest().body(Map.of("error", "visible must be true or false"));
+        }
+        try {
+            var stored = fileStorage.setCloud(userId, fileId, visible);
+            if (stored == null) return ResponseEntity.notFound().build();
+            var result = new java.util.LinkedHashMap<String, Object>();
+            result.put("id", fileId);
+            seen(result, stored);
+            return ResponseEntity.ok(result);
+        } catch (FileStorageService.AlreadySent sent) {
+            return ResponseEntity.status(409).body(Map.of("error", "Not changed: " + sent.getMessage()));
+        } catch (java.io.IOException e) {
+            log.error("Could not change who sees file {}: {}", fileId, e.getMessage());
+            return ResponseEntity.internalServerError().body(Map.of("error", "Could not change it: " + e.getMessage()));
+        }
     }
 
     /**

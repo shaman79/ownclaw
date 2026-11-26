@@ -673,6 +673,16 @@ public class AgentLoop {
                             + (scaled ? " at " + image.width() + "x" + image.height() + " px" : "")
                             + (image.metadata() == null ? ""
                                     : "; its file also carries " + image.metadata() + ", so what skills read from it is private")));
+                } else if (FileStorageService.cloudVisible(info)) {
+                    // A file the owner lets the cloud model read (his choice, before he sent it): no
+                    // private file -- its text, when it has one, and what skills read from it go to
+                    // the cloud, through the gateway's filter like everything else. Its name too: he
+                    // shared the file.
+                    String text = fileStorage.isTextContent(ct) ? fileStorage.readAsText(id) : null;
+                    var why = List.of("shared file", ct + ", " + size + " bytes"
+                                    + (text == null ? ", no text read (not text, or not UTF-8)" : ""),
+                            String.valueOf(info.get("original_name")));
+                    a = context.addSharedFile(id, text, why);
                 } else {
                     String text = fileStorage.isTextContent(ct) ? fileStorage.readAsText(id) : null;
                     // The type and the size, never the name: a statement's file name carries its
