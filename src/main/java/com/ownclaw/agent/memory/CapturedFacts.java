@@ -165,12 +165,15 @@ public class CapturedFacts {
                 memory.storeFact(userId, chosen, fact);
                 memoryId = rowOf(userId, chosen);
                 jdbc.update("UPDATE fact_captures SET memory_id = ? WHERE ref = ?", memoryId, ref);
-                // The same fact still on offer from before 2026-11-26 is kept now: its Keep would
-                // keep it a second time, and its row says so after a reload.
-                for (String old : jdbc.queryForList("SELECT ref FROM fact_captures WHERE user_id = ? AND state = 'offered' "
-                        + "AND fact = ? AND replaces_id IS NULL", String.class, userId, fact)) {
-                    jdbc.update("UPDATE fact_captures SET state = 'kept', memory_id = ?, fact_key = ?, decided_at = datetime('now') "
-                            + "WHERE ref = ?", memoryId, chosen, old);
+                // The same fact still on offer from before 2026-11-26 -- the same words, case and a
+                // closing stop aside -- is kept now: its Keep would keep it a second time. Marked
+                // kept with no row of its own: the new capture holds the fact, its label and its Undo.
+                for (var pending : jdbc.queryForList("SELECT ref, fact FROM fact_captures WHERE user_id = ? AND state = 'offered' "
+                        + "AND replaces_id IS NULL", userId)) {
+                    if (!same(String.valueOf(pending.get("fact"))).equals(same(fact))) continue;
+                    String old = String.valueOf(pending.get("ref"));
+                    jdbc.update("UPDATE fact_captures SET state = 'kept', memory_id = NULL, fact_key = ?, "
+                            + "decided_at = datetime('now') WHERE ref = ?", chosen, old);
                     if (conversations != null) conversations.markFact(userId, old, "kept");
                 }
             }
@@ -258,7 +261,10 @@ public class CapturedFacts {
             if (c.offered()) return new Done(false, "It was never kept, so there is nothing to undo.");
             AgentMemory.MemoryEntry now = under(c.key(), memory.getFacts(userId));
             if (now == null) return new Done(false, "Not undone: it has been deleted since.");
-            if (c.memoryId() == null || id(now) != c.memoryId()) {
+            if (c.memoryId() == null) {
+                return new Done(false, "Kept again by a later turn: undo it where that turn says Remembered.");
+            }
+            if (id(now) != c.memoryId()) {
                 return new Done(false, "Not undone: it has changed since, and now reads: " + now.content());
             }
             if (c.previous() == null) {
@@ -292,6 +298,12 @@ public class CapturedFacts {
                         rs.getObject("memory_id") == null ? null : rs.getLong("memory_id")),
                 ref, userId);
         return found.isEmpty() ? null : found.getFirst();
+    }
+
+    /** A fact as two that say the same are compared: case, blanks and a closing stop aside (as FactCapture compares them). */
+    static String same(String fact) {
+        return fact == null ? "" : fact.strip().replaceAll("[.!\\s]+$", "").replaceAll("\\s+", " ")
+                .toLowerCase(Locale.ROOT);
     }
 
     /** The facts still on offer to {@code userId}, made before 2026-11-26 and not yet kept. */
