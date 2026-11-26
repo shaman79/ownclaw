@@ -1151,7 +1151,6 @@
             white-space: nowrap;
         }
         .file-chip.uploading .file-chip-switch { cursor: wait; opacity: .6 }
-        .file-chip.undecided { border-color: var(--red) }
         .file-chip-detail { display: none; flex-basis: 100%; font-size: 11px; color: var(--text-3); white-space: normal; line-height: 1.35 }
         .file-chip.open { flex-wrap: wrap; border-radius: 12px }
         .file-chip.open .file-chip-detail { display: block }
@@ -7590,60 +7589,35 @@
      * (his decision of 2026-11-26). The server makes it -- an image shown as a picture, any other
      * file readable, or private -- and says who sees it now, which the chip then says. Uploading
      * meanwhile, so a message is not sent before the choice is made (send), and as whoever made the
-     * chip's upload: signed out meanwhile, the answer is not drawn.
+     * chip's upload: signed out meanwhile, the answer is not drawn. Not answered, or refused, the
+     * file is taken off the message: who sees it is not known, and a file is never sent so (the
+     * owner, 2026-11-26: "Default is local, cloud is explicit. Keep it simple").
      */
     function switchCloud(chip) {
-        if (!chip.dataset.fileId || chip.classList.contains('uploading') || chip.dataset.refused === '1') return;
-        // Not confirmed, the choice asked for again: the server may have made it, or not.
-        var visible = chip.classList.contains('undecided') ? chip.dataset.wanted === '1'
-                : !(chip.dataset.shown === '1' || chip.dataset.cloudVisible === '1');
+        if (!chip.dataset.fileId || chip.classList.contains('uploading')) return;
+        var visible = !(chip.dataset.shown === '1' || chip.dataset.cloudVisible === '1');
         var token = authToken;
         var sw = chip.querySelector('.file-chip-switch');
         chip.classList.add('uploading');
         if (sw) sw.disabled = true;
-        function settled() {
-            chip.classList.remove('uploading');
-            if (sw) sw.disabled = false;
-        }
         fetch('/api/files/' + encodeURIComponent(chip.dataset.fileId) + '/cloud', {
             method: 'POST',
             headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
             body: JSON.stringify({ visible: visible })
         })
-        .then(function(r) {
-            // A refusal is an answer: the file went with a message (409) or is gone (404), and asking
-            // again changes nothing.
-            if (r.status === 404 || r.status === 409) {
-                return r.json().catch(function() { return {}; }).then(function(b) {
-                    var refused = new Error(b && b.error || 'HTTP ' + r.status);
-                    refused.refused = true;
-                    throw refused;
-                });
-            }
-            return okJson(r);
-        })
+        .then(okJson)
         .then(function(said) {
-            settled();
+            chip.classList.remove('uploading');
+            if (sw) sw.disabled = false;
             if (!chip.isConnected || authToken !== token) return;
-            chip.classList.remove('undecided');
-            delete chip.dataset.wanted;
-            delete chip.dataset.failed;
             seenFrom(chip, said);
             chip.dataset.chosen = '1';
             seenLine(chip);
-        })
-        .catch(function(err) {
-            settled();
+        }, function() {
             if (!chip.isConnected || authToken !== token) return;
-            // The answer was lost, or a refusal: who sees the file is not known here, so the chip
-            // says so and the message waits (send) until the choice is confirmed -- sent now, it
-            // went as whatever the server last made it, perhaps not what the chip said.
-            chip.classList.add('undecided');
-            chip.dataset.wanted = visible ? '1' : '0';
-            chip.dataset.failed = String(err && err.message || 'no answer');
-            chip.dataset.refused = err && err.refused ? '1' : '';
-            if (sw) sw.disabled = chip.dataset.refused === '1';
-            seenLine(chip);
+            pendingFiles = pendingFiles.filter(function(f) { return f.chip !== chip; });
+            chip.remove();
+            addMsg('system', 'Could not switch who sees a file, so it was taken off this message. Attach it again.');
         });
     }
 
@@ -7684,29 +7658,14 @@
         var seen = chip.querySelector('.file-chip-seen'), detail = chip.querySelector('.file-chip-detail');
         if (!seen || !detail) return;
         var sw = chip.querySelector('.file-chip-switch');
-        var undecided = chip.classList.contains('undecided');
-        var open = undecided ? chip.dataset.wanted !== '1'
-                : chip.dataset.shown === '1' || chip.dataset.cloudVisible === '1';
+        var open = chip.dataset.shown === '1' || chip.dataset.cloudVisible === '1';
         if (sw) {
-            sw.textContent = undecided ? (chip.dataset.wanted === '1' ? '↻ let the cloud see it' : '↻ keep private')
-                    : open ? '🔒 keep private' : '☁️ let the cloud see it';
-            sw.title = undecided ? 'Send your choice again'
-                    : open ? 'Keep this file private: only your local model reads it'
+            sw.textContent = open ? '🔒 keep private' : '☁️ let the cloud see it';
+            sw.title = open ? 'Keep this file private: only your local model reads it'
                     : 'Let the cloud model see this file: a picture as it is, any other file as what skills read from it';
-            sw.setAttribute('aria-pressed', !undecided && open ? 'true' : 'false');
         }
         var line, full;
-        if (undecided && chip.dataset.refused === '1') {
-            line = '⚠️ not changed — remove it and attach it again';
-            full = 'OwnClaw refused to change who sees this file (' + chip.dataset.failed + '). Remove the file and '
-                    + 'attach it again to choose. A message is not sent with it meanwhile.';
-        } else if (undecided) {
-            line = '⚠️ not confirmed — tap to try again';
-            full = 'OwnClaw did not confirm ' + (chip.dataset.wanted === '1' ? 'letting the cloud model see this file'
-                    : 'keeping this file private') + ' (' + chip.dataset.failed + '), so who sees it is not known. Tap "'
-                    + (sw ? sw.textContent.replace(/^↻ /, '') : 'the switch') + '" to send your choice again, or remove the file. A message '
-                    + 'is not sent while it is unconfirmed.';
-        } else if (chip.dataset.cloudVisible === '1') {
+        if (chip.dataset.cloudVisible === '1') {
             line = chatRunsFree() ? '🏠 Free: no cloud model reads it' : '☁️ the cloud model can read it';
             full = 'You let the cloud model read this file: what skills read from it is shown to it, and a text file\'s '
                     + 'text is given to it, through the privacy filter, which takes out secrets and puts placeholders for '
@@ -8020,11 +7979,6 @@
         // referred to a forgotten PDF an hour later.
         if (!picked && fileChips.querySelector('.file-chip.uploading')) {
             showConnBanner('Still uploading — send again in a moment.');
-            return;
-        }
-        // A file whose switch was not confirmed: who sees it is not known, so it is not sent.
-        if (!picked && fileChips.querySelector('.file-chip.undecided')) {
-            showConnBanner('A file\'s choice of who sees it was not confirmed — tap its switch to try again, or remove it.');
             return;
         }
 
