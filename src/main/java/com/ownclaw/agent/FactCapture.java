@@ -1040,7 +1040,9 @@ final class FactCapture {
         var sb = new StringBuilder(n.length());
         n.codePoints().forEach(c -> {
             if (c == 0x3002 || c == 0xFF0E || c == 0xFF61) sb.append('.');
-            else if (Character.getType(c) != Character.FORMAT) sb.appendCodePoint(c);
+            // A tab or a carriage return inside a URL is taken out by browsers and by Python's
+            // urlsplit, so https://evil.c<TAB>om is evil.com: taken out here too.
+            else if (c != '\t' && c != '\r' && Character.getType(c) != Character.FORMAT) sb.appendCodePoint(c);
         });
         return sb.toString();
     }
@@ -1123,6 +1125,12 @@ final class FactCapture {
         w = w.substring(a, b);
         if (w.indexOf('%') >= 0) w = asReached(percentDecoded(w)).toLowerCase(Locale.ROOT);
         if (!mayName(w)) return null;
+        // http:/evil.com, https:\evil.com, ws:evil.com: browsers read the host after a special
+        // scheme's colon whatever slashes or backslashes stand there, or none.
+        Matcher special = Pattern.compile("(https?|wss?|ftp):(?![/\\\\]{2}[^/\\\\])[/\\\\]*(.*)").matcher(w);
+        if (special.matches() && !w.contains("://")) {
+            return hostPlace(urlHost(special.group(2)), true, known);
+        }
         int scheme = w.indexOf("://");
         if (scheme >= 0) {
             if (scheme == 0 || !w.substring(0, scheme).matches("[a-z][a-z0-9+.-]*") || w.indexOf("://", scheme + 3) >= 0) {
