@@ -884,12 +884,12 @@ public class DynamicSkill implements Tool {
             // What it wrote before it went quiet is the only evidence of where it hung.
             String stalled = "Skill '" + name + "' stalled (no output for " + timeoutSec + "s).";
             return ToolResult.failure(stalled + printed("stdout", result.stdout())
-                    + printed("stderr", result.stderr()), stalled + printed("stderr", result.stderr()));
+                    + printed("stderr", result.stderr()), withoutPrinted(stalled + printed("stderr", result.stderr()), result.stdout()));
         }
         if (result.isSuccess()) return parseOutput(result.stdout(), result.stderr());
         // A crash can leave stdout as well as stderr: a subprocess writes to it directly.
         String crashed = result.stderr().isBlank() ? "Exit code: " + result.exitCode() : result.stderr();
-        return ToolResult.failure(crashed + printed("stdout", result.stdout()), crashed);
+        return ToolResult.failure(crashed + printed("stdout", result.stdout()), withoutPrinted(crashed, result.stdout()));
     }
 
     /**
@@ -999,13 +999,37 @@ public class DynamicSkill implements Tool {
 
         output = withStream(output, "stderr", stderr);
         if (success) return ToolResult.success(output);
-        // Its error as it said it: the "error" it returned, or its own "ERROR: ..." -- never the
-        // data beside them -- and its stderr.
+        // Its error as it said it -- never what it printed (before), never the data beside it: the
+        // first line of the "error" it returned, or of its own "ERROR: ...", or the runner's
+        // account of an exception it raised ("Skill error: ..." and the traceback); and its stderr.
         JsonNode error = parsed.get("error");
-        String own = error != null && error.isTextual() ? error.asText()
-                : said != null && said.startsWith("ERROR:") ? said : null;
+        String saidBack = returned != null && returned.isTextual() ? returned.asText() : null;
+        String own = error != null && error.isTextual() ? firstLine(error.asText())
+                : saidBack != null && saidBack.startsWith("Skill error:") ? saidBack
+                : saidBack != null && saidBack.startsWith("ERROR:") ? firstLine(saidBack) : null;
         String streamed = stderr == null || stderr.isBlank() ? "" : printed("stderr", stderr);
-        return ToolResult.failure(output, (own == null ? "" : own.strip()) + streamed);
+        return ToolResult.failure(output, withoutPrinted((own == null ? "" : own.strip()) + streamed, stdout));
+    }
+
+    private static String firstLine(String text) {
+        String t = text.strip();
+        int nl = t.indexOf('\n');
+        return nl < 0 ? t : t.substring(0, nl).strip();
+    }
+
+    /**
+     * {@code error} with every line of what the process printed to stdout -- eight characters or
+     * more -- taken out where it stands in it: the data a skill reads is what it prints, and a
+     * message built from it repeats it.
+     */
+    static String withoutPrinted(String error, String stdout) {
+        if (error == null || error.isBlank() || stdout == null || stdout.isBlank()) return error;
+        String out = error;
+        for (String line : stdout.split("\\R")) {
+            String l = line.strip();
+            if (l.length() >= 8 && !l.startsWith("{")) out = out.replace(l, "[printed output]");
+        }
+        return out;
     }
 
     /** A failure in the service's own words: all of it is the error, and none of it the skill's data. */
@@ -1049,6 +1073,16 @@ public class DynamicSkill implements Tool {
                         (result.error() == null ? "" : result.error()) + printed(label, text));
     }
 
+    /** {@code s} with every character past ASCII written as JSON writes it, \\uXXXX in lower case. */
+    private static String jsonEscaped(String s) {
+        var sb = new StringBuilder();
+        for (char c : s.toCharArray()) {
+            if (c < 128) sb.append(c);
+            else sb.append(String.format("\\u%04x", (int) c));
+        }
+        return sb.toString();
+    }
+
     /**
      * {@code result} with every name of the files it was handed taken out of its error, each
      * where it stands -- its path, its name on disk, the name it was uploaded under -- for
@@ -1058,20 +1092,35 @@ public class DynamicSkill implements Tool {
     static ToolResult withoutFileNames(ToolResult result, List<Map<String, String>> attached) {
         if (result.error() == null || attached.isEmpty()) return result;
         String error = result.error();
-        var names = new ArrayList<String>();
+        var forms = new ArrayList<String>();
         for (var f : attached) {
             String path = f.get("path");
             if (path != null && !path.isBlank()) {
-                names.add(path);
+                forms.add(path);
                 Path file = Path.of(path).getFileName();
-                if (file != null) names.add(file.toString());
+                if (file != null) forms.add(file.toString());
             }
-            if (f.get("container_path") != null) names.add(f.get("container_path"));
+            if (f.get("container_path") != null) forms.add(f.get("container_path"));
             String uploaded = f.get("name");
-            if (uploaded != null && uploaded.strip().length() >= 3) names.add(uploaded.strip());
+            if (uploaded != null && uploaded.strip().length() >= 3) {
+                forms.add(uploaded.strip());
+                // Its stem: code reads Path(p).stem as often as the name.
+                int dot = uploaded.strip().lastIndexOf('.');
+                if (dot >= 3) forms.add(uploaded.strip().substring(0, dot));
+            }
+        }
+        var names = new ArrayList<String>();
+        for (String n : forms) {
+            names.add(n);
+            // As JSON writes it (\u00fd), and as a file:// URL does (%20, %C3%BD).
+            names.add(jsonEscaped(n));
+            names.add(java.net.URLEncoder.encode(n, java.nio.charset.StandardCharsets.UTF_8).replace("+", "%20")
+                    .replace("%2F", "/"));
         }
         names.sort((a, b) -> b.length() - a.length());   // the longest first: a path holds its name
-        for (String n : names) error = error.replace(n, "[an attached file]");
+        for (String n : new java.util.LinkedHashSet<>(names)) {
+            if (n.length() >= 3) error = error.replace(n, "[an attached file]");
+        }
         return new ToolResult(result.success(), result.output(), error);
     }
 

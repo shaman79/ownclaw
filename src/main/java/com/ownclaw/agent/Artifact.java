@@ -223,6 +223,18 @@ public record Artifact(int n, String tool, Map<String, Object> written,
         return render(shapeOf(n, output, withheld()));
     }
 
+    /**
+     * Its error, not its output, last, on lines of its own as a result's text is shown: the skill
+     * failed in a task holding a private file, and without the error the cloud cannot repair it --
+     * it asked the local model which kind of error it was instead, three steps of guessing
+     * (2026-11-25). The owner's decision. Nothing of the descriptor stands beside it on its lines:
+     * a local answer that quotes the error after a colon -- "failed with: tesseract is not ..." --
+     * is matched against the error alone, and the error is what the cloud was shown.
+     */
+    private String shownErrorBlock() {
+        return isPrivate() && shownError != null ? "\n[its error, shown; its output is not]\n" + shownError : "";
+    }
+
     /** The descriptor, its fields named as {@code shape} names them. */
     private String render(Shape shape) {
         var sb = new StringBuilder(handle()).append(' ').append(tool)
@@ -230,18 +242,12 @@ public record Artifact(int n, String tool, Map<String, Object> written,
         if (!why.isEmpty()) sb.append(" (").append(String.join("; ", why)).append(')');
         sb.append(" · ").append(shape.kind()).append(" · ")
           .append(String.format("%,d", output.length())).append(" chars");
-        if (isPrivate() && shownError != null) {
-            // Its error, not its output: the skill failed in a task holding a private file, and
-            // without the error the cloud cannot repair it -- it asked the local model which kind of
-            // error it was instead, three steps of guessing (2026-11-25). The owner's decision.
-            sb.append(" · error (shown; its output is not): ").append(shownError);
-        }
         if (isPrivate() && !indexed) {
             // A result hidden because of WHEN it was made came from a tool fed by what the model
             // typed after reading private data. Its key names and booleans are not a skill's
             // schema but possibly that data -- a key-value store or a listing keyed by its input
             // echoes it straight into a field name. So: that it happened, and how big.
-            return sb.toString();
+            return sb + shownErrorBlock();
         }
         if (!success && !shape.isJson()) {
             sb.append(" (text withheld; skill_usage row via ops)");

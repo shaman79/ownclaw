@@ -1529,11 +1529,13 @@ public class AgentContext {
                     if (holds(given, stretch)) return true;
                 }
                 for (Artifact a : artifacts) {
-                    if (a.n() >= hitHandle) break;
-                    if (!a.isPrivate() && holds(a.output(), stretch)) return true;
+                    if (a.n() > hitHandle) break;
                     // An error the cloud was shown, as it was shown: released as a PUBLIC result's
-                    // bytes are, and so excused as they are -- before the hit only.
-                    if (a.shownError() != null && holds(a.shownError(), stretch)) return true;
+                    // bytes are -- the hit's own too, when a second failure says what the first one
+                    // did.
+                    if (a.shownError() != null && heldWithin(a.shownError(), stretch)) return true;
+                    if (a.n() == hitHandle) break;
+                    if (!a.isPrivate() && holds(a.output(), stretch)) return true;
                 }
                 for (var turn : trajectory.turns()) {
                     var action = turn.action();
@@ -1557,6 +1559,26 @@ public class AgentContext {
                 }
                 return false;
             }
+        }
+
+        /**
+         * Whether {@code source} holds {@code stretch} but for less than a window at either end:
+         * what stands around a shown error where it is quoted -- "failed with: tesseract ...
+         * information. So" against "...not]\ntesseract ... information.\nStep 3" -- is shared by
+         * chance, a colon or the first letter of the next word, and less than a window of text the
+         * canary could not have told from nothing anyway. A stretch holding a window's worth that
+         * the source does not hold is no excuse.
+         */
+        private boolean heldWithin(Object source, String stretch) {
+            if (holds(source, stretch)) return true;
+            int w = com.ownclaw.privacy.PrivateIndex.WINDOW;
+            for (int start = 0; start < w && start < stretch.length(); start++) {
+                for (int cut = 0; cut < w && start + cut < stretch.length(); cut++) {
+                    String middle = stretch.substring(start, stretch.length() - cut);
+                    if (middle.length() >= w && holds(source, middle)) return true;
+                }
+            }
+            return false;
         }
 
         /** Whether the source of skill {@code tool} holds {@code stretch}, normalised. */

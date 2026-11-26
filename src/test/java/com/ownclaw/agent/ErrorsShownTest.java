@@ -47,7 +47,7 @@ class ErrorsShownTest {
         assertEquals(ERROR, d.shownError());
         var a = record(ctx, "ocr_image_to_text", output, d);
         String described = a.describe();
-        assertTrue(described.contains("· error (shown; its output is not): " + ERROR), described);
+        assertTrue(described.endsWith("\n[its error, shown; its output is not]\n" + ERROR), described);
         assertFalse(described.contains("155"), "nothing of its output: " + described);
         assertTrue(described.contains("given the file {{1}}"), described);
         // Mutation: return the file branch's decision without the error -> not shown.
@@ -143,6 +143,30 @@ class ErrorsShownTest {
         assertFalse(excused(other, quotesMail.n(), inCode), "the code quoted is not the quoted result's skill's");
         assertEquals(List.of(mail.n()), quotesMail.quoted());
         // Mutation: drop the quoted loop in Excuses -> the first is refused, as on 2026-11-25.
+    }
+
+    @Test
+    @DisplayName("the descriptor that shows the error is no leak of the local answer that quotes it after a colon: the gate scans the real text")
+    void theDescriptorPassesTheGate() {
+        var ctx = withFile("Položka;Cena\nObědové menu;155 Kč\n");
+        var failed = record(ctx, "ocr_image_to_text", "ERROR: " + ERROR,
+                ctx.decide(List.of(), List.of(), false, "ERROR: " + ERROR, ERROR));
+        record(ctx, "local_answer", "The OCR skill failed with this error: " + ERROR + " So I could not read the price list.",
+                new Artifact.Decision(Label.PRIVATE, List.of(Artifact.quotes(failed.n())), true));
+        assertNull(ctx.firstLeakIn(failed.describe()), failed.describe());
+        assertNull(ctx.firstLeakIn("Step 2:\n" + failed.describe() + "\nStep 3: the local model answered."));
+        // Mutation: put the error inline after a colon, and excuse only the stretch as found -> a hit
+        // on ": tesseract is not installed or ", and every later request is refused.
+    }
+
+    @Test
+    @DisplayName("the same failure twice: its error is shown the second time too")
+    void theSameErrorTwice() {
+        var ctx = withFile("Položka;Cena\nObědové menu;155 Kč\n");
+        record(ctx, "ocr_image_to_text", "ERROR: " + ERROR, ctx.decide(List.of(), List.of(), false, "ERROR: " + ERROR, ERROR));
+        var again = ctx.decide(List.of(), List.of(), false, "ERROR: " + ERROR, ERROR);
+        assertEquals(ERROR, again.shownError(), String.valueOf(again.why()));
+        // Mutation: check shown errors before the hit only -> "its error repeats {{2}}".
     }
 
     @Test

@@ -76,6 +76,25 @@ class SkillErrorTest {
     }
 
     @Test
+    @DisplayName("only the first line of the skill's own words; what it printed never, not even after ERROR:")
+    void firstLineAndNothingPrinted(@TempDir Path tmp) throws Exception {
+        var printed = run(tmp, new SandboxResult(0, "ERROR: could not parse the list\n" + DATA + "\n{\"output\": \"\", \"success\": true}",
+                "", 1, false));
+        assertFalse(printed.success());
+        assertNull(printed.error(), "it returned nothing of its own: what it printed is no error to show");
+        var lines = run(tmp, new SandboxResult(0, "{\"success\": true, \"output\": \"ERROR: bad row\\n" + DATA + "\"}", "", 1, false));
+        assertEquals("ERROR: bad row", lines.error());
+        var field = run(tmp, new SandboxResult(0, "{\"success\": false, \"error\": \"cannot parse\\n" + DATA + "\"}", "", 1, false));
+        assertEquals("cannot parse", field.error());
+        var raised = run(tmp, new SandboxResult(0, "{\"success\": false, \"output\": \"Skill error: no price column\\nTraceback (most "
+                + "recent call last):\\n  File \\\"skill.py\\\", line 3, in run\\nKeyError: 'Cena'\"}", "", 1, false));
+        assertTrue(raised.error().startsWith("Skill error: no price column\nTraceback"), raised.error());
+        var echoed = run(tmp, new SandboxResult(1, "reading " + DATA, "ValueError: bad line 'reading " + DATA + "'", 1, false));
+        assertFalse(echoed.error().contains("155"), echoed.error());
+        assertTrue(echoed.error().contains("[printed output]"), echoed.error());
+    }
+
+    @Test
     @DisplayName("output that is no JSON, a stall: the service's words, never what was printed")
     void theServicesWords(@TempDir Path tmp) throws Exception {
         var notJson = run(tmp, new SandboxResult(0, DATA, "", 1, false));
@@ -103,5 +122,13 @@ class SkillErrorTest {
         assertEquals("FileNotFoundError: '[an attached file]'\nwhile reading [an attached file] ([an attached file]) in [an attached file]",
                 clean.error());
         assertEquals("whole", clean.output(), "the output is not touched: it is private wherever a file is");
+        var forms = ToolResult.failure("whole", "No table in Vypis uctu 123456789; "
+                + "json \"Vypis uctu 123456789.pdf\"; file:///opt/ownclaw/data/uploads/0b1c_Vypis%20uctu%20123456789.pdf");
+        String cleaned = DynamicSkill.withoutFileNames(forms, attached).error();
+        assertFalse(cleaned.contains("123456789"), cleaned);
+        var czech = List.of(Map.of("id", "f2", "name", "Výpis účtu.pdf", "path", "/u/0c_Výpis účtu.pdf",
+                "container_path", "/uploads/0c_Výpis účtu.pdf", "content_type", "application/pdf"));
+        String escaped = DynamicSkill.withoutFileNames(ToolResult.failure("w", "open \"V\\u00fdpis \\u00fa\\u010dtu.pdf\" failed"), czech).error();
+        assertFalse(escaped.contains("\\u00fd"), escaped);
     }
 }
