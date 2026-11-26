@@ -3851,9 +3851,9 @@
                 if (a.resultsPrivate) {
                     item.appendChild(node('div', 'task-trace-line muted', 'Its file carries ' + (a.metadata || 'more than the picture')
                             + ', so what skills read from it was kept private.'));
-                } else if (a.metadata && a.shownWith) {
+                } else if (a.metadata) {
                     item.appendChild(node('div', 'task-trace-line muted', 'Its file data — ' + a.metadata
-                            + ' — was given to the cloud model too, as text, through the privacy filter.'));
+                            + ' — was given to this task\'s models as text, to a cloud model through the privacy filter.'));
                 }
                 panel.appendChild(item);
                 return;

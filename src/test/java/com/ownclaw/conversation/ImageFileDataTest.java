@@ -306,6 +306,19 @@ class ImageFileDataTest {
         data = ImageFileData.of(photo, "a comment", 4096);
         assertTrue(data.length() < 4096 + 600, data.length() + ": " + data);
         assertTrue(data.contains("more than this says of one file -- 4,096 characters in all"), data);
+
+        // EXIF of more lines than the bound has room for: cut, said to be, and the place still first.
+        // Its tags in order, as a camera writes them: the GPS directory's before tags of 0xC000 and up.
+        var entries = new java.util.ArrayList<TestImages.Entry>();
+        entries.add(new TestImages.Entry(0x8825, 4, 1, null, List.of(
+                TestImages.Entry.ascii(1, "N"), TestImages.Entry.rationals(2, 51, 1, 28, 1, 3860, 100),
+                TestImages.Entry.ascii(3, "W"), TestImages.Entry.rationals(4, 0, 1, 0, 1, 140, 100))));
+        for (int i = 0; i < 400; i++) entries.add(TestImages.Entry.ascii(0xC000 + i, "value number " + i));
+        byte[] crowded = TestImages.withSegment(jpeg(), 0xE1, exifOf(TestImages.tiff(entries, null)));
+        data = ImageFileData.of(crowded, "EXIF data", 4096);
+        assertTrue(data.contains("EXIF:\nPlace where it was taken (GPS): 51.477389 N, 0.000389 W"), data);
+        assertTrue(data.contains("(The rest: more than this says of one file"), data);
+        assertTrue(data.length() < 4096 + 600, data.length() + ": " + data);
     }
 
     @Test
@@ -330,6 +343,51 @@ class ImageFileDataTest {
             }
         }
         assertTrue(System.nanoTime() - started < 60_000_000_000L, "ten thousand small files in a minute");
+    }
+
+    @Test
+    @DisplayName("the review's third round: a keyword of megabytes, Windows' quotes, Japanese cut at a probe, extended XMP past the bound, IPTC past the room")
+    void theThirdRound() throws Exception {
+        // A keyword longer than a PNG keyword may be: no keyword, the chunk said as text within the bound.
+        byte[] longKey = TestImages.withChunk(TestImages.png(8, 8), "tEXt", latin1("k".repeat(2_000_000) + "\0text"));
+        String data = ImageFileData.of(longKey, "text", 4096);
+        assertTrue(data.length() < 4096 + 600, data.length() + "");
+        assertTrue(data.contains("A text with no keyword, 2,000,005 bytes: more than this says of one file"), data);
+
+        // windows-1252, as Windows writes a caption: its quotes and dash are text.
+        byte[] caption = "“Café de la Paix” – Paris".getBytes(java.nio.charset.Charset.forName("windows-1252"));
+        byte[] iptc = TestImages.concat("Photoshop 3.0\0".getBytes(StandardCharsets.ISO_8859_1), resource(0x0404,
+                TestImages.concat(new byte[]{0x1C, 2, 120, 0, (byte) caption.length}, caption)));
+        data = ImageFileData.of(TestImages.withSegment(jpeg(), 0xED, iptc), "IPTC data");
+        assertTrue(data.contains("Caption/Abstract: “Café de la Paix” – Paris"), data);
+
+        // 9,000 bytes of Japanese after the end: text, though 4,096 cuts a character in two.
+        byte[] japanese = "日本語のテキスト".repeat(375).getBytes(StandardCharsets.UTF_8);
+        data = ImageFileData.of(TestImages.concat(jpeg(), japanese), "bytes after the picture's end");
+        assertTrue(data.contains("After the picture's end, as text:\n日本語のテキスト"), data.substring(0, Math.min(300, data.length())));
+
+        // Extended XMP of more than the bound: named and sized, its parts not kept.
+        byte[] photo = jpeg();
+        String guid = "0123456789ABCDEF0123456789ABCDEF";
+        for (int part = 0; part < 2; part++) {
+            var segment = new ByteArrayOutputStream();
+            segment.writeBytes(latin1("http://ns.adobe.com/xmp/extension/\0" + guid));
+            TestImages.int32(segment, 20_000);
+            TestImages.int32(segment, part * 10_000);
+            segment.writeBytes(latin1("x".repeat(10_000)));
+            photo = TestImages.withSegment(photo, 0xE1, segment.toByteArray());
+        }
+        data = ImageFileData.of(photo, "XMP data", 4096);
+        assertTrue(data.contains("XMP, continued (extended XMP), 20,000 bytes: more than this says of one file"), data);
+
+        // IPTC past the room: what fits, then the closing note -- no line claiming a short value is too long.
+        var datasets = new ByteArrayOutputStream();
+        for (int i = 0; i < 300; i++) datasets.writeBytes(dataset(2, 25, "keyword number " + i));
+        iptc = TestImages.concat("Photoshop 3.0\0".getBytes(StandardCharsets.ISO_8859_1), resource(0x0404, datasets.toByteArray()));
+        data = ImageFileData.of(TestImages.withSegment(jpeg(), 0xED, iptc), "IPTC data", 4096);
+        assertTrue(data.contains("IPTC:\nKeywords: keyword number 0\nKeywords: keyword number 1\n"), data);
+        assertTrue(data.contains("(The rest: more than this says of one file"), data);
+        assertFalse(data.contains("bytes, more than this says"), data);
     }
 
     // ── Files written here ──

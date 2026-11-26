@@ -95,14 +95,14 @@ public final class ImageFileData {
                     return;
                 }
                 case "tEXt" -> {
-                    int nul = indexOf(d, start, end, (byte) 0);
+                    int nul = keyEnd(d, start, end);
                     String key = nul < 0 ? "" : latin1(d, start, nul);
                     int from = nul < 0 ? start : nul + 1;
                     String label = nul < 0 ? "A text with no keyword" : "Text \"" + printable(key) + "\"";
                     if (out.roomFor(end - from, label)) said(key, label, text(d, from, end), out);
                 }
                 case "zTXt" -> {
-                    int nul = indexOf(d, start, end, (byte) 0);
+                    int nul = keyEnd(d, start, end);
                     if (nul < 0 || nul + 2 > end) {
                         out.section("A compressed text with no keyword, " + count(length) + ", not read.");
                     } else {
@@ -123,7 +123,7 @@ public final class ImageFileData {
                     }
                 }
                 case "iCCP" -> {
-                    int nul = indexOf(d, start, end, (byte) 0);
+                    int nul = keyEnd(d, start, end);
                     String name = nul < 0 ? "" : latin1(d, start, nul);
                     byte[] profile = nul < 0 || nul + 2 > end ? null : out.unpack(d, nul + 2, end, "Its colour profile");
                     out.section(colourProfile(name, profile, length));
@@ -143,20 +143,23 @@ public final class ImageFileData {
 
     /** An iTXt chunk: a keyword, whether it is compressed, a language, a translated keyword, UTF-8 text. */
     private static void itxt(byte[] d, int start, int end, Out out) {
-        int nul = indexOf(d, start, end, (byte) 0);
+        int nul = keyEnd(d, start, end);
         if (nul < 0 || nul + 3 > end) {
             out.section("A text with no keyword, " + count(end - start) + ", not read.");
             return;
         }
         String key = latin1(d, start, nul);
         boolean compressed = d[nul + 1] != 0;
-        int lang = indexOf(d, nul + 3, end, (byte) 0);
+        int lang = keyEnd(d, nul + 3, end);
         int translated = lang < 0 ? -1 : indexOf(d, lang + 1, end, (byte) 0);
         if (translated < 0) {
             out.section("A text \"" + printable(key) + "\" whose structure is broken, " + count(end - start) + ", not read.");
             return;
         }
-        String language = printable(latin1(d, nul + 3, lang)), translation = text(d, lang + 1, translated);
+        // Its keyword translated: a word or two. One longer is named by its size, not put in the label.
+        String language = printable(latin1(d, nul + 3, lang));
+        String translation = translated - lang - 1 <= 1024 ? text(d, lang + 1, translated)
+                : "a translated keyword of " + count(translated - lang - 1);
         String label = key.equals("XML:com.adobe.xmp") ? "XMP" : "Text \"" + printable(key) + "\""
                 + (translation.isBlank() ? "" : " (\"" + translation + "\")") + (language.isBlank() ? "" : ", in " + language);
         if (compressed) {
@@ -165,6 +168,15 @@ public final class ImageFileData {
         } else if (out.roomFor(end - translated - 1, label)) {
             said(key, label, text(d, translated + 1, end), out);
         }
+    }
+
+    /**
+     * Where a PNG keyword -- of a text, a colour profile, a language tag -- ends: the NUL within its
+     * first 80 bytes, as the format has a keyword of 1 to 79; -1 when there is none, and the part
+     * is broken. A keyword of 40 MB was decoded and copied a few times over before any check.
+     */
+    private static int keyEnd(byte[] d, int start, int end) {
+        return indexOf(d, start, Math.min(end, start + 80), (byte) 0);
     }
 
     /** A PNG text's bytes, as text or as what they are. */
@@ -226,6 +238,9 @@ public final class ImageFileData {
     private static void jpeg(byte[] d, Out out) {
         var icc = new TreeMap<Integer, byte[]>();
         var extended = new HashMap<String, TreeMap<Long, byte[]>>();
+        // Each extended XMP's whole size, by its GUID; its parts are kept only while they fit.
+        var extendedSize = new HashMap<String, Long>();
+        long[] kept = {0};
         int p = 2;
         try {
             while (p < d.length) {
@@ -252,7 +267,9 @@ public final class ImageFileData {
                     p = afterScan(d, end);
                     continue;
                 }
-                if (marker >= 0xE0 && marker <= 0xEF || marker == 0xFE) segment(marker, d, start, end, out, icc, extended);
+                if (marker >= 0xE0 && marker <= 0xEF || marker == 0xFE) {
+                    segment(marker, d, start, end, out, icc, extended, extendedSize, kept);
+                }
                 p = end;
             }
             out.section("The file ends before the picture's end.");
@@ -262,12 +279,12 @@ public final class ImageFileData {
                 icc.values().forEach(all::writeBytes);
                 out.section(colourProfile("", all.toByteArray(), all.size()));
             }
-            for (var parts : extended.values()) {
+            for (var guid : extendedSize.keySet()) {
                 var all = new ByteArrayOutputStream();
-                parts.values().forEach(all::writeBytes);
-                if (out.roomFor(all.size(), "XMP, continued (extended XMP)")) {
-                    out.block("XMP, continued (extended XMP):", text(all.toByteArray(), 0, all.size()));
-                }
+                extended.getOrDefault(guid, new TreeMap<>()).values().forEach(all::writeBytes);
+                String what = "XMP, continued (extended XMP)";
+                if (all.size() != extendedSize.get(guid)) out.roomFor(extendedSize.get(guid), what);
+                else if (out.roomFor(all.size(), what)) out.block(what + ":", text(all.toByteArray(), 0, all.size()));
             }
         }
     }
@@ -283,7 +300,7 @@ public final class ImageFileData {
     }
 
     private static void segment(int marker, byte[] d, int start, int end, Out out, TreeMap<Integer, byte[]> icc,
-                                Map<String, TreeMap<Long, byte[]>> extended) {
+                                Map<String, TreeMap<Long, byte[]>> extended, Map<String, Long> extendedSize, long[] kept) {
         int length = end - start;
         switch (marker) {
             case 0xE0 -> {
@@ -300,8 +317,16 @@ public final class ImageFileData {
                 } else if (starts(d, start, "http://ns.adobe.com/xmp/extension/\0") && length >= 35 + 40) {
                     String guid = latin1(d, start + 35, start + 67);
                     long offset = u32(d, start + 71, false);
-                    extended.computeIfAbsent(guid, k -> new TreeMap<>()).put(offset,
-                            java.util.Arrays.copyOfRange(d, start + 75, end));
+                    long n = end - start - 75;
+                    var parts = extended.computeIfAbsent(guid, k -> new TreeMap<>());
+                    // A part at an offset already read is the same part again: read once.
+                    if (!parts.containsKey(offset)) {
+                        extendedSize.merge(guid, n, Long::sum);
+                        if (kept[0] + n <= out.room()) {
+                            parts.put(offset, java.util.Arrays.copyOfRange(d, start + 75, end));
+                            kept[0] += n;
+                        }
+                    }
                 } else {
                     out.part("Data of another program (APP1)", d, start, end);
                 }
@@ -635,8 +660,8 @@ public final class ImageFileData {
                 continue;
             }
             if (bytes > lines.room()) {
-                lines.add(name + ": " + count(bytes) + ", more than this says of one file, not read here");
-                continue;
+                lines.stop();
+                break;
             }
             lines.add(name + ": " + value(t, kind, tag, type, count, value, gps, lines.room()));
         }
@@ -846,10 +871,13 @@ public final class ImageFileData {
             String name = record == 2 ? IPTC_NAMES.get(dataset) : null;
             if (record == 1 && dataset == 90) name = "Coded Character Set";
             if (name == null) name = "Dataset " + record + ":" + dataset;
-            String said = length > lines.room() ? null : readable(d, start, stop);
+            if (length > lines.room()) {
+                lines.stop();
+                break;
+            }
+            String said = readable(d, start, stop);
             lines.add(name + ": " + (said != null ? said : stop - start <= 16 ? hex(d, start, stop)
-                    : count(stop - start) + (length > lines.room() ? ", more than this says of one file, not read here"
-                    : " of binary data")));
+                    : count(stop - start) + " of binary data"));
             p = stop;
         }
         if (p < end && lines.isEmpty()) lines.add(count(end - p) + " in no form this reads");
@@ -951,7 +979,10 @@ public final class ImageFileData {
          * whatever its size, and is never decoded.
          */
         void part(String what, byte[] d, int from, int to) {
-            if (readable(d, from, Math.min(to, from + 4096)) == null) {
+            int probe = Math.min(to, from + 4096);
+            // Not inside a UTF-8 character: its first bytes alone are no text.
+            while (probe < to && probe > from && (d[probe] & 0xC0) == 0x80) probe--;
+            if (readable(d, from, probe) == null) {
                 section(what + ", " + count(to - from) + " of binary data.");
                 return;
             }
@@ -1043,16 +1074,22 @@ public final class ImageFileData {
         private int again;
         private boolean full;
 
+        /** To {@code room} characters, its heading and its closing note among them: those are kept room for. */
         Lines(long room) {
-            this.room = Math.max(0, room);
+            this.room = Math.max(0, room - 400);
         }
 
         long room() {
-            return Math.max(0, room - chars - 200);
+            return Math.max(0, room - chars);
         }
 
         boolean full() {
             return full;
+        }
+
+        /** No more: what is left is the closing note's. */
+        void stop() {
+            full = true;
         }
 
         boolean isEmpty() {
@@ -1071,9 +1108,12 @@ public final class ImageFileData {
             last = line;
         }
 
-        /** A line said before all the others: the place, which a model looks for first. */
+        /**
+         * A line said before all the others: the place, which a model looks for first -- said when the
+         * others filled the room too, from what is kept for the closing note and it.
+         */
         void first(String line) {
-            if (!fits(line)) return;
+            if (chars + line.length() + 1 > room + 200) return;
             lines.addFirst(line);
             chars += line.length() + 1;
         }
@@ -1120,16 +1160,22 @@ public final class ImageFileData {
         return sb.toString();
     }
 
-    /** Text a file declares as text: UTF-8 when it is that, else Latin-1; NULs at its end dropped, those inside a line break. */
+    /**
+     * Text a file declares as text: UTF-8 when it is that, else windows-1252 -- Latin-1 with the
+     * quotes and dashes Windows puts where Latin-1 has control characters; NULs at its end dropped,
+     * those inside a line break.
+     */
     static String text(byte[] d, int from, int to) {
         String s = strictUtf8(d, from, to);
-        return trimmed(s != null ? s : latin1(d, from, to));
+        return trimmed(s != null ? s : to <= from ? "" : new String(d, from, to - from, WINDOWS_1252));
     }
+
+    private static final java.nio.charset.Charset WINDOWS_1252 = java.nio.charset.Charset.forName("windows-1252");
 
     /**
      * Bytes a file holds, as text when they are text -- {@link #text}, of which at most one character
-     * in a hundred a control character -- else null: binary data. Latin-1 is read too, as IPTC writes
-     * a caption with no character set named: "Café", not "Café" as binary.
+     * in a hundred a control character -- else null: binary data. Latin text is read too, as IPTC
+     * writes a caption with no character set named: as text, not as binary.
      */
     static String readable(byte[] d, int from, int to) {
         String s = text(d, from, to);
