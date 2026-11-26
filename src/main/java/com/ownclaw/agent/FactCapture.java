@@ -774,9 +774,9 @@ final class FactCapture {
             "its", "můj", "moje", "naše", "a", "an");
 
     /** A word before a secret word that makes it no secret's: "error code", "status code", "GPIO pin", "exit code". */
-    private static final Set<String> NOT_A_SECRET = Set.of("error", "status", "fault", "exit", "return", "response", "http",
+    private static final Set<String> NOT_A_SECRET = Set.of("error", "status", "fault", "exit", "return", "response",
             "zip", "postal", "post", "area", "country", "source", "qr", "bar", "colour", "color", "chybový", "chybovým",
-            "stavový", "gpio", "foreign", "primary", "sort", "api", "hot", "shortcut", "music", "room", "piano");
+            "stavový", "gpio", "foreign", "primary", "sort", "hot", "shortcut", "music", "room", "piano");
 
     /**
      * The values the owner's messages and the answer call secrets, as written there -- read once a
@@ -813,7 +813,8 @@ final class FactCapture {
                 // passed over, the first content word after one is the value or there is none.
                 int i = w.end();
                 int limit = Math.min(text.length(), w.end() + AFTER_A_SECRET_WORD);
-                boolean lineEnded = false, copula = false, first = true;
+                boolean lineEnded = false, copula = false, first = true, afterFor = false;
+                String candidate = null;
                 while (i < limit) {
                     while (i < limit && Character.isWhitespace(text.charAt(i))) {
                         if (text.charAt(i) == '\n') lineEnded = true;
@@ -830,16 +831,23 @@ final class FactCapture {
                     if (raw.startsWith(":") || raw.startsWith("=")) copula = true;
                     if (token.isEmpty() || COPULAS.contains(lower) || FILLERS.contains(lower)) {
                         if (COPULAS.contains(lower) || raw.endsWith(":") || raw.endsWith("=")) copula = true;
+                        afterFor = Set.of("for", "pro", "k", "ke", "of", "od").contains(lower);
                         continue;
                     }
-                    if ((copula || first) && secretLike(token, quoted) && !lower.startsWith("gpio")) {
-                        out.add(lower);
+                    boolean like = secretLike(token, quoted) && !lower.startsWith("gpio");
+                    if (copula) {
+                        if (like) out.add(lower);
+                        candidate = null;
                         break;
                     }
-                    if (copula) break;
+                    // The first word, when no "is" follows -- "PIN 4711" -- and not what it is for:
+                    // "the key for kitchen-sensor2 is ..." names the device, not the key.
+                    if (first && like && !afterFor) candidate = lower;
                     first = false;
+                    afterFor = false;
                     if (raw.endsWith(":") || raw.endsWith("=")) copula = true;
                 }
+                if (candidate != null && !copula) out.add(candidate);
                 if (lineEnded && copula && i < text.length()) {
                     int start = i;
                     int end = start;
@@ -847,15 +855,20 @@ final class FactCapture {
                     String token = text.substring(start, end).replaceAll("^[\\p{Punct}„“”‘’«»]+|[\\p{Punct}„“”‘’«»]+$", "");
                     if (secretLike(token, false)) out.add(token.toLowerCase(Locale.ROOT));
                 }
-                // Its sentence: every word in it shaped like a credential. Each sentence once -- a
-                // match inside a sentence already read is not looked back from.
+                // Before it in its sentence: a word shaped like a credential followed by "is" or "as"
+                // -- "sunflower77 as the guest Wi-Fi password", "Kocour2024 is the router password".
+                // Each sentence once -- a match inside a sentence already read is not looked back from.
                 if (w.start() >= sentenceDone) {
-                    int from = sentenceStart(text, w.start(), sentenceDone), to = sentenceEnd(text, w.end());
-                    for (String t0 : text.substring(from, to).split("\\s+")) {
-                        String t = t0.replaceAll("^[\\p{Punct}„“”‘’«»]+|[\\p{Punct}„“”‘’«»]+$", "");
-                        if (credentialShaped(t) && !t.contains("://")) out.add(t.toLowerCase(Locale.ROOT));
+                    int from = sentenceStart(text, w.start(), sentenceDone);
+                    String[] words = text.substring(from, w.start()).split("\\s+");
+                    for (int k = 0; k + 1 < words.length; k++) {
+                        String t = words[k].replaceAll("^[\\p{Punct}„“”‘’«»]+|[\\p{Punct}„“”‘’«»]+$", "");
+                        String next = words[k + 1].toLowerCase(Locale.ROOT).replaceAll("[\\p{Punct}]+$", "");
+                        if (credentialShaped(t) && !t.contains("://") && (COPULAS.contains(next) || next.equals("as") || next.equals("jako"))) {
+                            out.add(t.toLowerCase(Locale.ROOT));
+                        }
                     }
-                    sentenceDone = Math.max(to, w.end());
+                    sentenceDone = Math.max(sentenceEnd(text, w.end()), w.end());
                 }
                 // A secret word in a comment: what stands before the comment on its line is its value.
                 int lineStart = w.start();
@@ -1082,10 +1095,13 @@ final class FactCapture {
             if (scheme == 0 || !w.substring(0, scheme).matches("[a-z][a-z0-9+.-]*") || w.indexOf("://", scheme + 3) >= 0) {
                 return DOUBT;
             }
-            if (w.startsWith("file://")) return null;   // a file of this machine
+            // A file of this machine: file:/// or file://localhost/. One with a host is that host's.
+            if (w.startsWith("file:///") || w.startsWith("file://localhost/")) return null;
             return hostPlace(urlHost(w.substring(scheme + 3)), true, known);
         }
-        if (w.startsWith("//") || w.startsWith("\\\\")) return hostPlace(urlHost(w.substring(2)), true, known);
+        if (w.startsWith("//") || w.startsWith("\\\\") || w.startsWith("/\\") || w.startsWith("\\/")) {
+            return hostPlace(urlHost(w.substring(2)), true, known);
+        }
         if (w.startsWith("/") || w.startsWith("~/") || w.startsWith("./") || w.startsWith("../")
                 || w.matches("[a-z]:\\\\.*")) {
             return null;   // a path of this machine
@@ -1096,18 +1112,23 @@ final class FactCapture {
             int end = rest.length();
             for (int k = 0; k < rest.length(); k++) {
                 char c = rest.charAt(k);
-                if (c == ':' || c == '/') { end = k; break; }
+                if (c == ':' || c == '/' || c == '?' || c == '#' || c == '&' || c == '=' || c == '\\') { end = k; break; }
             }
-            String place = hostPlace(rest.substring(0, end), false, known);
+            // A mail or a login host is no entity: notify.email is a domain, whatever HA calls notify.
+            String place = hostPlace(rest.substring(0, end), true, known);
             if (place != null) return place;
             return end < rest.length() ? placeIn(rest.substring(end + 1), known) : null;
         }
-        // An IPv6 address's zone -- %eth0 -- is no part of where it is.
-        String v6 = w.indexOf('%') > 0 && w.indexOf(':') >= 0 ? w.substring(0, w.indexOf('%')) : w;
-        if (v6.matches("[0-9a-f:]*:[0-9a-f:]*:[0-9a-f:.]*")) {
+        // An IPv6 address, its zone (%eth0), prefix length (/128) or fragment (#x) aside.
+        String v6 = w;
+        for (char c : new char[] {'%', '/', '#'}) {
+            int cut = v6.indexOf(c);
+            if (cut > 0 && v6.indexOf(':') >= 0 && v6.indexOf(':') < cut) v6 = v6.substring(0, cut);
+        }
+        if (hexColons(v6)) {
             if (ipv6Groups(v6) != null) return outsideV6(v6) && !sameHostIn(v6, known) ? v6 : null;
             if (!v6.equals(w)) return DOUBT;
-            if (w.matches("[0-9a-f]{2}(?::[0-9a-f]{2}){5}") || w.matches("\\d{1,2}(?::\\d{2}){1,2}")) return null;
+            if (w.matches("[0-9a-f]{2}(?::[0-9a-f]{2}){5}") || w.matches("\\d{1,2}(?::\\d{2}){1,2}(?:\\.\\d+)?")) return null;
             return DOUBT;
         }
         if (w.matches("\\d+(?:[.,:]\\d+)*")) {
@@ -1134,13 +1155,29 @@ final class FactCapture {
             }
             return placeIn(w.substring(0, cut), known);
         }
-        Matcher entity = Pattern.compile("([a-z_]+)\\.([\\p{L}\\p{N}_]+)").matcher(w);
-        if (entity.matches() && ENTITY_DOMAINS.contains(entity.group(1))) return null;
+        Matcher entity = Pattern.compile("(?:states\\.)?([a-z_]+)\\.([\\p{L}\\p{N}_]+)").matcher(w);
+        if (entity.matches() && ENTITY_DOMAINS.contains(entity.group(1))) return null;   // switch.garden, states.light.kitchen
         String name = trimmed(w);
         String[] labels = name.split("\\.", -1);
         for (String label : labels) if (label.isEmpty()) return DOUBT;
-        if (labels[labels.length - 1].chars().allMatch(Character::isDigit)) return DOUBT;   // dns_8.8.8.8
+        if (labels[labels.length - 1].chars().allMatch(Character::isDigit)) {
+            // A version -- python3.12, v2.0 -- unless an address stands in it: dns_8.8.8.8.
+            Matcher quad = Pattern.compile("(?<!\\d)(\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3})$").matcher(name);
+            if (quad.find()) return PLAIN_IPV4.matcher(quad.group(1)).matches() && !outside(quad.group(1), false) ? null : quad.group(1);
+            return null;
+        }
         return hostPlace(name, false, known);
+    }
+
+    /** Whether {@code w} is hex digits, colons and dots alone, with two colons or more: what an IPv6 address is written with. */
+    private static boolean hexColons(String w) {
+        int colons = 0;
+        for (int k = 0; k < w.length(); k++) {
+            char c = w.charAt(k);
+            if (c == ':') colons++;
+            else if (!(c >= '0' && c <= '9' || c >= 'a' && c <= 'f' || c == '.')) return false;
+        }
+        return colons >= 2;
     }
 
     /** Whether a word holds a character a place is written with. */
@@ -1257,10 +1294,18 @@ final class FactCapture {
         if (dot < 0) return false;   // nas, localhost: a name of his network
         // A Home Assistant entity -- switch.garden, light.kitchen -- is its domain and its name, and
         // .garden and .kitchen are internet domains too.
-        if (h.indexOf('.') == dot && ENTITY_DOMAINS.contains(h.substring(0, dot))) return false;
+        if (!inUrl && h.indexOf('.') == dot && ENTITY_DOMAINS.contains(h.substring(0, dot))) return false;
         for (String home : HOME_SUFFIXES) if (h.equals(home) || h.endsWith("." + home)) return false;
         String last = h.substring(dot + 1);
         if (TOP_LEVEL_DOMAINS.contains(last)) return true;
+        // A symbol in it -- "com👍" -- is no label a list names and none a reader takes for nothing.
+        for (int k = 0; k < last.length(); ) {
+            int c = last.codePointAt(k);
+            int t = Character.getType(c);
+            if (t == Character.OTHER_SYMBOL || t == Character.MODIFIER_SYMBOL || t == Character.CURRENCY_SYMBOL
+                    || t == Character.MATH_SYMBOL) return true;
+            k += Character.charCount(c);
+        }
         try {
             return TOP_LEVEL_DOMAINS.contains(java.net.IDN.toASCII(last, java.net.IDN.ALLOW_UNASSIGNED).toLowerCase(Locale.ROOT));
         } catch (IllegalArgumentException notADomain) {
